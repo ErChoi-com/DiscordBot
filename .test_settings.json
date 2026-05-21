@@ -1,0 +1,14 @@
+{
+  "channel_modes": {},
+  "channel_scrape_settings": {},
+  "channel_job_settings": {
+    "12345": {
+      "sites": [
+        "glassdoor",
+        "indeed"
+      ]
+    }
+  },
+  "channel_reddit_settings": {},
+  "channel_job_seen": {}
+}

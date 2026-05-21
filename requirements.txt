@@ -1,0 +1,7 @@
+discord.py
+requests
+beautifulsoup4
+python-jobspy>=1.1.82
+ftfy
+google-genai
+pdflatex
