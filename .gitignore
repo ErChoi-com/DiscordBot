@@ -24,6 +24,7 @@ env/
 ENV/
 .env
 env.bak/
+requirements-lock.txt
 
 # PyInstaller
 *.manifest
@@ -58,9 +59,14 @@ Thumbs.db
 # Runtime/state files
 .bot.lock
 .bot.pid
+.last_start.txt
 state.json
 *.state.json
+.bot_state*.json
+.tmp_*
+settings.toml
 .resume_cache/
+resumes_cache/
 
 # Message listing / deduplication files (runtime)
 .message_listing_*.json
