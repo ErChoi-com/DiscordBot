@@ -84,3 +84,22 @@ secrets.json
 
 # Misc
 node_modules/
+
+# Local ML models / weights
+models/sentence-transformers_all-MiniLM-L6-v2/
+models/**/pytorch_model.bin
+models/**/*.safetensors
+models/**/*.onnx
+models/**/*.pt
+models/**/*.pth
+models/**/*.ckpt
+models/**/*.gguf
+
+# Large archives / dataset dumps
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.tgz
+*.bz2
+*.xz
