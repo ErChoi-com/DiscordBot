@@ -22,21 +22,20 @@ Modular rebuild of the original Discord scraper bot.
 
 ## User Commands
 - `$hello2`
-- `$scrape <url>`
-- `$scrape <url> | <css selector>`
+- `/scrape <url>`
+- `/scrape <url> | <css selector>`
 - `$continue`
-- `$resume` when replying to a watcher job post
-- `$mode`, `$mode <name>`, `$modes`
+- `/resume` when replying to a watcher job post
 - `$settings`
-- `$jobsettings` (alias `$jobsinit`)
-- `$redditsettings`
+- `/jobsettings` (alias `/jobsinit`)
+- `/redditsettings`
 
 ## Notes
 - Job watching uses JobSpy and now defaults to `All supported sites` for the installed JobSpy version.
 - If you set `JOBSPY_PYTHON_EXE`, install the same `python-jobspy` version into that interpreter too.
 - Proxy lists rotate automatically per request attempt when `JOBSPY_PROXIES` or `REDDIT_PROXIES` are set.
-- For `$resume`, only the server owner can invoke the command.
-- For `$resume`, local source files live in `resumes/` as `.md` or `.txt` files.
+- For `/resume`, only the server owner can invoke the command.
+- For `/resume`, local source files live in `resumes/` as `.md` or `.txt` files.
 - Resume prompt/template scaffolding now lives under `src/services/resumes/resumes_cache/<discord_user_id>/` and auto-seeds `baseinfo.txt`, `instructions.txt`, `template.tex`, and `template.log` for each profile.
 - If the owner already has a named folder such as `src/services/resumes/resumes_cache/xboxsignout._`, set `MAIN_USER_PROFILE` to that folder name or leave it unset when it is the only seeded profile folder and the bot will infer it.
 - If Gemini returns a full LaTeX document inside `<latex>...</latex>`, the bot will compile it and upload the resulting PDF back to Discord.

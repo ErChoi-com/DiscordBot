@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import io
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,15 +10,37 @@ from typing import Any
 import discord
 
 from services import job_service
+from services.resumes.resume import compile_latex_to_pdf, ensure_profile_cache, resolve_discord_profile_key
 from state.store import MODE_DESCRIPTIONS, RuntimeStore
 from watchers.manager import WatcherManager
 
 
 RESUME_PROFILE_EDITABLE_FILES = ("baseinfo.txt", "instructions.txt")
 DISCORD_MODAL_TEXT_LIMIT = 4000
+DISCORD_TEXT_INPUT_LABEL_LIMIT = 45
 
 
 LAST_PANEL_OUTPUTS: dict[tuple[str, int], str] = {}
+
+
+def _sanitize_modal_text_input_labels(modal: discord.ui.Modal) -> list[int]:
+    """Normalize modal text-input labels to Discord's 1..45 char constraint."""
+    lengths: list[int] = []
+    for child in modal.children:
+        label = getattr(child, "label", None)
+        if not isinstance(label, str):
+            continue
+        normalized = label.strip() or "Field"
+        if len(normalized) > DISCORD_TEXT_INPUT_LABEL_LIMIT:
+            normalized = normalized[:DISCORD_TEXT_INPUT_LABEL_LIMIT]
+        if normalized != label:
+            try:
+                setattr(child, "label", normalized)
+            except Exception:
+                # If discord.py rejects runtime relabeling, keep the original and let send_modal fail loudly.
+                pass
+        lengths.append(len(getattr(child, "label", "") or ""))
+    return lengths
 
 
 def format_mode_summary(store: RuntimeStore, channel_id: int) -> str:
@@ -217,9 +241,9 @@ class ModeDropdownView(discord.ui.View):
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[Any]) -> None:
         log_interaction_failure("mode_dropdown_view.on_error", error)
         if not interaction.response.is_done():
-            await interaction.response.send_message("Interaction failed. Please run `$modes` and try again.", ephemeral=True)
+            await interaction.response.send_message("Interaction failed. Please run `.cmd` and try again.", ephemeral=True)
         else:
-            await interaction.followup.send("Interaction failed. Please run `$modes` and try again.", ephemeral=True)
+            await interaction.followup.send("Interaction failed. Please run `.cmd` and try again.", ephemeral=True)
 
 
 class MaxItemsDropdown(discord.ui.Select):
@@ -294,9 +318,9 @@ class ScrapeSettingsView(discord.ui.View):
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[Any]) -> None:
         log_interaction_failure("scrape_settings_view.on_error", error)
         if not interaction.response.is_done():
-            await interaction.response.send_message("Interaction failed. Please run `$scrapesettings` and try again.", ephemeral=True)
+            await interaction.response.send_message("Interaction failed. Please run `.scrapecfg` and try again.", ephemeral=True)
         else:
-            await interaction.followup.send("Interaction failed. Please run `$scrapesettings` and try again.", ephemeral=True)
+            await interaction.followup.send("Interaction failed. Please run `.scrapecfg` and try again.", ephemeral=True)
 
 
 class JobSourceDropdown(discord.ui.Select):
@@ -504,7 +528,8 @@ class JobExclusionTermsModal(discord.ui.Modal, title="Edit Job Exclusions"):
         self.exclusion_terms.default = ", ".join(exclusion_list) if exclusion_list else ""
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
+        # Modal submit interactions need a deferred channel message response.
+        await interaction.response.defer(thinking=True, ephemeral=True)
         raw_exclusions = str(self.exclusion_terms.value).strip()
         exclusion_list = [term.strip() for term in raw_exclusions.split(",") if term.strip()] if raw_exclusions else []
 
@@ -589,7 +614,8 @@ class TemplateEditModal(discord.ui.Modal, title="Edit template.tex"):
             self._truncated = True
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
+        # Modal submit interactions need a deferred channel message response.
+        await interaction.response.defer(thinking=True, ephemeral=True)
 
         if self._truncated:
             await interaction.followup.send(
@@ -612,7 +638,47 @@ class TemplateEditModal(discord.ui.Modal, title="Edit template.tex"):
             await interaction.followup.send(f"Failed to save template: {exc}", ephemeral=True)
             return
 
-        await interaction.followup.send("✅ Template updated successfully.", ephemeral=True)
+        preview_result = await self._build_preview_message(target)
+        if isinstance(preview_result, tuple):
+            preview_message, preview_file = preview_result
+        else:
+            preview_message, preview_file = str(preview_result), None
+
+        if preview_file is not None:
+            try:
+                await interaction.followup.send(preview_message, file=preview_file, ephemeral=True)
+                return
+            except TypeError:
+                # Test doubles may not support file uploads; fall back to text-only response.
+                pass
+
+        await interaction.followup.send(preview_message, ephemeral=True)
+
+    async def _build_preview_message(self, template_path: Path) -> str | tuple[str, discord.File]:
+        preview_log_path = self.profile_dir / "template.preview.log"
+
+        try:
+            template_text = template_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return f"Template updated successfully, but preview could not be read: {exc}"
+
+        compile_result = await asyncio.to_thread(
+            compile_latex_to_pdf,
+            template_text,
+            f"{self.profile_dir.name}-template-preview",
+            template_path,
+            preview_log_path,
+            True,
+        )
+        if compile_result.status != "ok" or not compile_result.pdf_bytes:
+            return (
+                "Template updated successfully, but preview generation failed: "
+                f"{compile_result.message}"
+            )
+
+        preview_name = f"{self.profile_dir.name}-template-preview.pdf"
+        preview_file = discord.File(io.BytesIO(compile_result.pdf_bytes), filename=preview_name)
+        return ("Template updated successfully. Preview PDF attached.", preview_file)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
         log_interaction_failure("template_edit_modal.on_error", error)
@@ -710,6 +776,9 @@ class ResumeInfoModal(discord.ui.Modal, title="Edit resume info"):
 
 
 class JobSettingsView(discord.ui.View):
+    RESUME_INFO_BUTTON_ID = "job_settings:resume_info"
+    TEMPLATE_BUTTON_ID = "job_settings:template"
+
     def __init__(
         self,
         store: RuntimeStore,
@@ -725,6 +794,8 @@ class JobSettingsView(discord.ui.View):
         self.channel_id = channel_id
         self.owner_id = owner_id
         self.resume_profile_dir = resume_profile_dir
+        self.resume_cache_root = resume_profile_dir.parent
+        self.resume_seed_profile_key = resume_profile_dir.name
         log_interaction_event(
             "job_settings_view.init",
             channel_id=channel_id,
@@ -738,15 +809,46 @@ class JobSettingsView(discord.ui.View):
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[Any]) -> None:
         log_interaction_failure("job_settings_view.on_error", error)
         if not interaction.response.is_done():
-            await interaction.response.send_message("Interaction failed. Please run `$jobsettings` and try again.", ephemeral=True)
+            await interaction.response.send_message("Interaction failed. Please run `.job` and try again.", ephemeral=True)
         else:
-            await interaction.followup.send("Interaction failed. Please run `$jobsettings` and try again.", ephemeral=True)
+            await interaction.followup.send("Interaction failed. Please run `.job` and try again.", ephemeral=True)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
+            custom_id = str(getattr(getattr(interaction, "data", {}), "get", lambda *_: "")("custom_id", ""))
+            if custom_id in {self.RESUME_INFO_BUTTON_ID, self.TEMPLATE_BUTTON_ID}:
+                return True
             await interaction.response.send_message("Only the menu owner can change settings.", ephemeral=True)
             return False
         return True
+
+    @staticmethod
+    def _interaction_profile_name(interaction: discord.Interaction) -> str | None:
+        user = getattr(interaction, "user", None)
+        if user is None:
+            return None
+        value = getattr(user, "name", None)
+        if isinstance(value, str) and value.strip():
+            return value
+        return None
+
+    async def _resolve_profile_dir_for_clicker(self, interaction: discord.Interaction) -> Path:
+        user_id = getattr(getattr(interaction, "user", None), "id", None)
+        if user_id is None:
+            return self.resume_profile_dir
+
+        profile_key = resolve_discord_profile_key(
+            user_id,
+            self._interaction_profile_name(interaction),
+            self.resume_cache_root,
+        )
+
+        return await asyncio.to_thread(
+            ensure_profile_cache,
+            profile_key,
+            self.resume_cache_root,
+            self.resume_seed_profile_key,
+        )
 
     @discord.ui.button(label="Edit text/results", style=discord.ButtonStyle.primary, row=4)
     async def edit_text(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -757,16 +859,31 @@ class JobSettingsView(discord.ui.View):
             user_id=getattr(getattr(interaction, "user", None), "id", None),
             message_id=getattr(getattr(interaction, "message", None), "id", None),
         )
-        await interaction.response.send_modal(JobTextModal(store=self.store, channel_id=self.channel_id, panel_message=interaction.message, parent_view=self))
+        modal = JobTextModal(store=self.store, channel_id=self.channel_id, panel_message=interaction.message, parent_view=self)
+        label_lengths = _sanitize_modal_text_input_labels(modal)
+        log_interaction_event(
+            "job_settings_view.edit_text.modal_labels",
+            channel_id=self.channel_id,
+            lengths=label_lengths,
+        )
+        await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Edit resume info", style=discord.ButtonStyle.secondary, row=4)
+    @discord.ui.button(
+        label="Edit resume info",
+        style=discord.ButtonStyle.secondary,
+        row=4,
+        custom_id=RESUME_INFO_BUTTON_ID,
+    )
     async def edit_resume_info(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        profile_dir = await self._resolve_profile_dir_for_clicker(interaction)
+        modal = ResumeInfoModal(
+            profile_dir=profile_dir,
+            panel_message=interaction.message,
+            parent_view=self,
+        )
+        _sanitize_modal_text_input_labels(modal)
         await interaction.response.send_modal(
-            ResumeInfoModal(
-                profile_dir=self.resume_profile_dir,
-                panel_message=interaction.message,
-                parent_view=self,
-            )
+            modal
         )
 
     @discord.ui.button(label="Start watcher", style=discord.ButtonStyle.success, row=4)
@@ -781,14 +898,22 @@ class JobSettingsView(discord.ui.View):
         self.manager.stop_job_watcher(self.channel_id)
         await interaction.response.edit_message(content=format_job_settings_summary(self.store, self.channel_id), view=self)
 
-    @discord.ui.button(label="Edit template", style=discord.ButtonStyle.green, row=4)
+    @discord.ui.button(
+        label="Edit template",
+        style=discord.ButtonStyle.green,
+        row=4,
+        custom_id=TEMPLATE_BUTTON_ID,
+    )
     async def edit_template(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        profile_dir = await self._resolve_profile_dir_for_clicker(interaction)
+        modal = TemplateEditModal(
+            profile_dir=profile_dir,
+            panel_message=interaction.message,
+            parent_view=self,
+        )
+        _sanitize_modal_text_input_labels(modal)
         await interaction.response.send_modal(
-            TemplateEditModal(
-                profile_dir=self.resume_profile_dir,
-                panel_message=interaction.message,
-                parent_view=self,
-            )
+            modal
         )
 
 
@@ -931,9 +1056,9 @@ class RedditSettingsView(discord.ui.View):
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[Any]) -> None:
         log_interaction_failure("reddit_settings_view.on_error", error)
         if not interaction.response.is_done():
-            await interaction.response.send_message("Interaction failed. Please run `$redditsettings` and try again.", ephemeral=True)
+            await interaction.response.send_message("Interaction failed. Please run `.reddit` and try again.", ephemeral=True)
         else:
-            await interaction.followup.send("Interaction failed. Please run `$redditsettings` and try again.", ephemeral=True)
+            await interaction.followup.send("Interaction failed. Please run `.reddit` and try again.", ephemeral=True)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:

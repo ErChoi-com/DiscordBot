@@ -6,10 +6,12 @@ from pathlib import Path
 from typing import Any
 
 import discord
+from discord.ext import commands
 
 from commands.handlers import CommandRouter
 from config import load_config
 from services import job_service
+from services.resumes.resume import migrate_legacy_profile_keys_with_usernames
 from state.store import RuntimeStore, init_store_defaults
 from watchers.manager import WatcherManager
 
@@ -17,7 +19,7 @@ from watchers.manager import WatcherManager
 def create_client() -> discord.Client:
     intents = discord.Intents.default()
     intents.message_content = True
-    return discord.Client(intents=intents)
+    return commands.Bot(command_prefix=commands.when_mentioned_or("."), intents=intents)
 
 
 def read_tracked_process_id(pid_path: Path) -> int | None:
@@ -119,7 +121,38 @@ def release_runtime_lock(lock_path: Path) -> None:
         pass
 
 
-def bind_client_events(client: discord.Client, watcher_manager: WatcherManager, router: CommandRouter) -> None:
+def bind_client_events(
+    client: discord.Client,
+    watcher_manager: WatcherManager,
+    router: CommandRouter,
+    sync_guild_id: int | None = None,
+    force_sync_once: bool = False,
+    force_sync_marker_path: Path | None = None,
+) -> None:
+    slash_synced = False
+
+    async def _learn_usernames_from_history(max_messages_per_channel: int = 200) -> dict[int, str]:
+        mapping: dict[int, str] = {}
+        for guild in client.guilds:
+            guild_me = getattr(guild, "me", None)
+            for channel in getattr(guild, "text_channels", []):
+                try:
+                    if guild_me is not None:
+                        perms = channel.permissions_for(guild_me)
+                        if not bool(getattr(perms, "read_message_history", False)):
+                            continue
+                    async for message in channel.history(limit=max_messages_per_channel):
+                        author = getattr(message, "author", None)
+                        user_id = getattr(author, "id", None)
+                        username = getattr(author, "name", None)
+                        if isinstance(user_id, int) and isinstance(username, str) and username.strip():
+                            mapping[user_id] = username.strip()
+                except (discord.Forbidden, discord.HTTPException):
+                    continue
+                except Exception:
+                    continue
+        return mapping
+
     def _append_interaction_trace(entry: str) -> None:
         try:
             trace_path = Path(__file__).resolve().parents[1] / ".interaction_trace.log"
@@ -128,10 +161,129 @@ def bind_client_events(client: discord.Client, watcher_manager: WatcherManager, 
         except OSError:
             pass
 
+    async def _run_slash_command(
+        interaction: discord.Interaction,
+        content: str,
+        *,
+        reference_message_id: int | None = None,
+    ) -> None:
+        await router.dispatch_interaction_command(
+            interaction,
+            content,
+            reference_message_id=reference_message_id,
+        )
+
+    @client.tree.command(name="commands", description="Show command cheat sheet")
+    async def slash_commands(interaction: discord.Interaction) -> None:
+        await _run_slash_command(interaction, "/commands")
+
+    @client.tree.command(name="status", description="Show watcher status for this channel")
+    async def slash_status(interaction: discord.Interaction) -> None:
+        await _run_slash_command(interaction, "/status")
+
+    @client.tree.command(name="resumebuild", description="Generate a tailored resume from a job listing message")
+    @discord.app_commands.describe(message_id="Job listing message ID from ErnestBot")
+    async def slash_resumebuild(interaction: discord.Interaction, message_id: int | None = None) -> None:
+        await _run_slash_command(interaction, "/resumebuild", reference_message_id=message_id)
+
+    @client.tree.command(name="resumecheck", description="Compile your current cached template into a PDF")
+    async def slash_resumecheck(interaction: discord.Interaction) -> None:
+        await _run_slash_command(interaction, "/resumecheck")
+
+    @client.tree.command(name="continue", description="Send next chunk of pending long output")
+    async def slash_continue(interaction: discord.Interaction) -> None:
+        await _run_slash_command(interaction, "/continue")
+
+    @client.tree.command(name="hello2", description="Quick hello test")
+    async def slash_hello(interaction: discord.Interaction) -> None:
+        await _run_slash_command(interaction, "/hello2")
+
+    @client.tree.command(name="jobsettings", description="Open job watcher settings panel")
+    async def slash_jobsettings(interaction: discord.Interaction) -> None:
+        await _run_slash_command(interaction, "/jobsettings")
+
+    @client.tree.command(name="jobsinit", description="Alias for jobsettings")
+    async def slash_jobsinit(interaction: discord.Interaction) -> None:
+        await _run_slash_command(interaction, "/jobsinit")
+
+    @client.tree.command(name="jobbanktest", description="Run a Job Bank test scrape with current settings")
+    async def slash_jobbanktest(interaction: discord.Interaction) -> None:
+        await _run_slash_command(interaction, "/jobbanktest")
+
+    @client.tree.command(name="jobbankfilters", description="Show, set, or clear additional Job Bank native filters")
+    @discord.app_commands.describe(query="Filter query text, or 'clear' to reset")
+    async def slash_jobbankfilters(interaction: discord.Interaction, query: str | None = None) -> None:
+        content = "/jobbankfilters" if not query else f"/jobbankfilters {query}"
+        await _run_slash_command(interaction, content)
+
+    @client.tree.command(name="redditsettings", description="Open Reddit watcher settings panel")
+    async def slash_redditsettings(interaction: discord.Interaction) -> None:
+        await _run_slash_command(interaction, "/redditsettings")
+
+    @client.tree.command(name="clearredditseen", description="Clear seen Reddit IDs for this channel")
+    async def slash_clearredditseen(interaction: discord.Interaction) -> None:
+        await _run_slash_command(interaction, "/clearredditseen")
+
+    @client.tree.command(name="resetredditseen", description="Alias for clearredditseen")
+    async def slash_resetredditseen(interaction: discord.Interaction) -> None:
+        await _run_slash_command(interaction, "/resetredditseen")
+
+    @client.tree.command(name="settings", description="Open scrape settings panel")
+    async def slash_settings(interaction: discord.Interaction) -> None:
+        await _run_slash_command(interaction, "/settings")
+
+    @client.tree.command(name="scrape", description="Run a one-time scrape")
+    @discord.app_commands.describe(url="URL to scrape", selector="Optional CSS selector")
+    async def slash_scrape(
+        interaction: discord.Interaction,
+        url: str,
+        selector: str | None = None,
+    ) -> None:
+        content = f"/scrape {url}"
+        if selector:
+            content = f"{content} | {selector}"
+        await _run_slash_command(interaction, content)
+
     @client.event
     async def on_ready() -> None:
+        nonlocal slash_synced
         restored = watcher_manager.restore_enabled_watchers()
         print("Restored scraper processes: " f"jobs={restored['job']}, reddit={restored['reddit']}")
+        if not slash_synced:
+            try:
+                if force_sync_once and sync_guild_id is not None:
+                    target_guild = discord.Object(id=sync_guild_id)
+                    # One-time forced refresh: clear guild-scoped commands and republish globals.
+                    client.tree.clear_commands(guild=target_guild)
+                    guild_synced = await client.tree.sync(guild=target_guild)
+                    print(
+                        "One-time force sync: cleared guild slash commands "
+                        f"for guild={sync_guild_id}; remaining guild commands={len(guild_synced)}."
+                    )
+
+                synced = await client.tree.sync()
+                print(f"Synced {len(synced)} global slash command(s).")
+                if force_sync_once and force_sync_marker_path is not None and force_sync_marker_path.exists():
+                    try:
+                        force_sync_marker_path.unlink(missing_ok=True)
+                        print(f"One-time force sync completed. Removed marker: {force_sync_marker_path.name}")
+                    except OSError as marker_exc:
+                        print(f"Could not remove force-sync marker: {marker_exc}")
+                slash_synced = True
+            except Exception as exc:
+                print(f"Failed to sync slash commands: {exc}")
+
+        try:
+            username_by_user_id = await _learn_usernames_from_history()
+            cache_root = Path(__file__).resolve().parent / "services" / "resumes" / "resumes_cache"
+            migrations = migrate_legacy_profile_keys_with_usernames(username_by_user_id, cache_root)
+            if migrations:
+                print(f"Migrated {len(migrations)} legacy resume profile folder(s) to username keys.")
+                for old_name, new_name in migrations:
+                    print(f"  {old_name} -> {new_name}")
+        except Exception as exc:
+            print(f"History-based username migration skipped: {exc}")
+
         print("Logged in as {0.user}".format(client))
 
     @client.event
@@ -148,7 +300,7 @@ def bind_client_events(client: discord.Client, watcher_manager: WatcherManager, 
             )
             return
 
-        if content.startswith("$"):
+        if content.startswith("."):
             print(f"Dispatching command from channel {message.channel.id}: {content}")
         await router.dispatch(message)
 
@@ -198,7 +350,33 @@ def run_bot() -> None:
     client = create_client()
     watcher_manager = WatcherManager(client=client, config=config, store=store)
     router = CommandRouter(client=client, config=config, store=store, watcher_manager=watcher_manager)
-    bind_client_events(client, watcher_manager, router)
+    watcher_manager.set_cheatsheet_ensurer(router.ensure_commands_cheatsheet_pinned)
+    sync_guild_id_raw = (
+        os.getenv("DISCORD_SYNC_GUILD_ID")
+        or os.getenv("DISCORD_GUILD_ID")
+        or "1116052711406841866"
+    )
+    try:
+        sync_guild_id = int(sync_guild_id_raw)
+    except (TypeError, ValueError):
+        sync_guild_id = None
+
+    force_sync_marker_path = config.base_dir / ".force_slash_sync_once"
+    force_sync_once = (
+        os.getenv("DISCORD_FORCE_SYNC_ONCE", "").strip() == "1"
+        or force_sync_marker_path.exists()
+    )
+    if force_sync_once:
+        print("One-time slash force sync is enabled for this startup.")
+
+    bind_client_events(
+        client,
+        watcher_manager,
+        router,
+        sync_guild_id=sync_guild_id,
+        force_sync_once=force_sync_once,
+        force_sync_marker_path=force_sync_marker_path,
+    )
 
     register_current_process(config.pid_path)
     try:

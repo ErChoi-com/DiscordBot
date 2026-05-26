@@ -712,11 +712,20 @@ def pick_proxy(proxy_pool: list[str], cursor: int) -> str | None:
 
 
 def build_keyword_variants(keywords: str) -> list[str]:
+    import re
     normalized = SPACE_PATTERN.sub(" ", str(keywords or "").strip())
     if not normalized:
         return ["jobs"]
 
-    tokens = [token for token in normalized.split(" ") if token]
+    # Regex to match quoted phrases or single words
+    token_pattern = re.compile(r'"([^"]+)"|(\S+)')
+    tokens = []
+    for match in token_pattern.finditer(normalized):
+        if match.group(1):
+            tokens.append(match.group(1))  # Quoted phrase
+        elif match.group(2):
+            tokens.append(match.group(2))  # Unquoted word
+
     if len(tokens) <= 1:
         return [normalized]
 
@@ -863,9 +872,9 @@ def normalize_requested_sites(site_names: list[str], configured_python_exe: str 
             normalized_sites.append(candidate)
 
     if "all" in normalized_sites:
-        normalized_sites = supported_jobspy_sites(configured_python_exe)
+        normalized_sites = all_supported_job_sites(configured_python_exe)
 
-    custom_sites = {JOBBANK_CANADA_SITE}
+    custom_sites = set(CUSTOM_SCRAPER_SITES)
     runtime_sites = set(jobspy_runtime_metadata(configured_python_exe).get("sites", ()))
     if runtime_sites:
         normalized_sites = [site for site in normalized_sites if site in runtime_sites or site in custom_sites]

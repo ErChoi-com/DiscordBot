@@ -5,7 +5,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from services.resumes.resume import infer_owner_profile_key
+from services.resumes.resume import EXAMPLE_PROFILE_KEY
 
 
 @dataclass(slots=True)
@@ -152,7 +152,7 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
     if main_user_profile_key:
         main_user_profile_key = str(main_user_profile_key).strip() or None
     if not main_user_profile_key:
-        main_user_profile_key = infer_owner_profile_key(resumes_cache_root)
+        main_user_profile_key = EXAMPLE_PROFILE_KEY
     openrouter_key = os.getenv("openRouter", env_values.get("openRouter"))
     groq_api_key = os.getenv(
         "GROQ_API_KEY",

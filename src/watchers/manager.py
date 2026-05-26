@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any, Awaitable
+from typing import Any, Awaitable, Callable
 
 import discord
 
@@ -21,16 +21,28 @@ class WatcherManager:
         self.channel_reddit_tasks: dict[int, asyncio.Task[Any]] = {}
         self.channel_active_process: dict[int, str] = {}
         self.channel_recent_messages: dict[int, str] = {}
+        self.cheatsheet_ensurer: Callable[[int, str], Awaitable[None]] | None = None
+
+    def set_cheatsheet_ensurer(self, ensurer: Callable[[int, str], Awaitable[None]] | None) -> None:
+        self.cheatsheet_ensurer = ensurer
+
+    def _schedule_cheatsheet_check(self, channel_id: int, sheet_kind: str) -> None:
+        if self.cheatsheet_ensurer is None:
+            return
+        asyncio.create_task(self.cheatsheet_ensurer(channel_id, sheet_kind))
 
     def dedup_months_threshold(self) -> int:
         return int(getattr(self.config, "dedup_months_threshold", job_service.DEDUP_MONTHS_THRESHOLD))
 
-    def remember_message(self, channel_id: int, content: str) -> None:
-        self.channel_recent_messages[channel_id] = content.strip()
 
-    async def should_skip_duplicate_message(self, channel_id: int, channel: Any, content: str) -> bool:
+    def remember_message(self, channel_id: int, content: str, watcher_type: str = "job") -> None:
+        key = (channel_id, watcher_type)
+        self.channel_recent_messages[key] = content.strip()
+
+    async def should_skip_duplicate_message(self, channel_id: int, channel: Any, content: str, watcher_type: str = "job") -> bool:
         normalized = content.strip()
-        remembered = self.channel_recent_messages.get(channel_id)
+        key = (channel_id, watcher_type)
+        remembered = self.channel_recent_messages.get(key)
         if remembered == normalized:
             return True
 
@@ -60,10 +72,11 @@ class WatcherManager:
         except Exception as exc:
             print(f"Watcher dedupe check failed: {exc}")
 
+
         return False
 
-    async def _is_duplicate_message(self, channel_id: int, channel: Any, content: str) -> bool:
-        listing_file = self.config.base_dir / f".message_listing_{channel_id}.json"
+    async def _is_duplicate_message(self, channel_id: int, channel: Any, content: str, watcher_type: str = "job") -> bool:
+        listing_file = self.config.base_dir / f".message_listing_{channel_id}_{watcher_type}.json"
         if job_service.check_and_record_message(
             content,
             listing_file,
@@ -71,20 +84,21 @@ class WatcherManager:
         ):
             return True
 
-        return await self.should_skip_duplicate_message(channel_id, channel, content)
+        return await self.should_skip_duplicate_message(channel_id, channel, content, watcher_type=watcher_type)
 
-    async def send_watcher_message(self, channel_id: int, content: str, check_duplicate: bool = True) -> bool:
+
+    async def send_watcher_message(self, channel_id: int, content: str, check_duplicate: bool = True, watcher_type: str = "job") -> bool:
         channel = self.client.get_channel(channel_id)
         if channel is None:
             return False
 
         text = content[:1900]
 
-        if check_duplicate and await self._is_duplicate_message(channel_id, channel, text):
+        if check_duplicate and await self._is_duplicate_message(channel_id, channel, text, watcher_type=watcher_type):
             return False
 
         await channel.send(text)
-        self.remember_message(channel_id, text)
+        self.remember_message(channel_id, text, watcher_type=watcher_type)
         return True
 
     async def send_reddit_gallery_message(self, channel_id: int, item: dict[str, Any]) -> bool:
@@ -100,11 +114,11 @@ class WatcherManager:
             if str(url).strip().startswith("http")
         ]
         if len(gallery_links) <= 1:
-            return await self.send_watcher_message(channel_id, f"{title}\n{str(item.get('link') or '')}".strip())
+            return await self.send_watcher_message(channel_id, f"{title}\n{str(item.get('link') or '')}".strip(), watcher_type="reddit")
 
         dedupe_key = "\n".join([title, permalink, *gallery_links])
 
-        if await self._is_duplicate_message(channel_id, channel, dedupe_key):
+        if await self._is_duplicate_message(channel_id, channel, dedupe_key, watcher_type="reddit"):
             return False
 
         embeds: list[discord.Embed] = []
@@ -118,7 +132,7 @@ class WatcherManager:
 
         text = f"{title}\n{permalink}".strip()
         await channel.send(content=(text or None), embeds=embeds)
-        self.remember_message(channel_id, dedupe_key)
+        self.remember_message(channel_id, dedupe_key, watcher_type="reddit")
         return True
 
     @staticmethod
@@ -301,12 +315,14 @@ class WatcherManager:
     def start_job_watcher(self, channel_id: int) -> bool:
         existing = self.channel_job_tasks.get(channel_id)
         if existing and not existing.done():
+            self._schedule_cheatsheet_check(channel_id, "job")
             return True
         if not self.acquire_channel_process(channel_id, "job_watcher"):
             return False
 
         self.store.update_job_setting(channel_id, "enabled", True)
         self.create_channel_task(self.channel_job_tasks, channel_id, "job_watcher", self._run_job_watcher(channel_id))
+        self._schedule_cheatsheet_check(channel_id, "job")
         return True
 
     def stop_job_watcher(self, channel_id: int) -> None:
@@ -320,12 +336,14 @@ class WatcherManager:
     def start_reddit_watcher(self, channel_id: int) -> bool:
         existing = self.channel_reddit_tasks.get(channel_id)
         if existing and not existing.done():
+            self._schedule_cheatsheet_check(channel_id, "reddit")
             return True
         if not self.acquire_channel_process(channel_id, "reddit_watcher"):
             return False
 
         self.store.update_reddit_setting(channel_id, "enabled", True)
         self.create_channel_task(self.channel_reddit_tasks, channel_id, "reddit_watcher", self._run_reddit_watcher(channel_id))
+        self._schedule_cheatsheet_check(channel_id, "reddit")
         return True
 
     def stop_reddit_watcher(self, channel_id: int) -> None:

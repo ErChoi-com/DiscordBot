@@ -1,0 +1,2 @@
+﻿DiscordBot	https://github.com/ErChoi-com/DiscordBot.git (fetch)
+DiscordBot	https://github.com/ErChoi-com/DiscordBot.git (push)

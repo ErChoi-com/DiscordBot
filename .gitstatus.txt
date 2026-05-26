@@ -1,0 +1,8 @@
+﻿ M README.md
+ M src/app.py
+ M src/commands/handlers.py
+ M src/services/scrape_service.py
+ M src/ui/views.py
+ M src/watchers/manager.py
+?? .branchinfo.txt
+?? .gitstatus.txt

@@ -14,7 +14,10 @@ LATEX_WRAPPER_PACKAGE = "pdflatex"
 RESUMES_CACHE_ROOT = Path(__file__).resolve().parent / "resumes_cache"
 TEMPLATE_PATH = RESUMES_CACHE_ROOT / "template.tex"
 PROFILE_ALLOWED_FILE_NAMES = ("baseinfo.txt", "instructions.txt", "template.tex")
+EXAMPLE_PROFILE_KEY = "example"
 LLM_PROVIDER_SWITCH_ORDER = ("gemini", "groq", "openrouter")
+MAX_PROFILE_NAME_PART_LEN = 80
+MAX_PROFILE_ID_PART_LEN = 80
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +77,8 @@ LATEX_TAG_PATTERN = re.compile(r"<latex>(.*?)</latex>", re.IGNORECASE | re.DOTAL
 LATEX_FENCE_PATTERN = re.compile(r"```(?:latex|tex)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 LATEX_DOCUMENT_PATTERN = re.compile(r"(\\documentclass[\s\S]*?\\end\{document\})", re.IGNORECASE)
 UNESCAPED_AMPERSAND_PATTERN = re.compile(r"(?<!\\)&")
+PROFILE_KEY_SANITIZE_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
+PROFILE_ID_SUFFIX_PATTERN = re.compile(r"^(?P<prefix>.+)-(?P<id>\d+)$")
 
 
 @dataclass(slots=True)
@@ -109,6 +114,141 @@ def profile_cache_dir(user_id: int | str, cache_root: Path = RESUMES_CACHE_ROOT)
 	return cache_root / str(user_id)
 
 
+def _sanitize_profile_key_component(value: str | None) -> str:
+	text = (value or "").strip()
+	if not text:
+		return "user"
+	# Keep the full username shape (including leading/trailing . and _) while
+	# replacing filesystem-unfriendly characters with '-'.
+	sanitized = PROFILE_KEY_SANITIZE_PATTERN.sub("-", text)
+	if not sanitized:
+		return "user"
+	return sanitized[:MAX_PROFILE_NAME_PART_LEN]
+
+
+def _sanitize_profile_id_component(value: int | str) -> str:
+	text = str(value).strip()
+	if not text:
+		return "0"
+	sanitized = PROFILE_KEY_SANITIZE_PATTERN.sub("-", text).strip("-._")
+	if not sanitized:
+		return "0"
+	return sanitized[:MAX_PROFILE_ID_PART_LEN]
+
+
+def discord_profile_key(user_id: int | str, username: str | None) -> str:
+	name_part = _sanitize_profile_key_component(username).lower()
+	return name_part
+
+
+def _legacy_name_from_id_suffixed_key(key: str, user_id: int | str) -> str | None:
+	id_suffix = f"-{_sanitize_profile_id_component(user_id)}"
+	if not key.endswith(id_suffix):
+		return None
+	base = key[: -len(id_suffix)].strip("-._")
+	if not base:
+		return None
+	return _sanitize_profile_key_component(base).lower()
+
+
+def _existing_profile_dirs_for_id(user_id: int | str, cache_root: Path) -> list[Path]:
+	if not cache_root.exists() or not cache_root.is_dir():
+		return []
+	id_suffix = f"-{_sanitize_profile_id_component(user_id)}"
+	return [
+		path
+		for path in sorted(cache_root.iterdir())
+		if path.is_dir() and path.name.endswith(id_suffix)
+	]
+
+
+def resolve_discord_profile_key(
+	user_id: int | str,
+	username: str | None,
+	cache_root: Path = RESUMES_CACHE_ROOT,
+) -> str:
+	preferred_key = discord_profile_key(user_id, username)
+	preferred_dir = profile_cache_dir(preferred_key, cache_root)
+	# Enforce: only allow username-based key, never fallback to legacy/ID-based/other keys.
+	if preferred_dir.exists() and preferred_dir.is_dir():
+		return preferred_key
+	# If the username-based folder does not exist, fail explicitly.
+	raise FileNotFoundError(
+		f"Resume cache for username '{preferred_key}' does not exist. "
+		f"Expected at: {preferred_dir}. "
+		"No fallback to legacy or ID-based cache is allowed. "
+		"Please create the folder and required files."
+	)
+
+
+def _extract_user_id_from_legacy_profile_key(profile_key: str) -> int | None:
+	key = profile_key.strip()
+	if not key:
+		return None
+	if key.isdigit():
+		try:
+			return int(key)
+		except ValueError:
+			return None
+
+	match = PROFILE_ID_SUFFIX_PATTERN.fullmatch(key)
+	if not match:
+		return None
+	try:
+		return int(match.group("id"))
+	except ValueError:
+		return None
+
+
+def migrate_legacy_profile_keys_with_usernames(
+	username_by_user_id: dict[int, str],
+	cache_root: Path = RESUMES_CACHE_ROOT,
+) -> list[tuple[str, str]]:
+	"""Rename legacy ID-based profile folders to username-only keys.
+
+	This only migrates directories that encode a numeric Discord ID either as
+	a pure numeric folder name (for example ``12345``) or with an ID suffix
+	(for example ``old-name-12345``). The destination folder is always derived
+	from the user's unique Discord username (``user.name``), sanitized through
+	``discord_profile_key``.
+	"""
+	if not cache_root.exists() or not cache_root.is_dir():
+		return []
+
+	migrations: list[tuple[str, str]] = []
+	for path in sorted(cache_root.iterdir()):
+		if not path.is_dir():
+			continue
+		if path.name == EXAMPLE_PROFILE_KEY:
+			continue
+
+		user_id = _extract_user_id_from_legacy_profile_key(path.name)
+		if user_id is None:
+			continue
+
+		username = username_by_user_id.get(user_id)
+		if not isinstance(username, str) or not username.strip():
+			continue
+
+		target_key = discord_profile_key(user_id, username)
+		if target_key == path.name:
+			continue
+
+		target_path = profile_cache_dir(target_key, cache_root)
+		if target_path.exists():
+			# Avoid destructive merges; keep existing and skip this rename.
+			continue
+
+		try:
+			path.rename(target_path)
+		except OSError:
+			continue
+
+		migrations.append((path.name, target_key))
+
+	return migrations
+
+
 def profile_cache_seed_ready(profile_dir: Path) -> bool:
 	return all((profile_dir / file_name).exists() for file_name in ("baseinfo.txt", "instructions.txt", "template.tex"))
 
@@ -116,7 +256,11 @@ def profile_cache_seed_ready(profile_dir: Path) -> bool:
 def infer_owner_profile_key(cache_root: Path = RESUMES_CACHE_ROOT) -> str | None:
 	if not cache_root.exists():
 		return None
-	all_profile_dirs = [path for path in sorted(cache_root.iterdir()) if path.is_dir()]
+	all_profile_dirs = [
+		path
+		for path in sorted(cache_root.iterdir())
+		if path.is_dir() and path.name != EXAMPLE_PROFILE_KEY
+	]
 	seeded_profile_dirs = [path for path in all_profile_dirs if profile_cache_seed_ready(path)]
 	if len(seeded_profile_dirs) == 1:
 		return seeded_profile_dirs[0].name
@@ -130,6 +274,10 @@ def resolve_profile_seed_dir(cache_root: Path = RESUMES_CACHE_ROOT, seed_profile
 		candidate = profile_cache_dir(seed_profile_key, cache_root)
 		if profile_cache_seed_ready(candidate):
 			return candidate
+
+	example_dir = profile_cache_dir(EXAMPLE_PROFILE_KEY, cache_root)
+	if profile_cache_seed_ready(example_dir):
+		return example_dir
 
 	for file_name in ("baseinfo.txt", "instructions.txt", "template.tex"):
 		if not (cache_root / file_name).exists():
@@ -150,23 +298,30 @@ def ensure_profile_cache(
 	seed_profile_key: int | str | None = None,
 ) -> Path:
 	cache_root.mkdir(parents=True, exist_ok=True)
+	example_dir = profile_cache_dir(EXAMPLE_PROFILE_KEY, cache_root)
+	missing_example_files = [
+		file_name
+		for file_name in PROFILE_ALLOWED_FILE_NAMES
+		if not (example_dir / file_name).exists()
+	]
+	if missing_example_files:
+		missing_display = ", ".join(missing_example_files)
+		raise FileNotFoundError(
+			f"Missing example seed files in '{example_dir}': {missing_display}"
+		)
+
 	profile_dir = profile_cache_dir(user_id, cache_root)
 	profile_dir.mkdir(parents=True, exist_ok=True)
-	seed_dir = resolve_profile_seed_dir(cache_root, seed_profile_key)
 	_purge_unexpected_profile_entries(profile_dir)
+
 
 	for file_name in PROFILE_ALLOWED_FILE_NAMES:
 		target_path = profile_dir / file_name
 		if target_path.exists():
 			continue
-		seed_path = seed_dir / file_name
-		if seed_path.exists() and seed_path.is_file():
-			try:
-				target_path.write_text(seed_path.read_text(encoding="utf-8"), encoding="utf-8")
-			except OSError:
-				target_path.touch()
-		else:
-			target_path.touch()
+		seed_path = example_dir / file_name
+		# Copy seed files as raw bytes so profile templates stay byte-identical to example.
+		shutil.copyfile(seed_path, target_path)
 
 	_purge_unexpected_profile_entries(profile_dir)
 

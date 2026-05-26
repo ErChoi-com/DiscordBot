@@ -9,7 +9,12 @@ from bs4 import BeautifulSoup
 
 
 def parse_scrape_command(content: str) -> tuple[str, str | None]:
-    payload = content[len("$scrape") :].strip()
+    stripped = content.strip()
+    payload = ""
+    for prefix in (".scrape",):
+        if stripped.lower().startswith(prefix):
+            payload = stripped[len(prefix) :].strip()
+            break
     if not payload:
         raise ValueError("Missing URL")
     if "|" in payload:

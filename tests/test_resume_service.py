@@ -4,6 +4,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -21,9 +22,12 @@ from services.resumes.listing import (
 from services.resumes.resume import (
     check_template_compile_environment,
     compile_latex_to_pdf,
+    discord_profile_key,
     ensure_profile_cache,
     extract_latex_document,
     extract_template_requirements,
+    migrate_legacy_profile_keys_with_usernames,
+    resolve_discord_profile_key,
     sanitize_latex_document_for_compile,
 )
 
@@ -98,7 +102,7 @@ def test_load_config_reads_main_user_id(tmp_path: Path) -> None:
     assert config.main_user_id == 123456789
 
 
-def test_load_config_infers_named_owner_profile(tmp_path: Path) -> None:
+def test_load_config_defaults_profile_to_example_even_with_named_owner_profile(tmp_path: Path) -> None:
     cache_root = tmp_path / "src" / "services" / "resumes" / "resumes_cache" / "xboxsignout._"
     cache_root.mkdir(parents=True)
     (cache_root / "baseinfo.txt").write_text("base info", encoding="utf-8")
@@ -107,16 +111,16 @@ def test_load_config_infers_named_owner_profile(tmp_path: Path) -> None:
 
     config = load_config(tmp_path)
 
-    assert config.main_user_profile_key == "xboxsignout._"
+    assert config.main_user_profile_key == "example"
 
 
-def test_load_config_infers_named_owner_profile_from_empty_folder(tmp_path: Path) -> None:
+def test_load_config_defaults_profile_to_example_with_empty_named_owner_folder(tmp_path: Path) -> None:
     cache_root = tmp_path / "src" / "services" / "resumes" / "resumes_cache" / "xboxsignout._"
     cache_root.mkdir(parents=True)
 
     config = load_config(tmp_path)
 
-    assert config.main_user_profile_key == "xboxsignout._"
+    assert config.main_user_profile_key == "example"
 
 
 def test_extract_job_context_requires_a_url() -> None:
@@ -142,10 +146,11 @@ def test_load_resume_source_bundle_reads_resume_folder(tmp_path: Path) -> None:
 
 def test_ensure_profile_cache_creates_seeded_user_folder(tmp_path: Path) -> None:
     cache_root = tmp_path / "resumes_cache"
-    cache_root.mkdir()
-    (cache_root / "baseinfo.txt").write_text("base info", encoding="utf-8")
-    (cache_root / "instructions.txt").write_text("instructions", encoding="utf-8")
-    (cache_root / "template.tex").write_text("\\documentclass{article}", encoding="utf-8")
+    example_dir = cache_root / "example"
+    example_dir.mkdir(parents=True)
+    (example_dir / "baseinfo.txt").write_text("base info", encoding="utf-8")
+    (example_dir / "instructions.txt").write_text("instructions", encoding="utf-8")
+    (example_dir / "template.tex").write_text("\\documentclass{article}", encoding="utf-8")
 
     profile_dir = ensure_profile_cache(12345, cache_root=cache_root)
 
@@ -155,28 +160,55 @@ def test_ensure_profile_cache_creates_seeded_user_folder(tmp_path: Path) -> None
     assert (profile_dir / "template.tex").read_text(encoding="utf-8") == "\\documentclass{article}"
 
 
-def test_ensure_profile_cache_seeds_from_named_owner_folder(tmp_path: Path) -> None:
+def test_ensure_profile_cache_ignores_named_owner_when_example_exists(tmp_path: Path) -> None:
     cache_root = tmp_path / "resumes_cache"
     owner_dir = cache_root / "xboxsignout._"
+    example_dir = cache_root / "example"
     owner_dir.mkdir(parents=True)
+    example_dir.mkdir(parents=True)
     (owner_dir / "baseinfo.txt").write_text("owner base info", encoding="utf-8")
     (owner_dir / "instructions.txt").write_text("owner instructions", encoding="utf-8")
-    (owner_dir / "template.tex").write_text("\\documentclass{article}", encoding="utf-8")
+    (owner_dir / "template.tex").write_text("owner template", encoding="utf-8")
+    (example_dir / "baseinfo.txt").write_text("example base info", encoding="utf-8")
+    (example_dir / "instructions.txt").write_text("example instructions", encoding="utf-8")
+    (example_dir / "template.tex").write_text("example template", encoding="utf-8")
 
     profile_dir = ensure_profile_cache(12345, cache_root=cache_root, seed_profile_key="xboxsignout._")
 
     assert profile_dir == cache_root / "12345"
-    assert (profile_dir / "baseinfo.txt").read_text(encoding="utf-8") == "owner base info"
-    assert (profile_dir / "instructions.txt").read_text(encoding="utf-8") == "owner instructions"
-    assert (profile_dir / "template.tex").read_text(encoding="utf-8") == "\\documentclass{article}"
+    assert (profile_dir / "baseinfo.txt").read_text(encoding="utf-8") == "example base info"
+    assert (profile_dir / "instructions.txt").read_text(encoding="utf-8") == "example instructions"
+    assert (profile_dir / "template.tex").read_text(encoding="utf-8") == "example template"
+
+
+def test_ensure_profile_cache_prefers_example_folder_over_owner_seed(tmp_path: Path) -> None:
+    cache_root = tmp_path / "resumes_cache"
+    owner_dir = cache_root / "xboxsignout._"
+    example_dir = cache_root / "example"
+    owner_dir.mkdir(parents=True)
+    example_dir.mkdir(parents=True)
+    (owner_dir / "baseinfo.txt").write_text("owner base info", encoding="utf-8")
+    (owner_dir / "instructions.txt").write_text("owner instructions", encoding="utf-8")
+    (owner_dir / "template.tex").write_text("owner template", encoding="utf-8")
+    (example_dir / "baseinfo.txt").write_text("example base info", encoding="utf-8")
+    (example_dir / "instructions.txt").write_text("example instructions", encoding="utf-8")
+    (example_dir / "template.tex").write_text("example template", encoding="utf-8")
+
+    profile_dir = ensure_profile_cache(12345, cache_root=cache_root, seed_profile_key="xboxsignout._")
+
+    assert profile_dir == cache_root / "12345"
+    assert (profile_dir / "baseinfo.txt").read_text(encoding="utf-8") == "example base info"
+    assert (profile_dir / "instructions.txt").read_text(encoding="utf-8") == "example instructions"
+    assert (profile_dir / "template.tex").read_text(encoding="utf-8") == "example template"
 
 
 def test_ensure_profile_cache_purges_unexpected_entries(tmp_path: Path) -> None:
     cache_root = tmp_path / "resumes_cache"
-    cache_root.mkdir()
-    (cache_root / "baseinfo.txt").write_text("base info", encoding="utf-8")
-    (cache_root / "instructions.txt").write_text("instructions", encoding="utf-8")
-    (cache_root / "template.tex").write_text("\\documentclass{article}", encoding="utf-8")
+    example_dir = cache_root / "example"
+    example_dir.mkdir(parents=True)
+    (example_dir / "baseinfo.txt").write_text("base info", encoding="utf-8")
+    (example_dir / "instructions.txt").write_text("instructions", encoding="utf-8")
+    (example_dir / "template.tex").write_text("\\documentclass{article}", encoding="utf-8")
 
     profile_dir = cache_root / "12345"
     profile_dir.mkdir()
@@ -187,6 +219,147 @@ def test_ensure_profile_cache_purges_unexpected_entries(tmp_path: Path) -> None:
     ensure_profile_cache(12345, cache_root=cache_root)
 
     assert sorted(path.name for path in profile_dir.iterdir()) == ["baseinfo.txt", "instructions.txt", "template.tex"]
+
+
+def test_ensure_profile_cache_raises_when_example_missing_required_files(tmp_path: Path) -> None:
+    cache_root = tmp_path / "resumes_cache"
+    example_dir = cache_root / "example"
+    example_dir.mkdir(parents=True)
+    (example_dir / "baseinfo.txt").write_text("base info", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError):
+        ensure_profile_cache(12345, cache_root=cache_root)
+
+
+def test_ensure_profile_cache_copies_template_as_exact_bytes(tmp_path: Path) -> None:
+    cache_root = tmp_path / "resumes_cache"
+    example_dir = cache_root / "example"
+    example_dir.mkdir(parents=True)
+    (example_dir / "baseinfo.txt").write_text("base info", encoding="utf-8")
+    (example_dir / "instructions.txt").write_text("instructions", encoding="utf-8")
+
+    # Use explicit CRLF and mixed bytes to verify no newline/encoding normalization occurs.
+    template_bytes = b"\\documentclass{article}\r\n% keep exact bytes\r\n\\begin{document}\r\n\\end{document}\r\n"
+    (example_dir / "template.tex").write_bytes(template_bytes)
+
+    profile_dir = ensure_profile_cache(12345, cache_root=cache_root)
+
+    assert (profile_dir / "template.tex").read_bytes() == template_bytes
+
+
+def test_ensure_profile_cache_preserves_existing_template(tmp_path: Path) -> None:
+    cache_root = tmp_path / "resumes_cache"
+    example_dir = cache_root / "example"
+    example_dir.mkdir(parents=True)
+    (example_dir / "baseinfo.txt").write_text("base info", encoding="utf-8")
+    (example_dir / "instructions.txt").write_text("instructions", encoding="utf-8")
+    (example_dir / "template.tex").write_text("example template", encoding="utf-8")
+
+    profile_dir = cache_root / "12345"
+    profile_dir.mkdir()
+    (profile_dir / "template.tex").write_text("custom template", encoding="utf-8")
+
+    ensure_profile_cache(12345, cache_root=cache_root)
+
+    assert (profile_dir / "template.tex").read_text(encoding="utf-8") == "custom template"
+
+
+def test_discord_profile_key_uses_username_prefix() -> None:
+    assert discord_profile_key(12345, "Ernest Choi") == "ernest-choi"
+
+
+def test_discord_profile_key_truncates_long_username_component() -> None:
+    long_username = "A" * 400
+
+    key = discord_profile_key(12345, long_username)
+
+    assert len(key) <= 80
+
+
+def test_discord_profile_key_preserves_trailing_dot_underscore() -> None:
+    assert discord_profile_key(12345, "xboxsignout._") == "xboxsignout._"
+
+
+def test_resolve_discord_profile_key_migrates_legacy_numeric_dir(tmp_path: Path) -> None:
+
+    def test_resolve_discord_profile_key_fails_if_username_folder_missing(tmp_path: Path) -> None:
+        cache_root = tmp_path / "resumes_cache"
+        # No folder for the username-based key
+        with pytest.raises(FileNotFoundError) as excinfo:
+            resolve_discord_profile_key(555, "Alpha User", cache_root)
+        assert "Resume cache for username" in str(excinfo.value)
+        # Create a legacy numeric folder, should still fail
+        legacy_dir = cache_root / "555"
+        legacy_dir.mkdir(parents=True)
+        with pytest.raises(FileNotFoundError):
+            resolve_discord_profile_key(555, "Alpha User", cache_root)
+    cache_root = tmp_path / "resumes_cache"
+    legacy_dir = cache_root / "12345"
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "baseinfo.txt").write_text("base", encoding="utf-8")
+
+    key = resolve_discord_profile_key(12345, "Ernest Choi", cache_root)
+
+    assert key == "ernest-choi"
+    assert not legacy_dir.exists()
+    assert (cache_root / key / "baseinfo.txt").read_text(encoding="utf-8") == "base"
+
+
+def test_resolve_discord_profile_key_reuses_existing_username_based_dir_on_rename(tmp_path: Path) -> None:
+    cache_root = tmp_path / "resumes_cache"
+    old_key = "oldname-12345"
+    old_dir = cache_root / old_key
+    old_dir.mkdir(parents=True)
+    (old_dir / "baseinfo.txt").write_text("base", encoding="utf-8")
+
+    key = resolve_discord_profile_key(12345, "New Name", cache_root)
+
+    assert key == "new-name"
+    assert not old_dir.exists()
+    assert (cache_root / key / "baseinfo.txt").read_text(encoding="utf-8") == "base"
+
+
+def test_resolve_discord_profile_key_uses_existing_username_based_dir_when_preferred_collides_with_file(tmp_path: Path) -> None:
+    cache_root = tmp_path / "resumes_cache"
+    existing_dir = cache_root / "legacy-name-12345"
+    existing_dir.mkdir(parents=True)
+    preferred_key = "new-name"
+    preferred_path = cache_root / preferred_key
+    preferred_path.parent.mkdir(parents=True, exist_ok=True)
+    preferred_path.write_text("collision", encoding="utf-8")
+
+    key = resolve_discord_profile_key(12345, "New Name", cache_root)
+
+    assert key == "legacy-name"
+
+
+def test_migrate_legacy_profile_keys_with_usernames_renames_numeric_and_id_suffix_dirs(tmp_path: Path) -> None:
+    cache_root = tmp_path / "resumes_cache"
+    numeric_dir = cache_root / "555"
+    suffixed_dir = cache_root / "old-user-777"
+    numeric_dir.mkdir(parents=True)
+    suffixed_dir.mkdir(parents=True)
+
+    mapping = {555: "Alpha User", 777: "Beta.User"}
+    migrations = migrate_legacy_profile_keys_with_usernames(mapping, cache_root)
+
+    assert (cache_root / "alpha-user").exists()
+    assert (cache_root / "beta.user").exists()
+    assert sorted(migrations) == [("555", "alpha-user"), ("old-user-777", "beta.user")]
+
+
+def test_migrate_legacy_profile_keys_with_usernames_skips_when_target_exists(tmp_path: Path) -> None:
+    cache_root = tmp_path / "resumes_cache"
+    legacy_dir = cache_root / "old-user-777"
+    target_dir = cache_root / "beta"
+    legacy_dir.mkdir(parents=True)
+    target_dir.mkdir(parents=True)
+
+    migrations = migrate_legacy_profile_keys_with_usernames({777: "beta"}, cache_root)
+
+    assert migrations == []
+    assert legacy_dir.exists()
+    assert target_dir.exists()
 
 
 class _FakeCache:
@@ -298,7 +471,7 @@ def test_check_template_compile_environment_reports_missing_binary(monkeypatch, 
     template_path.write_text("\\documentclass{article}\n", encoding="utf-8")
 
     monkeypatch.setattr("services.resumes.resume.importlib.util.find_spec", lambda name: object())
-    monkeypatch.setattr("services.resumes.resume.shutil.which", lambda name: None)
+    monkeypatch.setattr("services.resumes.resume._find_latex_executable", lambda name: None)
 
     status = check_template_compile_environment(template_path)
 
