@@ -1797,6 +1797,62 @@ def test_generate_resume_rewrite_falls_back_to_groq_when_no_gemini_or_openrouter
     assert post_calls[0] == GROQ_CHAT_COMPLETIONS_URL
 
 
+def test_sanitize_latex_document_fixes_resume_subheading_with_3_args() -> None:
+    """\\resumeSubheading with only 3 args must be padded to 4 empty groups."""
+    source = (
+        "\\section{Experience}\n"
+        "\\resumeSubHeadingListStart\n"
+        "\\resumeSubheading{Software Engineer}{2020--2022}{Acme Corp}\n"
+        "\\resumeSubHeadingListEnd\n"
+    )
+    fixed = sanitize_latex_document_for_compile(source)
+    assert "\\resumeSubheading{Software Engineer}{2020--2022}{Acme Corp}{}" in fixed
+
+
+def test_sanitize_latex_document_keeps_resume_subheading_with_4_args() -> None:
+    """\\resumeSubheading with the correct 4 args must not be modified."""
+    source = (
+        "\\resumeSubheading{Software Engineer}{2020--2022}{Acme Corp}{Toronto, ON}\n"
+    )
+    fixed = sanitize_latex_document_for_compile(source)
+    assert "\\resumeSubheading{Software Engineer}{2020--2022}{Acme Corp}{Toronto, ON}" in fixed
+
+
+def test_sanitize_latex_document_removes_duplicate_preamble() -> None:
+    """A duplicate \\documentclass (LLM regeneration) must drop the first preamble."""
+    source = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "garbage from first attempt\n"
+        "\\documentclass{article}\n"
+        "\\usepackage{hyperref}\n"
+        "\\begin{document}\n"
+        "real content\n"
+        "\\end{document}\n"
+    )
+    fixed = sanitize_latex_document_for_compile(source)
+    assert "garbage from first attempt" not in fixed
+    assert "real content" in fixed
+    assert fixed.count("\\documentclass") == 1
+
+
+def test_close_unclosed_explicit_itemize_on_truncation() -> None:
+    """Truncated \\begin{itemize} without \\end{itemize} must be auto-closed."""
+    source = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "\\begin{itemize}\n"
+        "  \\item First\n"
+        "  \\item Second\n"
+        "\\end{document}\n"
+    )
+    fixed = sanitize_latex_document_for_compile(source)
+    assert fixed.count("\\end{itemize}") == 1
+    end_pos = fixed.index("\\end{document}")
+    close_pos = fixed.index("\\end{itemize}")
+    assert close_pos < end_pos, "\\end{itemize} must appear before \\end{document}"
+
+
 def test_generate_resume_rewrite_reports_error_when_all_providers_fail(
     monkeypatch, tmp_path: Path
 ) -> None:

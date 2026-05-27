@@ -135,6 +135,7 @@ LATEX_MISSING_STYLE_PATTERN = re.compile(r"File\s+`([^`]+\.sty)'\s+not\s+found|F
 GLYPHTOUNICODE_INPUT_PATTERN = re.compile(r"^\s*\\input\{glyphtounicode\}\s*$", re.IGNORECASE)
 PDF_GLYPH_UNICODE_PATTERN = re.compile(r"^\s*\\pdfglyphtounicode\b.*$", re.IGNORECASE)
 PDF_GENTOUNICODE_PATTERN = re.compile(r"^\s*\\pdfgentounicode\b.*$", re.IGNORECASE)
+RESUME_SUBHEADING_MACRO_PATTERN = re.compile(r"\\resumeSubheading\s*(?=\{)")
 # Repair cases like "\textbf{Honours and Scholarship\section..." while
 # preserving valid style openings such as "\textbf{\scshape Name}".
 INLINE_TEXT_COMMAND_RUNAWAY_PATTERN = re.compile(
@@ -971,6 +972,9 @@ def sanitize_latex_document_for_compile(
 	if not latex_document:
 		return latex_document
 
+	# Remove duplicate preambles before all other processing.
+	latex_document = _remove_duplicate_begin_document(latex_document)
+
 	if normalize_json_escaped_latex:
 		latex_document = _normalize_escaped_latex_document(latex_document)
 
@@ -980,6 +984,9 @@ def sanitize_latex_document_for_compile(
 	latex_document = _close_small_itemize_group_brace(latex_document)
 	latex_document = _drop_orphan_lowercase_fragments(latex_document)
 	latex_document = _normalize_unclosed_resume_lists(latex_document)
+
+	# Ensure \resumeSubheading always has exactly 4 argument groups.
+	latex_document = _fix_resume_subheading_arg_count(latex_document)
 
 	# Correct malformed \end{document>} and similar LLM typos.
 	latex_document = _fix_malformed_end_document(latex_document)
@@ -1034,6 +1041,91 @@ def _escape_unescaped_ampersands_outside_tabular(latex_document: str) -> str:
 		sanitized_lines.append(UNESCAPED_AMPERSAND_PATTERN.sub(r"\\&", line))
 
 	return "\n".join(sanitized_lines)
+
+
+def _parse_brace_group(text: str, pos: int) -> tuple[str, int] | None:
+	"""Parse one {}-delimited group starting at text[pos]. Returns (group_text, end_pos) or None."""
+	if pos >= len(text) or text[pos] != "{":
+		return None
+	depth = 0
+	i = pos
+	while i < len(text):
+		ch = text[i]
+		if ch == "\\" and i + 1 < len(text):
+			i += 2
+			continue
+		if ch == "{":
+			depth += 1
+		elif ch == "}":
+			depth -= 1
+			if depth == 0:
+				return text[pos : i + 1], i + 1
+		i += 1
+	return None
+
+
+def _fix_resume_subheading_arg_count(latex_document: str) -> str:
+	"""Pad \\resumeSubheading to exactly 4 {{}} groups when the LLM emitted fewer.
+
+	\\resumeSubheading is defined with [4] arguments: {Title}{Dates}{Company}{Location}.
+	LLMs often omit the final argument (location), causing LaTeX to consume the
+	next brace group as the missing arg and producing broken table layout or a
+	runaway-argument error.  When 1-3 groups are detected, empty groups are appended.
+	"""
+	if "\\resumeSubheading" not in latex_document:
+		return latex_document
+
+	result: list[str] = []
+	last_end = 0
+
+	for match in RESUME_SUBHEADING_MACRO_PATTERN.finditer(latex_document):
+		macro_end = match.end()
+
+		pos = macro_end
+		# Skip horizontal whitespace only; a newline ends the call for our purposes.
+		while pos < len(latex_document) and latex_document[pos] in (" ", "\t"):
+			pos += 1
+
+		args: list[str] = []
+		while pos < len(latex_document) and latex_document[pos] == "{":
+			parsed = _parse_brace_group(latex_document, pos)
+			if parsed is None:
+				break
+			group, pos = parsed
+			args.append(group)
+			while pos < len(latex_document) and latex_document[pos] in (" ", "\t"):
+				pos += 1
+
+		result.append(latex_document[last_end:macro_end])
+
+		if 1 <= len(args) < 4:
+			result.append("".join(args) + "{}" * (4 - len(args)))
+			last_end = pos
+		else:
+			# 0 args (pattern shouldn't fire) or already 4+ args: leave untouched
+			last_end = macro_end
+
+	result.append(latex_document[last_end:])
+	return "".join(result)
+
+
+def _remove_duplicate_begin_document(latex_document: str) -> str:
+	"""Strip a duplicate preamble when the LLM accidentally regenerated the document.
+
+	Some LLMs restart their output mid-generation, producing two full preambles.
+	Having two \\documentclass declarations causes pdflatex to reject the file.
+	When multiple non-commented \\documentclass lines are detected, content before
+	the last one is discarded.
+	"""
+	lines = latex_document.splitlines(keepends=True)
+	docclass_indices = [
+		i
+		for i, line in enumerate(lines)
+		if "\\documentclass" in line and not line.lstrip().startswith("%")
+	]
+	if len(docclass_indices) < 2:
+		return latex_document
+	return "".join(lines[docclass_indices[-1] :])
 
 
 # Matches \$ immediately followed by a backslash-command that appears in math-mode
@@ -1101,13 +1193,15 @@ def _split_comment_concatenated_commands(latex_document: str) -> str:
 
 
 def _close_unclosed_resume_list_macros(latex_document: str) -> str:
-	"""Insert missing \\resumeSubHeadingListEnd / \\resumeItemListEnd before \\end{document}.
+	"""Insert missing list-environment closers before \\end{document}.
 
-	When the LLM truncates its output it sometimes omits the closing resume-list
-	macros.  Each macro expands to \\end{itemize}, so a missing one leaves an
-	unclosed \\begin{itemize} that causes a fatal compile error.  This function
-	counts the open/close calls for each macro pair and appends the missing
-	closers (inner list first, then outer) immediately before \\end{document}.
+	Handles two cases:
+	  1. Resume-macro pairs (\\resumeSubHeadingListStart/End, \\resumeItemListStart/End)
+	     — the LLM truncated before emitting the closing macro.
+	  2. Bare \\begin{itemize} / \\end{itemize} pairs — for LLMs that write explicit
+	     environments instead of macros.  In macro-based templates the preamble
+	     \\newcommand definitions contribute equally to both sides, so the net
+	     explicit-itemize count remains correct.
 	"""
 	if "\\end{document}" not in latex_document:
 		return latex_document
@@ -1120,16 +1214,21 @@ def _close_unclosed_resume_list_macros(latex_document: str) -> str:
 		latex_document.count("\\resumeSubHeadingListStart")
 		- latex_document.count("\\resumeSubHeadingListEnd")
 	)
+	missing_explicit = (
+		latex_document.count("\\begin{itemize}")
+		- latex_document.count("\\end{itemize}")
+	)
 
-	if missing_item <= 0 and missing_sub <= 0:
+	if missing_item <= 0 and missing_sub <= 0 and missing_explicit <= 0:
 		return latex_document
 
-	# Close inner list before outer list.
 	insert = ""
 	if missing_item > 0:
 		insert += "\\resumeItemListEnd\n" * missing_item
 	if missing_sub > 0:
 		insert += "\\resumeSubHeadingListEnd\n" * missing_sub
+	if missing_explicit > 0:
+		insert += "\\end{itemize}\n" * missing_explicit
 
 	return latex_document.replace("\\end{document}", insert + "\\end{document}", 1)
 
