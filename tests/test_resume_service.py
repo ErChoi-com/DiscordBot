@@ -26,6 +26,7 @@ from services.resumes.resume import (
     ensure_profile_cache,
     extract_latex_document,
     extract_template_requirements,
+    lint_latex_document_for_compile,
     migrate_legacy_profile_keys_with_usernames,
     resolve_discord_profile_key,
     sanitize_latex_document_for_compile,
@@ -280,46 +281,45 @@ def test_discord_profile_key_preserves_trailing_dot_underscore() -> None:
     assert discord_profile_key(12345, "xboxsignout._") == "xboxsignout._"
 
 
-def test_resolve_discord_profile_key_migrates_legacy_numeric_dir(tmp_path: Path) -> None:
-
-    def test_resolve_discord_profile_key_fails_if_username_folder_missing(tmp_path: Path) -> None:
-        cache_root = tmp_path / "resumes_cache"
-        # No folder for the username-based key
-        with pytest.raises(FileNotFoundError) as excinfo:
-            resolve_discord_profile_key(555, "Alpha User", cache_root)
-        assert "Resume cache for username" in str(excinfo.value)
-        # Create a legacy numeric folder, should still fail
-        legacy_dir = cache_root / "555"
-        legacy_dir.mkdir(parents=True)
-        with pytest.raises(FileNotFoundError):
-            resolve_discord_profile_key(555, "Alpha User", cache_root)
+def test_resolve_discord_profile_key_fails_if_username_folder_missing(tmp_path: Path) -> None:
     cache_root = tmp_path / "resumes_cache"
-    legacy_dir = cache_root / "12345"
+    with pytest.raises(FileNotFoundError) as excinfo:
+        resolve_discord_profile_key(555, "Alpha User", cache_root)
+    assert "Resume cache for username" in str(excinfo.value)
+
+    # Legacy numeric folders are intentionally ignored.
+    legacy_dir = cache_root / "555"
     legacy_dir.mkdir(parents=True)
-    (legacy_dir / "baseinfo.txt").write_text("base", encoding="utf-8")
+    with pytest.raises(FileNotFoundError):
+        resolve_discord_profile_key(555, "Alpha User", cache_root)
+
+
+def test_resolve_discord_profile_key_returns_username_folder_when_present(tmp_path: Path) -> None:
+    cache_root = tmp_path / "resumes_cache"
+    preferred_dir = cache_root / "ernest-choi"
+    preferred_dir.mkdir(parents=True)
+    (preferred_dir / "baseinfo.txt").write_text("base", encoding="utf-8")
 
     key = resolve_discord_profile_key(12345, "Ernest Choi", cache_root)
 
     assert key == "ernest-choi"
-    assert not legacy_dir.exists()
     assert (cache_root / key / "baseinfo.txt").read_text(encoding="utf-8") == "base"
 
 
-def test_resolve_discord_profile_key_reuses_existing_username_based_dir_on_rename(tmp_path: Path) -> None:
+def test_resolve_discord_profile_key_rejects_legacy_id_suffix_folder(tmp_path: Path) -> None:
     cache_root = tmp_path / "resumes_cache"
     old_key = "oldname-12345"
     old_dir = cache_root / old_key
     old_dir.mkdir(parents=True)
     (old_dir / "baseinfo.txt").write_text("base", encoding="utf-8")
 
-    key = resolve_discord_profile_key(12345, "New Name", cache_root)
+    with pytest.raises(FileNotFoundError):
+        resolve_discord_profile_key(12345, "New Name", cache_root)
 
-    assert key == "new-name"
-    assert not old_dir.exists()
-    assert (cache_root / key / "baseinfo.txt").read_text(encoding="utf-8") == "base"
+    assert old_dir.exists()
 
 
-def test_resolve_discord_profile_key_uses_existing_username_based_dir_when_preferred_collides_with_file(tmp_path: Path) -> None:
+def test_resolve_discord_profile_key_fails_when_preferred_key_collides_with_file(tmp_path: Path) -> None:
     cache_root = tmp_path / "resumes_cache"
     existing_dir = cache_root / "legacy-name-12345"
     existing_dir.mkdir(parents=True)
@@ -328,9 +328,8 @@ def test_resolve_discord_profile_key_uses_existing_username_based_dir_when_prefe
     preferred_path.parent.mkdir(parents=True, exist_ok=True)
     preferred_path.write_text("collision", encoding="utf-8")
 
-    key = resolve_discord_profile_key(12345, "New Name", cache_root)
-
-    assert key == "legacy-name"
+    with pytest.raises(FileNotFoundError):
+        resolve_discord_profile_key(12345, "New Name", cache_root)
 
 
 def test_migrate_legacy_profile_keys_with_usernames_renames_numeric_and_id_suffix_dirs(tmp_path: Path) -> None:
@@ -512,6 +511,52 @@ def test_check_template_compile_environment_detects_missing_tex_files(monkeypatc
     assert status.ready is False
 
 
+def test_check_template_compile_environment_tolerates_missing_kpsewhich_when_pdflatex_exists(monkeypatch, tmp_path: Path) -> None:
+    template_path = tmp_path / "template.tex"
+    template_path.write_text("\\documentclass{article}\n", encoding="utf-8")
+
+    monkeypatch.setattr("services.resumes.resume.importlib.util.find_spec", lambda name: object())
+
+    def _find_exec(name: str) -> str | None:
+        if name == "pdflatex":
+            return "C:/tex/pdflatex.exe"
+        return None
+
+    monkeypatch.setattr("services.resumes.resume._find_latex_executable", _find_exec)
+
+    status = check_template_compile_environment(template_path)
+
+    assert status.pdflatex_path == "C:/tex/pdflatex.exe"
+    assert status.kpsewhich_path is None
+    assert status.missing_files == []
+    assert status.ready is True
+
+
+def test_check_template_compile_environment_marks_missing_when_kpsewhich_times_out(monkeypatch, tmp_path: Path) -> None:
+    template_path = tmp_path / "template.tex"
+    template_path.write_text("\\documentclass{article}\n", encoding="utf-8")
+
+    monkeypatch.setattr("services.resumes.resume.importlib.util.find_spec", lambda name: object())
+    monkeypatch.setattr(
+        "services.resumes.resume._find_latex_executable",
+        lambda name: f"C:/tex/{name}.exe" if name in {"pdflatex", "kpsewhich"} else None,
+    )
+
+    calls: list[list[str]] = []
+
+    def _runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        raise subprocess.TimeoutExpired(command, timeout=15)
+
+    status = check_template_compile_environment(template_path, command_runner=_runner)
+
+    # Probe should fail open and stop further kpsewhich checks to avoid repeated delays.
+    assert status.kpsewhich_path is None
+    assert status.missing_files == []
+    assert status.ready is True
+    assert len(calls) == 1
+
+
 def test_extract_latex_document_reads_tagged_block() -> None:
     text = "summary text <latex>\\documentclass{article}\\begin{document}Hi\\end{document}</latex> more text"
 
@@ -568,6 +613,314 @@ def test_compile_latex_to_pdf_returns_pdf_bytes(monkeypatch, tmp_path: Path) -> 
     assert result.log_path == tmp_path / "template.log"
 
 
+def test_compile_latex_to_pdf_continues_when_missing_style_is_reported(monkeypatch, tmp_path: Path) -> None:
+    template_path = tmp_path / "template.tex"
+    template_path.write_text("\\documentclass{article}\n", encoding="utf-8")
+
+    class _PreflightEnvironment:
+        ready = False
+        pdflatex_path = "C:/tex/pdflatex.exe"
+        xelatex_path = None
+        lualatex_path = None
+        missing_files = ["sourcesanspro.sty"]
+
+    monkeypatch.setattr("services.resumes.resume.check_template_compile_environment", lambda path: _PreflightEnvironment())
+
+    captured_tex: dict[str, str] = {}
+
+    def _runner(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        tex_name = command[-1]
+        tex_path = cwd / tex_name
+        captured_tex["content"] = tex_path.read_text(encoding="utf-8")
+        pdf_path = cwd / Path(tex_name).with_suffix(".pdf")
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    result = compile_latex_to_pdf(
+        latex_document="\\documentclass{article}\n\\usepackage{sourcesanspro}\n\\begin{document}Hi\\end{document}",
+        job_title="Python Developer",
+        template_path=template_path,
+        log_path=tmp_path / "template.log",
+        command_runner=_runner,
+    )
+
+    assert result.status == "ok"
+    assert "sourcesanspro" not in captured_tex["content"]
+
+
+def test_compile_latex_to_pdf_handles_runner_timeout(monkeypatch, tmp_path: Path) -> None:
+    template_path = tmp_path / "template.tex"
+    template_path.write_text("\\documentclass{article}\n", encoding="utf-8")
+
+    class _ReadyEnvironment:
+        ready = True
+        pdflatex_path = "C:/tex/pdflatex.exe"
+
+    monkeypatch.setattr("services.resumes.resume.check_template_compile_environment", lambda path: _ReadyEnvironment())
+
+    def _runner(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(command, timeout=60)
+
+    result = compile_latex_to_pdf(
+        latex_document="\\documentclass{article}\\begin{document}Hi\\end{document}",
+        job_title="Python Developer",
+        template_path=template_path,
+        log_path=tmp_path / "template.log",
+        command_runner=_runner,
+    )
+
+    assert result.status == "error"
+    assert "timed out" in result.message.lower()
+    assert result.log_path == tmp_path / "template.log"
+
+
+def test_compile_latex_to_pdf_falls_back_to_xelatex_when_pdflatex_fails(monkeypatch, tmp_path: Path) -> None:
+    template_path = tmp_path / "template.tex"
+    template_path.write_text("\\documentclass{article}\n", encoding="utf-8")
+
+    class _ReadyEnvironment:
+        ready = True
+        pdflatex_path = "C:/tex/pdflatex.exe"
+        xelatex_path = "C:/tex/xelatex.exe"
+        lualatex_path = None
+
+    monkeypatch.setattr("services.resumes.resume.check_template_compile_environment", lambda path: _ReadyEnvironment())
+
+    calls: list[str] = []
+
+    def _runner(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        engine = command[0]
+        calls.append(engine)
+        tex_name = command[-1]
+        pdf_path = cwd / Path(tex_name).with_suffix(".pdf")
+        if engine.endswith("pdflatex.exe"):
+            return subprocess.CompletedProcess(command, 1, "", "pdftex error")
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    result = compile_latex_to_pdf(
+        latex_document="\\documentclass{article}\\begin{document}Hi\\end{document}",
+        job_title="Python Developer",
+        template_path=template_path,
+        log_path=tmp_path / "template.log",
+        command_runner=_runner,
+    )
+
+    assert result.status == "ok"
+    assert "xelatex" in result.message.lower()
+    assert calls[:2] == ["C:/tex/pdflatex.exe", "C:/tex/xelatex.exe"]
+
+
+def test_compile_latex_to_pdf_stops_after_engine_timeout(monkeypatch, tmp_path: Path) -> None:
+    template_path = tmp_path / "template.tex"
+    template_path.write_text("\\documentclass{article}\n", encoding="utf-8")
+
+    class _ReadyEnvironment:
+        ready = True
+        pdflatex_path = "C:/tex/pdflatex.exe"
+        xelatex_path = "C:/tex/xelatex.exe"
+        lualatex_path = None
+
+    monkeypatch.setattr("services.resumes.resume.check_template_compile_environment", lambda path: _ReadyEnvironment())
+
+    calls: list[str] = []
+
+    def _runner(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        calls.append(command[0])
+        return subprocess.CompletedProcess(command, 124, "", "timed out")
+
+    result = compile_latex_to_pdf(
+        latex_document="\\documentclass{article}\\begin{document}Hi\\end{document}",
+        job_title="Python Developer",
+        template_path=template_path,
+        log_path=tmp_path / "template.log",
+        command_runner=_runner,
+    )
+
+    assert result.status == "error"
+    assert "timed out" in result.message.lower()
+    # Should not try fallback engines after a timeout-sized failure.
+    assert calls == ["C:/tex/pdflatex.exe"]
+
+
+def test_compile_latex_to_pdf_respects_total_budget(monkeypatch, tmp_path: Path) -> None:
+    template_path = tmp_path / "template.tex"
+    template_path.write_text("\\documentclass{article}\n", encoding="utf-8")
+
+    class _ReadyEnvironment:
+        ready = True
+        pdflatex_path = "C:/tex/pdflatex.exe"
+        xelatex_path = "C:/tex/xelatex.exe"
+        lualatex_path = None
+
+    monkeypatch.setattr("services.resumes.resume.check_template_compile_environment", lambda path: _ReadyEnvironment())
+    monkeypatch.setattr("services.resumes.resume.LATEX_TOTAL_TIMEOUT_SECONDS", 0)
+
+    calls: list[str] = []
+
+    def _runner(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        calls.append(command[0])
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    result = compile_latex_to_pdf(
+        latex_document="\\documentclass{article}\\begin{document}Hi\\end{document}",
+        job_title="Python Developer",
+        template_path=template_path,
+        log_path=tmp_path / "template.log",
+        command_runner=_runner,
+    )
+
+    assert result.status == "error"
+    assert "failed" in result.message.lower() or "timed out" in result.message.lower()
+    assert calls == []
+
+
+def test_compile_latex_to_pdf_prefers_xelatex_for_fontspec_templates(monkeypatch, tmp_path: Path) -> None:
+    template_path = tmp_path / "template.tex"
+    template_path.write_text("\\documentclass{article}\n", encoding="utf-8")
+
+    class _ReadyEnvironment:
+        ready = True
+        pdflatex_path = "C:/tex/pdflatex.exe"
+        xelatex_path = "C:/tex/xelatex.exe"
+        lualatex_path = "C:/tex/lualatex.exe"
+
+    monkeypatch.setattr("services.resumes.resume.check_template_compile_environment", lambda path: _ReadyEnvironment())
+
+    calls: list[str] = []
+
+    def _runner(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        engine = command[0]
+        calls.append(engine)
+        tex_name = command[-1]
+        pdf_path = cwd / Path(tex_name).with_suffix(".pdf")
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    result = compile_latex_to_pdf(
+        latex_document="\\documentclass{article}\\usepackage{fontspec}\\begin{document}Hi\\end{document}",
+        job_title="Python Developer",
+        template_path=template_path,
+        log_path=tmp_path / "template.log",
+        command_runner=_runner,
+    )
+
+    assert result.status == "ok"
+    assert calls[0] == "C:/tex/xelatex.exe"
+
+
+def test_compile_latex_to_pdf_strips_pdflatex_only_unicode_directives_for_xelatex(monkeypatch, tmp_path: Path) -> None:
+    template_path = tmp_path / "template.tex"
+    template_path.write_text("\\documentclass{article}\n", encoding="utf-8")
+
+    class _ReadyEnvironment:
+        ready = True
+        pdflatex_path = None
+        xelatex_path = "C:/tex/xelatex.exe"
+        lualatex_path = None
+        missing_files = []
+
+    monkeypatch.setattr("services.resumes.resume.check_template_compile_environment", lambda path: _ReadyEnvironment())
+
+    observed_tex: dict[str, str] = {}
+
+    def _runner(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        tex_name = command[-1]
+        tex_path = cwd / tex_name
+        observed_tex["content"] = tex_path.read_text(encoding="utf-8")
+        pdf_path = cwd / Path(tex_name).with_suffix(".pdf")
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    result = compile_latex_to_pdf(
+        latex_document=(
+            "\\documentclass{article}\n"
+            "\\input{glyphtounicode}\n"
+            "\\pdfgentounicode=1\n"
+            "\\pdfglyphtounicode{A}{0041}\n"
+            "\\begin{document}Hi\\end{document}\n"
+        ),
+        job_title="Python Developer",
+        template_path=template_path,
+        log_path=tmp_path / "template.log",
+        command_runner=_runner,
+    )
+
+    assert result.status == "ok"
+    assert "input{glyphtounicode}" not in observed_tex["content"]
+    assert "\\pdfgentounicode" not in observed_tex["content"]
+    assert "\\pdfglyphtounicode" not in observed_tex["content"]
+
+
+def test_compile_latex_to_pdf_auto_fixes_missing_style_with_retry(monkeypatch, tmp_path: Path) -> None:
+    template_path = tmp_path / "template.tex"
+    template_path.write_text("\\documentclass{article}\n", encoding="utf-8")
+
+    class _ReadyEnvironment:
+        ready = True
+        pdflatex_path = "C:/tex/pdflatex.exe"
+
+    monkeypatch.setattr("services.resumes.resume.check_template_compile_environment", lambda path: _ReadyEnvironment())
+
+    observed_texts: list[str] = []
+
+    def _runner(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        tex_path = cwd / command[-1]
+        tex_text = tex_path.read_text(encoding="utf-8")
+        observed_texts.append(tex_text)
+        if len(observed_texts) == 1:
+            return subprocess.CompletedProcess(command, 1, "", "! LaTeX Error: File `missingfont.sty' not found.")
+        (cwd / Path(command[-1]).with_suffix(".pdf")).write_bytes(b"%PDF-1.4\n")
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    result = compile_latex_to_pdf(
+        latex_document="\\documentclass{article}\n\\usepackage{missingfont}\n\\begin{document}Hi\\end{document}",
+        job_title="Python Developer",
+        template_path=template_path,
+        log_path=tmp_path / "template.log",
+        command_runner=_runner,
+        max_auto_fix_retries=2,
+    )
+
+    assert result.status == "ok"
+    assert len(observed_texts) == 2
+    assert "\\usepackage{missingfont}" in observed_texts[0]
+    assert "\\usepackage{missingfont}" not in observed_texts[1]
+    assert any("stripped missing style packages" in label for label in result.repairs_applied)
+    assert result.repair_attempts == 1
+
+
+def test_compile_latex_to_pdf_respects_auto_fix_retry_cap(monkeypatch, tmp_path: Path) -> None:
+    template_path = tmp_path / "template.tex"
+    template_path.write_text("\\documentclass{article}\n", encoding="utf-8")
+
+    class _ReadyEnvironment:
+        ready = True
+        pdflatex_path = "C:/tex/pdflatex.exe"
+
+    monkeypatch.setattr("services.resumes.resume.check_template_compile_environment", lambda path: _ReadyEnvironment())
+
+    call_count = 0
+
+    def _runner(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        nonlocal call_count
+        call_count += 1
+        return subprocess.CompletedProcess(command, 1, "", "! LaTeX Error: File `missingfont.sty' not found.")
+
+    result = compile_latex_to_pdf(
+        latex_document="\\documentclass{article}\n\\usepackage{missingfont}\n\\begin{document}Hi\\end{document}",
+        job_title="Python Developer",
+        template_path=template_path,
+        log_path=tmp_path / "template.log",
+        command_runner=_runner,
+        max_auto_fix_retries=1,
+    )
+
+    assert result.status == "error"
+    assert call_count == 2
+    assert result.repair_attempts == 1
+
+
 def test_sanitize_latex_document_for_compile_escapes_ampersands_outside_tabular() -> None:
     source = (
         "\\section{Profile}\n"
@@ -583,6 +936,178 @@ def test_sanitize_latex_document_for_compile_escapes_ampersands_outside_tabular(
     assert "Data \\& Analytics summary" in sanitized
     assert "A & B" in sanitized
     assert "Already escaped \\& should remain." in sanitized
+
+
+def test_sanitize_latex_document_for_compile_closes_unbalanced_braces() -> None:
+    source = "\\textbf{Honours and Scholarship\\section{Publication}"
+
+    sanitized = sanitize_latex_document_for_compile(source)
+
+    assert sanitized.endswith("}")
+
+
+def test_sanitize_latex_document_for_compile_closes_runaway_inline_text_command() -> None:
+    source = "\\textbf{Honours and Scholarship\\section{Publication}"
+
+    sanitized = sanitize_latex_document_for_compile(source)
+
+    assert "\\textbf{Honours and Scholarship}\\section{Publication}" in sanitized
+
+
+def test_sanitize_latex_document_for_compile_preserves_textbf_scshape_payload() -> None:
+    source = "{\\fontsize{28}{34}\\selectfont \\textbf{\\scshape Ricky Nong}} \\\\ \\vspace{5pt}"
+
+    sanitized = sanitize_latex_document_for_compile(source)
+
+    assert "\\textbf{\\scshape Ricky Nong}} \\\\" in sanitized
+
+
+def test_sanitize_latex_document_for_compile_normalizes_item_section_collision() -> None:
+    source = (
+        "\\resumeItemListStart\n"
+        "\\item \\small{\\textbf{Honours and Scholarship\\section{Publication}\n"
+        "\\resumeSubHeadingListStart"
+    )
+
+    sanitized = sanitize_latex_document_for_compile(source)
+
+    assert "\\item \\small{\\textbf{Honours and Scholarship}" in sanitized
+    assert "\\resumeItemListEnd" in sanitized
+    assert "\\resumeSubHeadingListEnd" in sanitized
+    assert "\\section{Publication}" in sanitized
+
+
+def test_sanitize_latex_document_for_compile_closes_open_resume_lists_before_section() -> None:
+    source = (
+        "\\section{Work Experience}\n"
+        "\\resumeSubHeadingListStart\n"
+        "\\resumeSubheading{Role}{Dates}{Company}{City}\n"
+        "\\resumeItemListStart\n"
+        "\\resumeItem{Did work.}\n"
+        "\\section{Extracurriculars}\n"
+        "\\end{document}"
+    )
+
+    sanitized = sanitize_latex_document_for_compile(source)
+
+    assert "\\resumeItemListEnd\n  \\resumeSubHeadingListEnd\n\\section{Extracurriculars}" in sanitized
+
+
+def test_sanitize_latex_document_for_compile_closes_small_itemize_group_brace() -> None:
+    source = (
+        "{\\small \\begin{itemize}[leftmargin=0.15in]\n"
+        "\\item {Publication detail.}\n"
+        "\\end{itemize}\n"
+        "\\section{Next}"
+    )
+
+    sanitized = sanitize_latex_document_for_compile(source)
+
+    assert "\\end{itemize}}" in sanitized
+
+
+def test_sanitize_latex_document_for_compile_drops_orphan_lower_fragment_between_commands() -> None:
+    source = (
+        "\\resumeItemListEnd\n"
+        "ista\n"
+        "\\section{Work Experience}"
+    )
+
+    sanitized = sanitize_latex_document_for_compile(source)
+
+    assert "\nista\n" not in f"\n{sanitized}\n"
+    assert "\\section{Work Experience}" in sanitized
+
+
+def test_sanitize_latex_document_for_compile_keeps_lower_fragment_when_not_between_commands() -> None:
+    source = (
+        "\\section{Summary}\n"
+        "ista\n"
+        "plain text line"
+    )
+
+    sanitized = sanitize_latex_document_for_compile(source)
+
+    assert "ista" in sanitized
+
+
+def test_sanitize_latex_document_for_compile_starts_subheading_list_for_lonely_subheading() -> None:
+    source = (
+        "\\section{Extracurriculars}\n"
+        "\\resumeSubheading{Role}{Dates}{Org}{City}\n"
+        "\\resumeItemListStart\n"
+        "\\resumeItem{Did work.}\n"
+        "\\resumeItemListEnd\n"
+        "\\end{document}"
+    )
+
+    sanitized = sanitize_latex_document_for_compile(source)
+
+    assert "\\section{Extracurriculars}\n  \\resumeSubHeadingListStart\n\\resumeSubheading" in sanitized
+    assert "\\resumeSubHeadingListEnd\n\\end{document}" in sanitized
+
+
+def test_sanitize_latex_document_for_compile_normalizes_empty_textbf_small_pattern() -> None:
+    source = "\\textbf{}\\small #2} \\\\"
+
+    sanitized = sanitize_latex_document_for_compile(source)
+
+    assert "\\textbf{\\small #2}" in sanitized
+
+
+def test_sanitize_latex_document_for_compile_normalizes_empty_textbf_scshape_pattern() -> None:
+    source = "\\textbf{}\\scshape Ricky Nong}} \\\\"
+
+    sanitized = sanitize_latex_document_for_compile(source)
+
+    assert "\\textbf{\\scshape Ricky Nong}" in sanitized
+
+
+def test_lint_latex_document_for_compile_normalizes_double_slash_control_lines() -> None:
+    source = "\\\\resumeItemListStart\n\\\\vspace{2pt}\n\\\\section{Next}"
+
+    linted = lint_latex_document_for_compile(source)
+
+    assert "\\resumeItemListStart" in linted.latex_document
+    assert "\\vspace{2pt}" in linted.latex_document
+    assert "\\section{Next}" in linted.latex_document
+    assert "normalized escaped control commands" in linted.repairs_applied
+
+
+def test_lint_latex_document_for_compile_unwraps_braced_resume_end_macros() -> None:
+    source = "{\\resumeItemListEnd}\n{\\resumeSubHeadingListEnd}"
+
+    linted = lint_latex_document_for_compile(source)
+
+    assert "{\\resumeItemListEnd}" not in linted.latex_document
+    assert "{\\resumeSubHeadingListEnd}" not in linted.latex_document
+    assert "\\resumeItemListEnd" in linted.latex_document
+    assert "\\resumeSubHeadingListEnd" in linted.latex_document
+    assert "unwrapped braced resume list end macros" in linted.repairs_applied
+
+
+def test_lint_latex_document_for_compile_normalizes_color_dvips_option_case() -> None:
+    source = "\\usepackage[usenames,dvipsNames]{color}\n\\begin{document}\nOK\n\\end{document}"
+
+    linted = lint_latex_document_for_compile(source)
+
+    assert "dvipsNames" not in linted.latex_document
+    assert "dvipsnames" in linted.latex_document
+    assert "normalized color package option casing" in linted.repairs_applied
+
+
+def test_lint_latex_document_for_compile_removes_dangling_single_trailing_backslashes() -> None:
+    source = "\\vspace{-4pt}\\\n\\item text\\\n\\\\\n"
+
+    linted = lint_latex_document_for_compile(source)
+
+    lines = linted.latex_document.splitlines()
+    assert lines[0] == "\\vspace{-4pt}"
+    assert lines[1] == "\\item text"
+    # Preserve intentional TeX line break token.
+    assert lines[2] == "\\\\"
+    assert "removed dangling single trailing backslashes" in linted.repairs_applied
+
 
 
 def test_sanitize_latex_document_for_compile_normalizes_json_escaped_latex() -> None:
@@ -678,6 +1203,34 @@ def test_compile_latex_to_pdf_sanitizes_unescaped_ampersands(monkeypatch, tmp_pa
 
     assert result.status == "ok"
     assert "Research \\& Analytics" in captured_tex["value"]
+
+
+def test_compile_latex_to_pdf_carries_internal_lint_findings(monkeypatch, tmp_path: Path) -> None:
+    template_path = tmp_path / "template.tex"
+    template_path.write_text("\\documentclass{article}\n", encoding="utf-8")
+
+    class _ReadyEnvironment:
+        ready = True
+        pdflatex_path = "C:/tex/pdflatex.exe"
+
+    monkeypatch.setattr("services.resumes.resume.check_template_compile_environment", lambda path: _ReadyEnvironment())
+
+    def _runner(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        tex_name = command[-1]
+        pdf_path = cwd / Path(tex_name).with_suffix(".pdf")
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    result = compile_latex_to_pdf(
+        latex_document="\\documentclass{article}\\begin{document}Hi",
+        job_title="Python Developer",
+        template_path=template_path,
+        log_path=tmp_path / "template.log",
+        command_runner=_runner,
+    )
+
+    assert result.status == "ok"
+    assert any("missing \\end{document}" in finding for finding in result.lint_findings)
 
 
 class _FakeModelsApi:
@@ -1012,6 +1565,9 @@ def test_generate_resume_rewrite_falls_back_to_openrouter_when_no_gemini_key(
 
     import services.resumes.listing as _lm
     from services.resumes.listing import OPENROUTER_CHAT_COMPLETIONS_URL
+
+    # Suppress env/dotenv so provider selection is deterministic for this test.
+    monkeypatch.setattr(_lm, "_groq_api_key", lambda: None)
 
     post_calls: list[str] = []
 

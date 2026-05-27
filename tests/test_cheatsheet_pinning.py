@@ -1,3 +1,9 @@
+"""Tests for command cheatsheet pinning behavior.
+
+pyright may not resolve runtime-only test path injection for `commands.*`.
+"""
+# pyright: reportMissingImports=false
+
 from __future__ import annotations
 
 import asyncio

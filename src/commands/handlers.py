@@ -440,10 +440,134 @@ class CommandRouter:
         return f"`{CMD_RESUME}` / `{PRIMARY_RESUME_SLASH_COMMAND}` is only available in a server channel."
 
     def build_resume_unauthorized_message(self) -> str:
-        return f"Only the server owner can use `{CMD_RESUME}` / `{PRIMARY_RESUME_SLASH_COMMAND}`."
+        return (
+            "You can only use resume commands for your own profile cache. "
+            f"The server owner can target others with `{CMD_RESUME} @user` or `{CMD_RESUME_CHECK} @user`."
+        )
+
+    @staticmethod
+    def _normalized_discord_id(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _is_guild_owner(self, message: discord.Message) -> bool:
+        guild_owner_id = self._normalized_discord_id(getattr(getattr(message, "guild", None), "owner_id", None))
+        author_id = self._normalized_discord_id(getattr(getattr(message, "author", None), "id", None))
+        return guild_owner_id is not None and author_id is not None and author_id == guild_owner_id
+
+    def _can_access_resume_target(self, message: discord.Message, target_user_id: int | None) -> bool:
+        author_id = self._normalized_discord_id(getattr(getattr(message, "author", None), "id", None))
+        target_id = self._normalized_discord_id(target_user_id)
+
+        if author_id is None or target_id is None:
+            return False
+        if author_id == target_id:
+            return True
+        return self._is_guild_owner(message)
+
+    @staticmethod
+    def _parse_user_mention_id(token: str) -> int | None:
+        match = re.fullmatch(r"<@!?(\d+)>", token.strip())
+        if not match:
+            return None
+        return int(match.group(1))
+
+    async def _resolve_resume_target_member(
+        self,
+        message: discord.Message,
+        command: str,
+    ) -> tuple[discord.abc.User | discord.Member | None, str | None]:
+        guild = getattr(message, "guild", None)
+        author = getattr(message, "author", None)
+        if guild is None or author is None:
+            return author, None
+
+        payload = _extract_command_payload(getattr(message, "content", ""), command)
+        if not payload:
+            return author, None
+
+        raw_content = str(getattr(message, "content", "")).lstrip()
+        is_slash_invocation = raw_content.startswith("/")
+        tokens = payload.split()
+        if is_slash_invocation:
+            if len(tokens) != 1:
+                return None, f"Usage: `{command}` or `{command} @user` (single username, mention, or user id)."
+            target_token = tokens[0].strip()
+        else:
+            # Dot commands can target multi-word names (for example: `.resumecheck ricky disappoints`).
+            target_token = payload.strip()
+
+        if target_token.lower() in {"me", "self"}:
+            return author, None
+
+        target_id = self._parse_user_mention_id(target_token)
+        if target_id is None and target_token.isdigit():
+            target_id = int(target_token)
+
+        if target_id is not None:
+            member = guild.get_member(target_id)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(target_id)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+                    member = None
+            if member is None:
+                return None, f"Could not find member `{target_token}` in this server."
+            return member, None
+
+        named_member = None
+        if hasattr(guild, "get_member_named"):
+            named_member = guild.get_member_named(target_token)
+        if named_member is not None:
+            return named_member, None
+
+        members = list(getattr(guild, "members", []) or [])
+        lowered = target_token.casefold()
+        matches = [
+            member for member in members
+            if str(getattr(member, "name", "")).casefold() == lowered
+            or str(getattr(member, "display_name", "")).casefold() == lowered
+            or str(getattr(member, "global_name", "")).casefold() == lowered
+        ]
+        if len(matches) == 1:
+            return matches[0], None
+        if len(matches) > 1:
+            return None, f"Multiple members match `{target_token}`. Use a mention or user id."
+
+        return None, f"Could not resolve `{target_token}` to a server member."
 
     def owner_profile_key(self, guild_owner_id: int | None) -> int | str | None:
         return self.config.main_user_profile_key or guild_owner_id
+
+    def _resolve_owner_profile_key_from_payload(
+        self,
+        message: discord.Message,
+        command: str,
+        cache_root: Path,
+    ) -> tuple[str | None, str | None]:
+        if not self._is_guild_owner(message):
+            return None, "Only the server owner can target a resume cache profile directly."
+
+        payload = _extract_command_payload(getattr(message, "content", ""), command).strip()
+        if not payload:
+            return None, "No target profile provided."
+
+        # Support both exact folder names and username-like input that normalizes to a folder key.
+        candidate_keys: list[str] = []
+        normalized_key = discord_profile_key(0, payload)
+        compact_key = re.sub(r"[-._\s]+", "", normalized_key)
+        for candidate in (payload, normalized_key, compact_key):
+            normalized = str(candidate).strip()
+            if normalized and normalized not in candidate_keys:
+                candidate_keys.append(normalized)
+
+        for profile_key in candidate_keys:
+            if (cache_root / profile_key).is_dir():
+                return profile_key, None
+
+        return None, f"Could not resolve `{payload}` to a resume cache profile folder."
 
     @staticmethod
     def _author_profile_name(author: discord.abc.User | discord.Member | None) -> str | None:
@@ -527,18 +651,30 @@ class CommandRouter:
             await message.channel.send(self.build_resume_guild_only_message())
             return True
 
-
-        # Allow both the watcher owner and the server owner to use /resumebuild
-        channel_id = message.channel.id
-        job_settings = self.store.get_job_settings(channel_id)
-        watcher_owner_id = job_settings.get("owner_id")
-        if watcher_owner_id is not None:
-            allowed_ids = {guild_owner_id, watcher_owner_id}
+        cache_root = Path(__file__).resolve().parents[1] / "services" / "resumes" / "resumes_cache"
+        target_user, target_error = await self._resolve_resume_target_member(message, CMD_RESUME)
+        owner_profile_key_override: str | None = None
+        if target_error:
+            owner_profile_key_override, owner_override_error = self._resolve_owner_profile_key_from_payload(
+                message,
+                CMD_RESUME,
+                cache_root,
+            )
+            if owner_override_error is not None:
+                await message.channel.send(target_error)
+                return True
+            target_user_id = self._normalized_discord_id(getattr(getattr(message, "author", None), "id", None))
+            target_profile_name = None
         else:
-            allowed_ids = {guild_owner_id}
-        if message.author.id not in allowed_ids:
-            await message.channel.send(self.build_resume_unauthorized_message())
-            return True
+            target_user_id = self._normalized_discord_id(getattr(target_user, "id", None))
+            if not self._can_access_resume_target(message, target_user_id):
+                await message.channel.send(self.build_resume_unauthorized_message())
+                return True
+
+            target_profile_name = self._author_profile_name(target_user)
+            if target_user_id is None:
+                await message.channel.send("Could not resolve a valid target profile for this command.")
+                return True
 
         settings = load_gemini_settings(self.config)
         if not (settings.api_key or settings.openrouter_api_key or settings.groq_api_key):
@@ -549,38 +685,41 @@ class CommandRouter:
         if job is None:
             return True
 
-        cache_root = Path(__file__).resolve().parents[1] / "services" / "resumes" / "resumes_cache"
-        profile_key = discord_profile_key(message.author.id, self._author_profile_name(message.author))
+        profile_key = owner_profile_key_override or discord_profile_key(target_user_id, target_profile_name)
 
         # Explicitly check for user resume cache folder and required files
-        try:
-            profile_dir = await asyncio.to_thread(
-                ensure_profile_cache,
-                profile_key,
-                cache_root,
-                self.owner_profile_key(guild_owner_id),
-            )
-        except FileNotFoundError as exc:
-            await message.channel.send(f"Resume cache setup failed: {exc}",
-                                       reference=message.to_reference(fail_if_not_exists=False),
-                                       mention_author=False,
-                                       allowed_mentions=discord.AllowedMentions.none())
-            return True
+        if owner_profile_key_override is None:
+            try:
+                profile_dir = await asyncio.to_thread(
+                    ensure_profile_cache,
+                    profile_key,
+                    cache_root,
+                    self.owner_profile_key(guild_owner_id),
+                )
+            except FileNotFoundError as exc:
+                await message.channel.send(f"Resume cache setup failed: {exc}",
+                                           reference=message.to_reference(fail_if_not_exists=False),
+                                           mention_author=False,
+                                           allowed_mentions=discord.AllowedMentions.none())
+                return True
 
-        try:
-            profile_key = resolve_discord_profile_key(
-                message.author.id,
-                self._author_profile_name(message.author),
-                cache_root,
-            )
-        except FileNotFoundError as exc:
-            await message.channel.send(
-                f"Resume cache error: {exc}",
-                reference=message.to_reference(fail_if_not_exists=False),
-                mention_author=False,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return True
+            try:
+                profile_key = resolve_discord_profile_key(
+                    target_user_id,
+                    target_profile_name,
+                    cache_root,
+                )
+            except FileNotFoundError as exc:
+                await message.channel.send(
+                    f"Resume cache error: {exc}",
+                    reference=message.to_reference(fail_if_not_exists=False),
+                    mention_author=False,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return True
+            profile_dir = cache_root / profile_key
+        else:
+            profile_dir = cache_root / profile_key
 
         # Defensive: check all required files exist
         required_files = ["baseinfo.txt", "instructions.txt", "template.tex"]
@@ -607,9 +746,13 @@ class CommandRouter:
 
 
         # Use a user-specific ResumeExplicitCacheManager for this request
+        if owner_profile_key_override is None:
+            cache_scope = str(target_user_id)
+        else:
+            cache_scope = f"profile_{re.sub(r'[^A-Za-z0-9._-]+', '-', profile_key)}"
         user_resume_cache_manager = ResumeExplicitCacheManager(
             profiles_dir=profile_dir,
-            cache_dir=self.config.resume_cache_dir / f".cache_{message.author.id}",
+            cache_dir=self.config.resume_cache_dir / f".cache_{cache_scope}",
         )
 
         if settings.api_key:
@@ -654,13 +797,37 @@ class CommandRouter:
                 used_model = settings.groq_model
             else:
                 used_model = settings.model
+            content = f"Compiled PDF using `{used_provider}` (`{used_model}`)."
+            if compile_result.repairs_applied:
+                shown_repairs = compile_result.repairs_applied[:3]
+                extra_repairs = len(compile_result.repairs_applied) - len(shown_repairs)
+                repair_note = ", ".join(shown_repairs)
+                if extra_repairs > 0:
+                    repair_note = f"{repair_note}, +{extra_repairs} more"
+                content = f"{content} Auto-fixed LaTeX: {repair_note}."
             await message.channel.send(
-                content=f"Compiled PDF using `{used_provider}` (`{used_model}`).",
+                content=content,
                 file=discord.File(io.BytesIO(compile_result.pdf_bytes), filename=compile_result.pdf_name),
                 **reply_send_kwargs,
             )
         else:
+            failure_dump_name = None
+            try:
+                failed_latex_dir = self.config.resume_cache_dir / "failed_latex"
+                failed_latex_dir.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                title_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", job.title).strip("-") or "resume"
+                failure_dump_name = f"{timestamp}-{profile_dir.name}-{title_slug}.tex"
+                (failed_latex_dir / failure_dump_name).write_text(
+                    rewrite_result.latex_document,
+                    encoding="utf-8",
+                )
+            except OSError:
+                failure_dump_name = None
+
             error_msg = f"PDF compile failed: {compile_result.message}"
+            if failure_dump_name:
+                error_msg += f"\nSaved failed LaTeX: `{failure_dump_name}`"
             if compile_result.log_excerpt:
                 error_msg += f"\n```\n{compile_result.log_excerpt[-500:]}\n```"
             await message.channel.send(error_msg, **reply_send_kwargs)
@@ -673,33 +840,53 @@ class CommandRouter:
             await message.channel.send(f"`{CMD_RESUME_CHECK}` is only available in a server channel.")
             return True
 
-        if message.author.id != guild_owner_id:
-            await message.channel.send(f"Only the server owner can use `{CMD_RESUME_CHECK}`.")
-            return True
-
         cache_root = Path(__file__).resolve().parents[1] / "services" / "resumes" / "resumes_cache"
-        profile_key = discord_profile_key(message.author.id, self._author_profile_name(message.author))
-        profile_dir = await asyncio.to_thread(
-            ensure_profile_cache,
-            profile_key,
-            cache_root,
-            self.owner_profile_key(guild_owner_id),
-        )
-        try:
-            profile_key = resolve_discord_profile_key(
-                message.author.id,
-                self._author_profile_name(message.author),
+        target_user, target_error = await self._resolve_resume_target_member(message, CMD_RESUME_CHECK)
+        owner_profile_key_override: str | None = None
+        if target_error:
+            owner_profile_key_override, owner_override_error = self._resolve_owner_profile_key_from_payload(
+                message,
+                CMD_RESUME_CHECK,
                 cache_root,
             )
-        except FileNotFoundError as exc:
-            await message.channel.send(
-                f"Resume cache error: {exc}",
-                reference=message.to_reference(fail_if_not_exists=False),
-                mention_author=False,
-                allowed_mentions=discord.AllowedMentions.none(),
+            if owner_override_error is not None:
+                await message.channel.send(target_error)
+                return True
+            profile_key = owner_profile_key_override
+            profile_dir = cache_root / profile_key
+        else:
+            target_user_id = self._normalized_discord_id(getattr(target_user, "id", None))
+            if not self._can_access_resume_target(message, target_user_id):
+                await message.channel.send(self.build_resume_unauthorized_message())
+                return True
+
+            target_profile_name = self._author_profile_name(target_user)
+            if target_user_id is None:
+                await message.channel.send("Could not resolve a valid target profile for this command.")
+                return True
+
+            profile_key = discord_profile_key(target_user_id, target_profile_name)
+            profile_dir = await asyncio.to_thread(
+                ensure_profile_cache,
+                profile_key,
+                cache_root,
+                self.owner_profile_key(guild_owner_id),
             )
-            return True
-        profile_dir = cache_root / profile_key
+            try:
+                profile_key = resolve_discord_profile_key(
+                    target_user_id,
+                    target_profile_name,
+                    cache_root,
+                )
+            except FileNotFoundError as exc:
+                await message.channel.send(
+                    f"Resume cache error: {exc}",
+                    reference=message.to_reference(fail_if_not_exists=False),
+                    mention_author=False,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return True
+            profile_dir = cache_root / profile_key
         template_path = profile_dir / "template.tex"
         compile_log_dir = self.config.resume_cache_dir / "compile_logs"
         template_log_path = compile_log_dir / f"{profile_dir.name}.resumecheck.log"
@@ -731,8 +918,16 @@ class CommandRouter:
         }
 
         if compile_result.status == "ok" and compile_result.pdf_bytes and compile_result.pdf_name:
+            content = f"Resume check compile succeeded for profile `{profile_dir.name}`."
+            if compile_result.repairs_applied:
+                shown_repairs = compile_result.repairs_applied[:3]
+                extra_repairs = len(compile_result.repairs_applied) - len(shown_repairs)
+                repair_note = ", ".join(shown_repairs)
+                if extra_repairs > 0:
+                    repair_note = f"{repair_note}, +{extra_repairs} more"
+                content = f"{content} Auto-fixed LaTeX: {repair_note}."
             await message.channel.send(
-                content=f"Resume check compile succeeded for profile `{profile_dir.name}`.",
+                content=content,
                 file=discord.File(io.BytesIO(compile_result.pdf_bytes), filename=compile_result.pdf_name),
                 **reply_send_kwargs,
             )
