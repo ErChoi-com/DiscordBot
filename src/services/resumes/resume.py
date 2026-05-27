@@ -1337,7 +1337,19 @@ def _escape_unescaped_percent_in_content(latex_document: str) -> str:
 				continue
 			if ch == "%":
 				if brace_depth > 0:
-					# Inside a macro argument: % must be a literal percent, not a comment.
+					# Trailing % at end of a line is the standard LaTeX whitespace-
+					# suppression idiom used in multi-line macro definitions, e.g.:
+					#   \newcommand{\cmd}[4]{%
+					#     \vspace{\skip}%
+					#     content
+					#   }
+					# It must NOT be escaped; it is a comment that eats the newline.
+					# Only escape % when there is non-whitespace content after it on the
+					# same line (i.e. it is a mid-argument literal percent sign).
+					rest = line[i + 1 :]
+					if not rest.strip():
+						out.append(line[i:])
+						break
 					out.append("\\%")
 				else:
 					# Outside any argument: intentional LaTeX comment — preserve verbatim.

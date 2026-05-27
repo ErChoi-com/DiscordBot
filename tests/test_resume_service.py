@@ -1797,6 +1797,33 @@ def test_generate_resume_rewrite_falls_back_to_groq_when_no_gemini_or_openrouter
     assert post_calls[0] == GROQ_CHAT_COMPLETIONS_URL
 
 
+def test_sanitize_latex_document_does_not_escape_trailing_percent_whitespace_suppression() -> None:
+    """Trailing % (whitespace-suppression idiom) inside braces must NOT become \\%."""
+    source = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "\\newcommand{\\project}[4]{%\n"
+        "  \\vspace{2pt}%\n"
+        "  #1\n"
+        "}\n"
+        "\\centerline{%\n"
+        "  content\n"
+        "}\n"
+        "\\end{document}\n"
+    )
+    fixed = sanitize_latex_document_for_compile(source)
+    assert "\\newcommand{\\project}[4]{%\n" in fixed, "trailing % in \\newcommand must stay as comment"
+    assert "  \\vspace{2pt}%\n" in fixed, "trailing % after \\vspace must stay as comment"
+    assert "\\centerline{%\n" in fixed, "trailing % after \\centerline{ must stay as comment"
+
+
+def test_sanitize_latex_document_still_escapes_mid_content_percent() -> None:
+    """% that appears mid-argument (not trailing) must still be escaped to \\%."""
+    source = "\\resumeItem{Improved throughput by 15% for all services}"
+    fixed = sanitize_latex_document_for_compile(source)
+    assert "15\\%" in fixed
+
+
 def test_sanitize_latex_document_fixes_resume_subheading_with_3_args() -> None:
     """\\resumeSubheading with only 3 args must be padded to 4 empty groups."""
     source = (
