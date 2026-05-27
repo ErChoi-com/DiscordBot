@@ -16,7 +16,7 @@ RESUMES_CACHE_ROOT = Path(__file__).resolve().parent / "resumes_cache"
 TEMPLATE_PATH = RESUMES_CACHE_ROOT / "template.tex"
 PROFILE_ALLOWED_FILE_NAMES = ("baseinfo.txt", "instructions.txt", "template.tex")
 EXAMPLE_PROFILE_KEY = "example"
-LLM_PROVIDER_SWITCH_ORDER = ("gemini", "groq", "openrouter")
+LLM_PROVIDER_SWITCH_ORDER = ("gemini", "gemini-flash", "groq", "openrouter")
 MAX_PROFILE_NAME_PART_LEN = 80
 MAX_PROFILE_ID_PART_LEN = 80
 
@@ -92,6 +92,11 @@ class LLMProviderCapabilities:
 PROVIDER_CAPABILITIES: dict[str, LLMProviderCapabilities] = {
 	"gemini": LLMProviderCapabilities(
 		supports_context_cache=True,
+		max_prompt_chars=800_000,
+		request_timeout_seconds=60,
+	),
+	"gemini-flash": LLMProviderCapabilities(
+		supports_context_cache=False,
 		max_prompt_chars=800_000,
 		request_timeout_seconds=60,
 	),
@@ -621,17 +626,26 @@ def _normalize_escaped_latex_document(latex_document: str) -> str:
 	if not looks_fully_escaped and not has_escaped_sequences:
 		return latex_document
 
+	# Protect four-consecutive-backslash sequences (encoded LaTeX \\ line-break)
+	# BEFORE the command-leader marker step so that \\\\\n is not mis-read as
+	# the start of a \n control sequence.  Four backslashes in a fully-escaped
+	# document always represent exactly one LaTeX \\ line-break.
+	line_break_marker = "\uE001"
+	normalized = latex_document.replace("\\\\\\\\", line_break_marker)
+
 	# Protect double-escaped TeX command leaders (e.g. ``\\newif``) so
 	# global ``\\n`` decoding does not turn them into accidental newlines.
 	marker = "\uE000"
-	normalized = re.sub(r"\\\\(?=[A-Za-z@])", marker, latex_document)
+	normalized = re.sub(r"\\\\(?=[A-Za-z@])", marker, normalized)
 
 	# Decode JSON-style escaped control characters.
 	normalized = normalized.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
 
 	# Collapse remaining double backslashes (line breaks, escaped literals).
 	normalized = normalized.replace("\\\\", "\\")
-	return normalized.replace(marker, "\\")
+	# Restore markers: command leaders first, then line-breaks (which expand to \\).
+	normalized = normalized.replace(marker, "\\")
+	return normalized.replace(line_break_marker, "\\\\")
 
 
 def _close_unbalanced_latex_braces(latex_document: str) -> str:
@@ -929,6 +943,13 @@ def sanitize_latex_document_for_compile(
 	latex_document = _drop_orphan_lowercase_fragments(latex_document)
 	latex_document = _normalize_unclosed_resume_lists(latex_document)
 
+	# Fix LLM over-escaping of math-mode dollar signs (e.g. \$\vcenter → $\vcenter).
+	latex_document = _fix_over_escaped_math_dollars(latex_document)
+
+	# Escape bare % signs that appear mid-line; unescaped % starts a LaTeX comment
+	# and will eat the rest of the line including closing braces.
+	latex_document = _escape_unescaped_percent_in_content(latex_document)
+
 	# Keep compile resilient to minor brace mismatches in cached profile/template text.
 	latex_document = _close_unbalanced_latex_braces(latex_document)
 	return _escape_unescaped_ampersands_outside_tabular(latex_document)
@@ -953,6 +974,74 @@ def _escape_unescaped_ampersands_outside_tabular(latex_document: str) -> str:
 		sanitized_lines.append(UNESCAPED_AMPERSAND_PATTERN.sub(r"\\&", line))
 
 	return "\n".join(sanitized_lines)
+
+
+# Matches \$ immediately followed by a backslash-command that appears in math-mode
+# bullet style definitions.  The LLM sometimes over-escapes the opening math $ to
+# \\$ in fully-escaped payloads, producing \$ after decoding instead of the bare $
+# that LaTeX expects for entering inline math.
+_MATH_DOLLAR_OVERCORRECT_PATTERN = re.compile(
+	r"\\\$\\(vcenter|hbox|vbox|bullet|cdot|tiny|small|Bigg|bigg|mathbf|mathit|textstyle)\b"
+)
+
+
+def _fix_over_escaped_math_dollars(latex_document: str) -> str:
+	"""Convert \\$\\<mathcmd> → $\\<mathcmd> produced by LLM over-escaping."""
+	if r"\$" not in latex_document:
+		return latex_document
+	return _MATH_DOLLAR_OVERCORRECT_PATTERN.sub(r"$\\\1", latex_document)
+
+
+def _escape_unescaped_percent_in_content(latex_document: str) -> str:
+	"""Escape bare % signs that appear inside open LaTeX argument groups.
+
+	A bare % outside any brace group starts a LaTeX comment and is intentional
+	(e.g. ``\\fancyhf{} % clear fields`` or a full-line comment).  A bare % that
+	appears while brace_depth > 0 (i.e. inside a macro argument) starts a comment
+	that swallows the rest of the line, including closing braces, causing
+	runaway-argument / "File ended while scanning" errors.
+	"""
+	if "%" not in latex_document:
+		return latex_document
+
+	result_lines: list[str] = []
+	brace_depth: int = 0
+	for line in latex_document.splitlines():
+		out: list[str] = []
+		i = 0
+		while i < len(line):
+			ch = line[i]
+			if ch == "\\" and i + 1 < len(line):
+				# Backslash + next character are one TeX token.
+				out.append(ch)
+				out.append(line[i + 1])
+				i += 2
+				continue
+			if ch == "{":
+				brace_depth += 1
+				out.append(ch)
+				i += 1
+				continue
+			if ch == "}" and brace_depth > 0:
+				brace_depth -= 1
+				out.append(ch)
+				i += 1
+				continue
+			if ch == "%":
+				if brace_depth > 0:
+					# Inside a macro argument: % must be a literal percent, not a comment.
+					out.append("\\%")
+				else:
+					# Outside any argument: intentional LaTeX comment — preserve verbatim.
+					out.append(line[i:])
+					break
+				i += 1
+				continue
+			out.append(ch)
+			i += 1
+		result_lines.append("".join(out))
+
+	return "\n".join(result_lines)
 
 
 def _classify_latex_compile_failure(

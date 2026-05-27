@@ -129,7 +129,7 @@ def test_extract_job_context_requires_a_url() -> None:
 
 
 def test_default_model_constant_is_stable() -> None:
-    assert DEFAULT_GEMINI_MODEL == "gemini-2.5-flash"
+    assert DEFAULT_GEMINI_MODEL == "gemini-2.5-pro"
 
 
 def test_load_resume_source_bundle_reads_resume_folder(tmp_path: Path) -> None:
@@ -1172,6 +1172,52 @@ def test_sanitize_latex_document_for_compile_does_not_decode_whitespace_prefixed
 
     # Keep explicit macro-like control sequence untouched in non-escaped docs.
     assert "Token: \\n{}" in sanitized
+
+def test_sanitize_latex_document_for_compile_decodes_four_backslash_newline_to_linebreak() -> None:
+    """\\\\\\\\\\n (encoded LaTeX \\\\ line-break + newline) must decode to \\\\ + newline, not \\\\\\n."""
+    # In a JSON-escaped doc: \\\\\n = four backslashes + literal \n
+    # Four backslashes = encoded LaTeX \\ line-break
+    # \n = JSON-encoded newline
+    # Expected output: \\ (real LaTeX line-break) + actual newline
+    source = "\\\\textbf{#1} & \\\\textbf{\\\\small #2} \\\\\\\\\n\\\\hline"
+
+    sanitized = sanitize_latex_document_for_compile(source)
+
+    # Should contain \\ + actual newline (not \\\n or \n as two chars)
+    assert "\\\\\n" in sanitized
+    # Must NOT contain the undefined \n control sequence (backslash followed by n as two chars after \\)
+    lines = sanitized.splitlines()
+    for line in lines:
+        assert not line.endswith("\\n"), f"Literal \\\\n control sequence found at end of line: {line!r}"
+
+
+def test_sanitize_latex_document_for_compile_fixes_over_escaped_math_dollars() -> None:
+    """\\$\\vcenter (LLM over-escaped math dollar) must become $\\vcenter."""
+    source = "\\documentclass{article}\n\\begin{document}\n$\\vcenter{\\hbox{\\$\\vcenter{x}}}$\n\\end{document}"
+
+    sanitized = sanitize_latex_document_for_compile(source)
+
+    assert "\\$\\vcenter" not in sanitized
+    assert "$\\vcenter" in sanitized
+
+
+def test_sanitize_latex_document_for_compile_escapes_percent_inside_arguments_only() -> None:
+    """% inside macro arguments must be escaped; % outside (inline comments) must be preserved."""
+    source = (
+        "\\documentclass{article}\n"
+        "\\fancyhf{} % clear all header and footer fields\n"
+        "\\begin{document}\n"
+        "\\resumeItem{Improved throughput by 3% for rehabilitation services}\n"
+        "\\end{document}"
+    )
+
+    sanitized = sanitize_latex_document_for_compile(source)
+
+    # % inside the resumeItem argument must be escaped
+    assert "3\\% for rehabilitation" in sanitized
+    # % in the inline LaTeX comment outside any braces must NOT be escaped
+    assert "\\fancyhf{} % clear all header" in sanitized
+
 
 def test_compile_latex_to_pdf_sanitizes_unescaped_ampersands(monkeypatch, tmp_path: Path) -> None:
     template_path = tmp_path / "template.tex"

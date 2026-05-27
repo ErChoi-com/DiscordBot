@@ -556,11 +556,17 @@ def _groq_api_key() -> str | None:
 
 
 def _provider_switch_candidates(settings: GeminiSettings) -> list[ResumeProviderCandidate]:
+    gemini_api_key = normalize_space(str(settings.api_key or "")) or None
     providers: dict[str, ResumeProviderCandidate] = {
         "gemini": ResumeProviderCandidate(
             name="gemini",
-            api_key=normalize_space(str(settings.api_key or "")) or None,
+            api_key=gemini_api_key,
             model=normalize_gemini_model_name(settings.model),
+        ),
+        "gemini-flash": ResumeProviderCandidate(
+            name="gemini-flash",
+            api_key=gemini_api_key,
+            model=normalize_gemini_model_name("gemini-2.5-flash"),
         ),
         "openrouter": ResumeProviderCandidate(
             name="openrouter",
@@ -581,6 +587,7 @@ def _generate_with_gemini(
     prompt: str,
     cache_name: str | None,
     client_factory: Callable[[str], Any] | None,
+    model_override: str | None = None,
 ) -> str:
     factory = client_factory
     if factory is None:
@@ -589,7 +596,8 @@ def _generate_with_gemini(
         factory = lambda api_key: genai.Client(api_key=api_key)
     client = factory(settings.api_key)
 
-    kwargs: dict[str, Any] = {"model": normalize_gemini_model_name(settings.model), "contents": prompt}
+    model = model_override or normalize_gemini_model_name(settings.model)
+    kwargs: dict[str, Any] = {"model": model, "contents": prompt}
     if cache_name:
         kwargs["config"] = _build_cached_content_config(cache_name)
 
@@ -701,8 +709,14 @@ def generate_resume_rewrite(
         timeout = capabilities.request_timeout_seconds if capabilities else 45
 
         try:
-            if provider.name == "gemini":
-                text = _generate_with_gemini(settings, effective_prompt, effective_cache_name, client_factory)
+            if provider.name in ("gemini", "gemini-flash"):
+                text = _generate_with_gemini(
+                    settings,
+                    effective_prompt,
+                    effective_cache_name,
+                    client_factory,
+                    model_override=provider.model if provider.name == "gemini-flash" else None,
+                )
             elif provider.name == "openrouter":
                 text = _generate_with_openai_compatible_provider(
                     endpoint=OPENROUTER_CHAT_COMPLETIONS_URL,
