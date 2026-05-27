@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -578,16 +579,53 @@ def _latex_needs_rerun(stdout: str, stderr: str) -> bool:
 
 
 def extract_latex_document(text: str) -> str | None:
+	# 1. <latex>...</latex> tags
 	match = LATEX_TAG_PATTERN.search(text)
 	if match:
 		latex_text = match.group(1).strip()
-		return latex_text or None
+		# Validate that the tag content is actually a LaTeX document, not a
+		# placeholder or truncated response (e.g. "..." or plain text).
+		if latex_text and "\\documentclass" in latex_text and "\\end{document}" in latex_text:
+			return latex_text
+		# Fall through if tag content is not a valid LaTeX document.
 
+	# 2. Code fences (```latex, ```tex, ``` ```, or ```json wrapping a JSON payload)
 	for fence in LATEX_FENCE_PATTERN.finditer(text):
-		candidate = fence.group(1).strip()
-		if "\\documentclass" in candidate and "\\end{document}" in candidate:
+		raw_content = fence.group(1)
+		candidate = raw_content.strip()
+
+		# Strip an optional language-identifier line added by the LLM
+		# (e.g. "json", "latex", "tex") that the fence pattern includes in
+		# group(1) when the identifier is not one of the expected latex/tex values.
+		nl_pos = candidate.find("\n")
+		if nl_pos != -1:
+			first_line = candidate[:nl_pos].strip().lower()
+			if first_line in ("json", "latex", "tex", ""):
+				candidate = candidate[nl_pos + 1:].strip()
+
+		# If the fence content is a JSON object, extract the LaTeX document from
+		# the appropriate field rather than returning the raw JSON blob (which
+		# only incidentally contains \documentclass as a string value).
+		if candidate.startswith("{"):
+			try:
+				parsed_fence = json.loads(candidate)
+				if isinstance(parsed_fence, dict):
+					for key in ("rewritten_tex", "latex", "latex_document"):
+						val = parsed_fence.get(key)
+						if isinstance(val, str) and "\\documentclass" in val:
+							return val.strip()
+			except json.JSONDecodeError:
+				pass
+			# JSON parse failed; fall back to LATEX_DOCUMENT_PATTERN inside fence
+			inner = LATEX_DOCUMENT_PATTERN.search(candidate)
+			if inner:
+				extracted = inner.group(1).strip()
+				if extracted:
+					return extracted
+		elif "\\documentclass" in candidate and "\\end{document}" in candidate:
 			return candidate
 
+	# 3. Direct LaTeX document anywhere in the full text
 	inline_match = LATEX_DOCUMENT_PATTERN.search(text)
 	if inline_match:
 		candidate = inline_match.group(1).strip()
@@ -943,6 +981,24 @@ def sanitize_latex_document_for_compile(
 	latex_document = _drop_orphan_lowercase_fragments(latex_document)
 	latex_document = _normalize_unclosed_resume_lists(latex_document)
 
+	# Correct malformed \end{document>} and similar LLM typos.
+	latex_document = _fix_malformed_end_document(latex_document)
+
+	# Insert a newline between any % separator comment and a structural LaTeX
+	# command that the LLM concatenated onto the same line.  Only triggered when
+	# the comment text contains 3+ separator chars (e.g. "---") so legitimately
+	# commented-out \begin/\end blocks are not accidentally activated.
+	latex_document = _split_comment_concatenated_commands(latex_document)
+
+	# Close any unclosed \resumeSubHeadingListStart / \resumeItemListStart macros
+	# that the LLM omitted due to output truncation.
+	latex_document = _close_unclosed_resume_list_macros(latex_document)
+
+	# When the LLM omits real newlines, % comment markers at brace-depth 0 would
+	# comment out the entire rest of the single-line document.  Insert newlines
+	# before such markers so each comment is isolated to its own line.
+	latex_document = _split_single_line_latex_comments(latex_document)
+
 	# Fix LLM over-escaping of math-mode dollar signs (e.g. \$\vcenter → $\vcenter).
 	latex_document = _fix_over_escaped_math_dollars(latex_document)
 
@@ -952,6 +1008,10 @@ def sanitize_latex_document_for_compile(
 
 	# Keep compile resilient to minor brace mismatches in cached profile/template text.
 	latex_document = _close_unbalanced_latex_braces(latex_document)
+
+	# Strip XML/JSON artifacts that sometimes appear after \end{document} (e.g. </latex>, quotes).
+	latex_document = _strip_post_end_document_artifacts(latex_document)
+
 	return _escape_unescaped_ampersands_outside_tabular(latex_document)
 
 
@@ -980,6 +1040,155 @@ def _escape_unescaped_ampersands_outside_tabular(latex_document: str) -> str:
 # bullet style definitions.  The LLM sometimes over-escapes the opening math $ to
 # \\$ in fully-escaped payloads, producing \$ after decoding instead of the bare $
 # that LaTeX expects for entering inline math.
+_END_DOCUMENT_CORRUPTION_PATTERN = re.compile(r"\\end\{document[^}]*\}?", re.IGNORECASE)
+
+
+def _fix_malformed_end_document(latex_document: str) -> str:
+	"""Correct \\end{document>}, \\end{document>} and similar LLM typos to \\end{document}.
+
+	LLMs sometimes embed a stray > or other character inside \\end{document},
+	often as a leftover from markdown rendering.  The closing brace may be
+	present but after the stray char (\\end{document>}), or absent entirely
+	when the LLM truncated its output (\\end{document>).  Both forms are
+	handled by making the closing brace optional in the regex.
+
+	Fast path: return immediately if no character other than '}' follows
+	'document' inside the \\end{...} group.
+	"""
+	if not re.search(r"\\end\{document[^}]", latex_document, re.IGNORECASE):
+		return latex_document
+	return _END_DOCUMENT_CORRUPTION_PATTERN.sub(r"\\end{document}", latex_document)
+
+
+# Regex: a % SEPARATOR comment (contains 3+ consecutive dash/equals/etc. chars)
+# immediately followed by a structural LaTeX command, with no intervening newline
+# or backslash between the separator text and the command.
+#
+# The requirement for 3+ separator chars distinguishes section-divider comments
+# like "%----------HEADING----------\begin{center}" from legitimately-commented-out
+# code like "%\begin{itemize}" or "%\end{itemize}", which must NOT be activated.
+_COMMENT_CONCATENATED_CMD_PATTERN = re.compile(
+	r"(%[^\n\\]*[-=*#+]{3,}[^\n\\]*)(\\(?:begin|end|section|subsection|subsubsection"
+	r"|paragraph|vspace|hspace|noindent|centering|renewcommand|newcommand)\s*(?=[\{\[\\]))",
+	re.MULTILINE,
+)
+
+
+def _split_comment_concatenated_commands(latex_document: str) -> str:
+	"""Insert a newline between a % separator comment and a LaTeX command on the same line.
+
+	LLMs sometimes omit the newline between a section-separator comment and the
+	following structural command, e.g.:
+
+	    %----------HEADING----------\\begin{center}
+
+	should be:
+
+	    %----------HEADING----------
+	    \\begin{center}
+
+	Without the newline the % makes everything after it a LaTeX comment, so
+	\\begin{center} never executes while a later \\end{center} still does →
+	fatal "\\begin{document} ended by \\end{center}" error.
+
+	To avoid activating intentionally-commented-out code like "%\\begin{itemize}"
+	or "%\\end{itemize}", the split is only applied when the comment text contains
+	3+ consecutive separator characters (dashes, equals, etc.) before the command.
+	"""
+	if "%" not in latex_document:
+		return latex_document
+	return _COMMENT_CONCATENATED_CMD_PATTERN.sub(r"\1\n\2", latex_document)
+
+
+def _close_unclosed_resume_list_macros(latex_document: str) -> str:
+	"""Insert missing \\resumeSubHeadingListEnd / \\resumeItemListEnd before \\end{document}.
+
+	When the LLM truncates its output it sometimes omits the closing resume-list
+	macros.  Each macro expands to \\end{itemize}, so a missing one leaves an
+	unclosed \\begin{itemize} that causes a fatal compile error.  This function
+	counts the open/close calls for each macro pair and appends the missing
+	closers (inner list first, then outer) immediately before \\end{document}.
+	"""
+	if "\\end{document}" not in latex_document:
+		return latex_document
+
+	missing_item = (
+		latex_document.count("\\resumeItemListStart")
+		- latex_document.count("\\resumeItemListEnd")
+	)
+	missing_sub = (
+		latex_document.count("\\resumeSubHeadingListStart")
+		- latex_document.count("\\resumeSubHeadingListEnd")
+	)
+
+	if missing_item <= 0 and missing_sub <= 0:
+		return latex_document
+
+	# Close inner list before outer list.
+	insert = ""
+	if missing_item > 0:
+		insert += "\\resumeItemListEnd\n" * missing_item
+	if missing_sub > 0:
+		insert += "\\resumeSubHeadingListEnd\n" * missing_sub
+
+	return latex_document.replace("\\end{document}", insert + "\\end{document}", 1)
+
+
+def _strip_post_end_document_artifacts(latex_document: str) -> str:
+	"""Remove anything the LLM appended after \\end{document}.
+
+	LLMs sometimes leak JSON structure or XML tags (e.g. </latex>, closing quotes)
+	after the document's \\end{document}.  pdflatex/xelatex ignore such content
+	but some MiKTeX versions emit spurious errors.  Truncating at the closing
+	tag keeps the compiled output deterministic.
+	"""
+	end_tag = "\\end{document}"
+	pos = latex_document.find(end_tag)
+	if pos == -1:
+		return latex_document
+	return latex_document[: pos + len(end_tag)] + "\n"
+
+
+def _split_single_line_latex_comments(latex_document: str) -> str:
+	"""Insert real newlines before % LaTeX comments in near-single-line documents.
+
+	When the LLM returns a document with no actual newlines (only % comment
+	markers inline), pdflatex interprets everything from the first % to end-of-line
+	as a comment — which in a single-line document means the entire rest of the
+	file, including \\begin{document}.  This pre-pass inserts \\n before each %
+	at brace-depth 0 so each comment is safely contained to its own line.
+	"""
+	if latex_document.count("\n") >= 2:
+		return latex_document
+	result: list[str] = []
+	brace_depth = 0
+	i = 0
+	while i < len(latex_document):
+		ch = latex_document[i]
+		if ch == "\\" and i + 1 < len(latex_document):
+			result.append(ch)
+			result.append(latex_document[i + 1])
+			i += 2
+			continue
+		if ch == "{":
+			brace_depth += 1
+		elif ch == "}" and brace_depth > 0:
+			brace_depth -= 1
+		elif ch == "%" and brace_depth == 0:
+			if result and result[-1] != "\n":
+				result.append("\n")
+			result.append("%")
+			i += 1
+			while i < len(latex_document) and latex_document[i] not in ("\n", "\r"):
+				result.append(latex_document[i])
+				i += 1
+			result.append("\n")
+			continue
+		result.append(ch)
+		i += 1
+	return "".join(result)
+
+
 _MATH_DOLLAR_OVERCORRECT_PATTERN = re.compile(
 	r"\\\$\\(vcenter|hbox|vbox|bullet|cdot|tiny|small|Bigg|bigg|mathbf|mathit|textstyle)\b"
 )

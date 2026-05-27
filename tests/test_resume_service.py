@@ -1324,7 +1324,7 @@ def test_generate_resume_rewrite_uses_cache_name_when_available(tmp_path: Path) 
     baseinfo_file = tmp_path / "baseinfo.txt"
     baseinfo_file.write_text("Candidate has Python and backend experience.", encoding="utf-8")
 
-    models_api = _FakeModelsApi('{"summary":"ok","targeted_bullets":["a"],"revised_profile":"b"}')
+    models_api = _FakeModelsApi('{"summary":"ok","targeted_bullets":["a"],"revised_profile":"b","rewritten_tex":"\\\\documentclass{article}\\\\begin{document}Hi\\\\end{document}"}')
     fake_client = _FakeGeminiClient(models_api)
 
     result = generate_resume_rewrite(
@@ -1378,6 +1378,104 @@ def test_generate_resume_rewrite_extracts_latex_block(tmp_path: Path) -> None:
 
     assert result.status == "ok"
     assert result.latex_document == "\\documentclass{article}\\begin{document}Hi\\end{document}"
+
+
+def test_extract_latex_document_rejects_latex_tag_with_placeholder_content() -> None:
+    """<latex>...</latex> whose content lacks \\documentclass must return None."""
+    assert extract_latex_document("<latex>...</latex>") is None
+    assert extract_latex_document("<latex>some plain text</latex>") is None
+
+
+def test_extract_latex_document_handles_json_fenced_response() -> None:
+    """A ```json fence containing a rewritten_tex field must return the LaTeX, not the JSON."""
+    latex = "\\documentclass[11pt]{article}\n\\begin{document}\nHello\n\\end{document}"
+    payload = json.dumps({"summary": "ok", "rewritten_tex": latex})
+    fenced = f"```json\n{payload}\n```"
+    result = extract_latex_document(fenced)
+    assert result == latex
+
+
+def test_fix_malformed_end_document_without_closing_brace() -> None:
+    """\\end{document> (no closing brace) must be corrected to \\end{document}."""
+    from services.resumes.resume import sanitize_latex_document_for_compile
+    # Simulate the normalized (single-backslash) form the sanitizer receives
+    bad = "\\documentclass{article}\n\\begin{document}\nHello\n\\end{document>"
+    fixed = sanitize_latex_document_for_compile(bad)
+    assert "\\end{document}" in fixed
+    assert "\\end{document>" not in fixed
+
+
+def test_split_comment_concatenated_commands() -> None:
+    """% separator comment immediately followed by \\begin/\\section must be split onto its own line."""
+    from services.resumes.resume import sanitize_latex_document_for_compile
+    # Simulate the LLM omitting the newline between a separator comment and the command
+    bad = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "%----------HEADING----------\\begin{center}\n"
+        "Title\n"
+        "\\end{center}\n"
+        "%-----------SECTION-----------\\section{Skills}\n"
+        "stuff\n"
+        "\\end{document}\n"
+    )
+    fixed = sanitize_latex_document_for_compile(bad)
+    lines = fixed.splitlines()
+    # The \begin{center} and \section must appear on their own lines (not after %)
+    begin_lines = [l for l in lines if "\\begin{center}" in l]
+    section_lines = [l for l in lines if "\\section{Skills}" in l]
+    assert begin_lines, "\\begin{center} should still be present"
+    assert not begin_lines[0].lstrip().startswith("%"), "\\begin{center} must not be on a comment line"
+    assert section_lines, "\\section{Skills} should still be present"
+    assert not section_lines[0].lstrip().startswith("%"), "\\section must not be on a comment line"
+
+
+def test_split_comment_does_not_activate_commented_out_environments() -> None:
+    """Legitimately commented-out \\begin/\\end blocks must NOT be activated."""
+    from services.resumes.resume import sanitize_latex_document_for_compile
+    # The LLM left an entire itemize block commented out — must stay commented
+    bad = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "text\n"
+        "%\\begin{itemize}\n"
+        "%  \\item one\n"
+        "%  \\item two\n"
+        "%\\end{itemize}\n"
+        "\\end{document}\n"
+    )
+    fixed = sanitize_latex_document_for_compile(bad)
+    lines = fixed.splitlines()
+    # Every line containing \begin{itemize} or \end{itemize} must start with %
+    for line in lines:
+        if "\\begin{itemize}" in line or "\\end{itemize}" in line:
+            assert line.lstrip().startswith("%"), (
+                f"itemize command should remain commented out, got: {line!r}"
+            )
+
+
+def test_close_unclosed_resume_list_macros_on_truncation() -> None:
+    """Truncated output missing \\resumeSubHeadingListEnd must be auto-closed."""
+    from services.resumes.resume import sanitize_latex_document_for_compile
+    # Document body only (no \\newcommand definitions) so counting is unambiguous.
+    # The LLM truncated before emitting \\resumeSubHeadingListEnd.
+    truncated = (
+        "\\documentclass{article}\n"
+        "\\begin{document}\n"
+        "\\resumeSubHeadingListStart\n"
+        "\\resumeItemListStart\n"
+        "text\n"
+        "\\resumeItemListEnd\n"
+        "\\end{document}\n"
+    )
+    assert truncated.count("\\resumeSubHeadingListEnd") == 0  # sanity check
+    fixed = sanitize_latex_document_for_compile(truncated)
+    # Exactly one closer must have been inserted
+    assert fixed.count("\\resumeSubHeadingListEnd") == 1
+    # It must appear before \end{document}
+    end_pos = fixed.index("\\end{document}")
+    close_pos = fixed.index("\\resumeSubHeadingListEnd")
+    assert close_pos < end_pos, "\\resumeSubHeadingListEnd must appear before \\end{document}"
 
 
 def test_generate_resume_rewrite_prefers_rewritten_tex_field(tmp_path: Path) -> None:
@@ -1620,7 +1718,7 @@ def test_generate_resume_rewrite_falls_back_to_openrouter_when_no_gemini_key(
     def _mock_post(url: str, **kwargs: object) -> object:
         post_calls.append(url)
         return _make_openai_compat_response(
-            json.dumps({"summary": "ok", "targeted_bullets": ["a"], "revised_profile": "b"})
+            json.dumps({"summary": "ok", "targeted_bullets": ["a"], "revised_profile": "b", "rewritten_tex": "\\documentclass{article}\\begin{document}Hi\\end{document}"})
         )
 
     monkeypatch.setattr(_lm.requests, "post", _mock_post)
@@ -1671,7 +1769,7 @@ def test_generate_resume_rewrite_falls_back_to_groq_when_no_gemini_or_openrouter
     def _mock_post(url: str, **kwargs: object) -> object:
         post_calls.append(url)
         return _make_openai_compat_response(
-            json.dumps({"summary": "ok", "targeted_bullets": ["a"], "revised_profile": "b"})
+            json.dumps({"summary": "ok", "targeted_bullets": ["a"], "revised_profile": "b", "rewritten_tex": "\\documentclass{article}\\begin{document}Hi\\end{document}"})
         )
 
     monkeypatch.setattr(_lm.requests, "post", _mock_post)

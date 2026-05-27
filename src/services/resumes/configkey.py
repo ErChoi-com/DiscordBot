@@ -59,7 +59,12 @@ def _configured_model(config: Any | None) -> str:
 
 
 def _fallback_api_key() -> str | None:
-    return os.getenv("GOOGLE_AI_STUDIO_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("geminiAPI")
+    return (
+        os.getenv("GOOGLE_AI_STUDIO_API_KEY")
+        or os.getenv("GEMINI_API_KEY")
+        or os.getenv("geminiAPI")
+        or _read_dotenv_value("GOOGLE_AI_STUDIO_API_KEY", "GEMINI_API_KEY", "geminiAPI")
+    )
 
 
 def _fallback_model() -> str | None:

@@ -742,8 +742,29 @@ def generate_resume_rewrite(
             continue
 
         if text.strip():
-            used_provider = provider.name
-            break
+            # Validate LaTeX extraction before committing to this provider.
+            # Some models return non-empty text that contains no valid LaTeX document
+            # (e.g. a refusal, a truncated response, or a plain-text resume). Fall
+            # through to the next provider in that case rather than returning
+            # latex_document=None to the caller.
+            _candidate: str | None = None
+            try:
+                _parsed_check = json.loads(text)
+                if isinstance(_parsed_check, dict):
+                    for _key in ("rewritten_tex", "latex", "latex_document"):
+                        _val = _parsed_check.get(_key)
+                        if isinstance(_val, str) and "\\documentclass" in _val and "\\end{document}" in _val:
+                            _candidate = _val.strip()
+                            break
+            except json.JSONDecodeError:
+                pass
+            if _candidate is None:
+                _candidate = extract_latex_document(text)
+            if _candidate is not None:
+                used_provider = provider.name
+                break
+            provider_errors.append(f"{provider.name}: response contained no valid LaTeX document")
+            continue
 
         provider_errors.append(f"{provider.name}: empty response")
 
