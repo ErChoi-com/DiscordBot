@@ -566,8 +566,12 @@ def fetch_json(url: str, timeout_ms: int = 15_000) -> dict | list | None:
         return None
     try:
         return _executor.submit(_do_fetch_json, url, timeout_ms).result(timeout=(timeout_ms / 1000) + 5)
+    except concurrent.futures.TimeoutError:
+        # TimeoutError string is often empty; include explicit timing for diagnostics.
+        print(f"[browser] fetch_json dispatch timed out after {(timeout_ms / 1000) + 5:.1f}s -- {url}")
+        return None
     except Exception as exc:
-        print(f"[browser] fetch_json dispatch failed: {exc}")
+        print(f"[browser] fetch_json dispatch failed ({type(exc).__name__}): {exc!r}")
         return None
 
 

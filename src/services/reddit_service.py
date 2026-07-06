@@ -914,8 +914,10 @@ def _scrape_via_playwright(
     try:
         from services import browser_service
     except ImportError:
+        print(f"[reddit][diag] r/{sub}: Playwright layer import failed")
         return None
     if not browser_service.ensure_ready():
+        print(f"[reddit][diag] r/{sub}: Playwright ensure_ready returned False")
         return None
 
     url = (
@@ -923,7 +925,11 @@ def _scrape_via_playwright(
         f"?limit={max_items * 3}&t={tf}&raw_json=1&include_over_18=1&over18=yes"
     )
     data = browser_service.fetch_json(url)
+    if data is None:
+        print(f"[reddit][diag] r/{sub}: Playwright fetch_json returned None")
+        return None
     if not isinstance(data, dict):
+        print(f"[reddit][diag] r/{sub}: Playwright fetch_json returned {type(data).__name__}, expected dict")
         return None
 
     children = (data.get("data") or {}).get("children") or []

@@ -55,6 +55,8 @@ Thumbs.db
 *.log
 *.sqlite3
 *.db
+*.db-wal
+*.db-shm
 
 # Runtime/state files
 .bot.lock
@@ -81,6 +83,19 @@ dedup_listings/
 *.key
 *.pem
 secrets.json
+secrets*.json
+*_secrets.json
+*_credentials.json
+credentials.json
+token.json
+tokens.json
+auth.json
+service_account*.json
+*_token.txt
+*.secret
+
+# Claude AI local settings (may contain API keys)
+.claude/settings.local.json
 
 # VPN credentials and configs (never commit these)
 vpn/auth.txt
