@@ -1,7 +1,12 @@
 discord.py
 requests
+curl_cffi
+praw
+pysocks
+playwright
 beautifulsoup4
 python-jobspy>=1.1.82
 ftfy
 google-genai
+pycountry
 pdflatex

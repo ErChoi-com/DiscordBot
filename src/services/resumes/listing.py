@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -18,9 +19,18 @@ from .. import (
     scrape_job_descriptions_from_all_sites,
     scrape_jobs_from_board_url,
 )
+from .. import browser_service
 from .cache import normalize_gemini_model_name
 from .configkey import GeminiSettings
 from .resume import LLM_PROVIDER_SWITCH_ORDER, PROVIDER_CAPABILITIES, TEMPLATE_PATH, extract_latex_document, read_resume_template
+from .structured import (
+    StructuredSelection,
+    build_structured_prompt,
+    detect_role_family,
+    load_structured_profile,
+    parse_structured_response,
+    render_structured_resume,
+)
 
 SPACE_PATTERN = re.compile(r"\s+")
 TITLE_PREFIX_PATTERN = re.compile(r"^\[[^\]]+\]\s*")
@@ -92,6 +102,58 @@ def extract_first_url(text: str) -> str | None:
 
 def extract_message_lines(message_content: str) -> list[str]:
     return [line.strip() for line in message_content.splitlines() if line.strip()]
+
+
+# Errors that typically mean "transient network/TLS hiccup" (including the
+# JA3/TLS-fingerprint connection resets some job boards use for bot
+# detection) rather than a hard, permanent block — worth a couple of quick
+# retries before falling through to the next scraping strategy.
+_TRANSIENT_REQUEST_EXCEPTIONS = (
+    requests.exceptions.SSLError,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+)
+
+
+def _get_with_retry(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: int,
+    max_attempts: int = 3,
+    backoff_seconds: float = 0.6,
+) -> requests.Response:
+    last_exc: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            return requests.get(url, headers=headers, timeout=timeout)
+        except _TRANSIENT_REQUEST_EXCEPTIONS as exc:
+            last_exc = exc
+            if attempt < max_attempts - 1:
+                time.sleep(backoff_seconds * (attempt + 1))
+    assert last_exc is not None
+    raise last_exc
+
+
+def _post_with_retry(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    json_payload: Any = None,
+    timeout: int,
+    max_attempts: int = 3,
+    backoff_seconds: float = 0.6,
+) -> requests.Response:
+    last_exc: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            return requests.post(url, headers=headers, json=json_payload, timeout=timeout)
+        except _TRANSIENT_REQUEST_EXCEPTIONS as exc:
+            last_exc = exc
+            if attempt < max_attempts - 1:
+                time.sleep(backoff_seconds * (attempt + 1))
+    assert last_exc is not None
+    raise last_exc
 
 
 def _parse_company_from_soup(soup: BeautifulSoup) -> str | None:
@@ -238,10 +300,10 @@ def _scrape_indeed_job_posting_with_graphql(
     for endpoint in INDEED_GRAPHQL_ENDPOINTS:
         for payload in payloads:
             try:
-                response = requests.post(
+                response = _post_with_retry(
                     endpoint,
                     headers=headers,
-                    json=payload,
+                    json_payload=payload,
                     timeout=max(5, int(timeout_seconds)),
                 )
                 response.raise_for_status()
@@ -312,6 +374,571 @@ def _scrape_indeed_job_posting_with_graphql(
     return None
 
 
+LINKEDIN_JOB_ID_PATTERN = re.compile(r"\d{8,12}")
+
+
+def _extract_linkedin_job_id(posting_url: str) -> str | None:
+    parsed = urlparse(posting_url)
+    query = parse_qs(parsed.query or "")
+    for key in ("currentJobId", "jobId"):
+        values = query.get(key)
+        if not values:
+            continue
+        candidate = normalize_space(values[0])
+        if candidate.isdigit():
+            return candidate
+
+    matches = LINKEDIN_JOB_ID_PATTERN.findall(parsed.path)
+    if matches:
+        return matches[-1]
+    return None
+
+
+def _scrape_linkedin_job_posting_with_guest_api(
+    posting_url: str,
+    timeout_seconds: int,
+    user_agent: str,
+) -> ScrapedJobPosting | None:
+    """Fetch a LinkedIn job posting via its public "guest" widget API.
+
+    LinkedIn's normal job pages block plain `requests` clients via TLS/JA3
+    fingerprinting (surfaces as SSLError/EOF), but this anonymous endpoint —
+    used by LinkedIn itself to render embeddable job cards — serves the same
+    title/company/location/description over plain HTTP(S) without a login
+    wall or fingerprint check.
+    """
+    job_id = _extract_linkedin_job_id(posting_url)
+    if not job_id:
+        return None
+
+    api_url = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": posting_url,
+    }
+    try:
+        response = _get_with_retry(api_url, headers=headers, timeout=max(5, int(timeout_seconds)))
+        response.raise_for_status()
+        html_text = response.text
+    except requests.RequestException:
+        return None
+
+    if not html_text or not html_text.strip():
+        return None
+
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    title_node = soup.select_one("h2.top-card-layout__title") or soup.select_one("h2.topcard__title")
+    title = normalize_space(title_node.get_text(" ", strip=True)) if title_node else ""
+
+    company_node = soup.select_one("a.topcard__org-name-link")
+    company = normalize_space(company_node.get_text(" ", strip=True)) if company_node else None
+
+    location_node = soup.select_one("span.topcard__flavor--bullet")
+    location = normalize_space(location_node.get_text(" ", strip=True)) if location_node else None
+
+    description_node = soup.select_one("div.show-more-less-html__markup")
+    detail_text = ""
+    if description_node is not None:
+        for br in description_node.find_all("br"):
+            br.replace_with("\n")
+        for li in description_node.find_all("li"):
+            li.insert(0, "\n")
+        raw_lines = description_node.get_text("\n", strip=False).splitlines()
+        detail_text = "\n".join(normalize_space(line) for line in raw_lines if normalize_space(line))
+
+    criteria_lines: list[str] = []
+    for item in soup.select("li.description__job-criteria-item"):
+        header = item.select_one("h3.description__job-criteria-subheader")
+        value = item.select_one("span.description__job-criteria-text")
+        if header is None or value is None:
+            continue
+        header_text = normalize_space(header.get_text(" ", strip=True))
+        value_text = normalize_space(value.get_text(" ", strip=True))
+        if header_text and value_text:
+            criteria_lines.append(f"{header_text} {value_text}")
+
+    if not detail_text and not criteria_lines:
+        return None
+
+    full_detail_text = "\n".join(([detail_text] if detail_text else []) + criteria_lines)
+
+    normalized_title = title or "Job Posting"
+    description_raw = compact_job_description(
+        posting_url=posting_url,
+        title=normalized_title,
+        company=company,
+        location=location,
+        site="linkedin",
+        detail_text=full_detail_text,
+    )
+    highlights = _extract_highlights(full_detail_text or description_raw)
+    if not highlights:
+        highlights = [line for line in description_raw.splitlines() if ":" in line][:5]
+
+    return ScrapedJobPosting(
+        title=normalized_title,
+        company=company,
+        location=location,
+        description=description_raw,
+        highlights=highlights,
+        source_url=posting_url,
+    )
+
+
+GREENHOUSE_JOB_PATH_PATTERN = re.compile(r"^/([^/]+)/jobs/(\d+)")
+
+
+def _extract_greenhouse_job_ref(posting_url: str) -> tuple[str, str] | None:
+    parsed = urlparse(posting_url)
+    match = GREENHOUSE_JOB_PATH_PATTERN.match(parsed.path)
+    if not match:
+        return None
+    return match.group(1), match.group(2)
+
+
+def _scrape_greenhouse_job_posting_with_api(
+    posting_url: str,
+    timeout_seconds: int,
+    user_agent: str,
+) -> ScrapedJobPosting | None:
+    """Fetch a Greenhouse job posting via its public boards API.
+
+    `boards.greenhouse.io` / `job-boards.greenhouse.io` pages are ordinary
+    server-rendered HTML and normally work fine with `requests`, but the
+    JSON API is the more precise (and marginally more scrape-resistant)
+    source, and matches the same "prefer the vendor's public API over
+    scraping a rendered page" pattern used for LinkedIn/Indeed.
+    """
+    job_ref = _extract_greenhouse_job_ref(posting_url)
+    if job_ref is None:
+        return None
+    board_token, job_id = job_ref
+
+    api_url = f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs/{job_id}?content=true"
+    headers = {"User-Agent": user_agent, "Accept": "application/json"}
+    try:
+        response = _get_with_retry(api_url, headers=headers, timeout=max(5, int(timeout_seconds)))
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError):
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    title = normalize_space(str(data.get("title") or "")) or "Job Posting"
+    company = normalize_space(str(data.get("company_name") or "")) or None
+    location_data = data.get("location") if isinstance(data.get("location"), dict) else None
+    location = normalize_space(str(location_data.get("name") or "")) if location_data else None
+    location = location or None
+
+    content_html = str(data.get("content") or "")
+    detail_text = normalize_space(BeautifulSoup(content_html, "html.parser").get_text("\n", strip=True)) if content_html else ""
+    if not detail_text:
+        return None
+
+    description_raw = compact_job_description(
+        posting_url=posting_url,
+        title=title,
+        company=company,
+        location=location,
+        site="greenhouse",
+        detail_text=detail_text,
+    )
+    highlights = _extract_highlights(detail_text or description_raw)
+    if not highlights:
+        highlights = [line for line in description_raw.splitlines() if ":" in line][:5]
+
+    return ScrapedJobPosting(
+        title=title,
+        company=company,
+        location=location,
+        description=description_raw,
+        highlights=highlights,
+        source_url=posting_url,
+    )
+
+
+LEVER_POSTING_PATH_PATTERN = re.compile(r"^/([^/]+)/([0-9a-fA-F-]{16,})")
+
+
+def _extract_lever_posting_ref(posting_url: str) -> tuple[str, str] | None:
+    parsed = urlparse(posting_url)
+    match = LEVER_POSTING_PATH_PATTERN.match(parsed.path)
+    if not match:
+        return None
+    return match.group(1), match.group(2)
+
+
+def _scrape_lever_job_posting_with_api(
+    posting_url: str,
+    timeout_seconds: int,
+    user_agent: str,
+) -> ScrapedJobPosting | None:
+    """Fetch a Lever job posting via its public postings API (same pattern
+    as the Greenhouse/LinkedIn/Indeed direct-API fallbacks)."""
+    posting_ref = _extract_lever_posting_ref(posting_url)
+    if posting_ref is None:
+        return None
+    company, posting_id = posting_ref
+
+    api_url = f"https://api.lever.co/v0/postings/{company}/{posting_id}?mode=json"
+    headers = {"User-Agent": user_agent, "Accept": "application/json"}
+    try:
+        response = _get_with_retry(api_url, headers=headers, timeout=max(5, int(timeout_seconds)))
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError):
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    title = normalize_space(str(data.get("text") or "")) or "Job Posting"
+    # Lever's postings API has no company-name field; the URL slug is the
+    # company identifier, so humanize that instead (same convention used for
+    # other ATS slugs in ats_service.py).
+    company_name = normalize_space(company.replace("-", " ").replace("_", " ")).title() or None
+    categories = data.get("categories") if isinstance(data.get("categories"), dict) else {}
+    location = normalize_space(str(categories.get("location") or "")) or None
+    team = normalize_space(str(categories.get("team") or categories.get("department") or ""))
+
+    detail_html = str(data.get("descriptionPlain") or data.get("description") or "")
+    detail_text = normalize_space(BeautifulSoup(detail_html, "html.parser").get_text("\n", strip=True)) if "<" in detail_html else normalize_space(detail_html)
+    lists = data.get("lists") if isinstance(data.get("lists"), list) else []
+    list_lines: list[str] = []
+    if team:
+        list_lines.append(f"Team: {team}")
+    for section in lists:
+        if not isinstance(section, dict):
+            continue
+        section_title = normalize_space(str(section.get("text") or ""))
+        section_content = str(section.get("content") or "")
+        section_text = normalize_space(BeautifulSoup(section_content, "html.parser").get_text("\n", strip=True)) if section_content else ""
+        if section_title:
+            list_lines.append(section_title)
+        if section_text:
+            list_lines.extend(line for line in section_text.split("\n") if line)
+
+    full_detail_text = "\n".join(([detail_text] if detail_text else []) + list_lines)
+    if not full_detail_text:
+        return None
+
+    description_raw = compact_job_description(
+        posting_url=posting_url,
+        title=title,
+        company=company_name,
+        location=location,
+        site="lever",
+        detail_text=full_detail_text,
+    )
+    highlights = _extract_highlights(full_detail_text or description_raw)
+    if not highlights:
+        highlights = [line for line in description_raw.splitlines() if ":" in line][:5]
+
+    return ScrapedJobPosting(
+        title=title,
+        company=company_name,
+        location=location,
+        description=description_raw,
+        highlights=highlights,
+        source_url=posting_url,
+    )
+
+
+ASHBY_JOB_PATH_PATTERN = re.compile(r"^/([^/]+)/([0-9a-fA-F-]{16,})")
+
+
+def _extract_ashby_job_ref(posting_url: str) -> tuple[str, str] | None:
+    parsed = urlparse(posting_url)
+    match = ASHBY_JOB_PATH_PATTERN.match(parsed.path)
+    if not match:
+        return None
+    return match.group(1), match.group(2)
+
+
+_ASHBY_JOB_POSTING_QUERY = """
+query ApiJobPosting($organizationHostedJobsPageName: String!, $jobPostingId: String!) {
+  jobPosting(organizationHostedJobsPageName: $organizationHostedJobsPageName, jobPostingId: $jobPostingId) {
+    id
+    title
+    departmentName
+    teamNames
+    locationName
+    employmentType
+    descriptionHtml
+  }
+}
+"""
+
+
+def _scrape_ashby_job_posting_with_api(
+    posting_url: str,
+    timeout_seconds: int,
+    user_agent: str,
+) -> ScrapedJobPosting | None:
+    """Fetch an Ashby job posting via its public non-user GraphQL API (same
+    pattern as the LinkedIn/Greenhouse/Lever direct-API fallbacks)."""
+    job_ref = _extract_ashby_job_ref(posting_url)
+    if job_ref is None:
+        return None
+    slug, job_id = job_ref
+
+    payload = {
+        "operationName": "ApiJobPosting",
+        "variables": {"organizationHostedJobsPageName": slug, "jobPostingId": job_id},
+        "query": _ASHBY_JOB_POSTING_QUERY,
+    }
+    headers = {"User-Agent": user_agent, "Content-Type": "application/json"}
+    try:
+        response = _post_with_retry(
+            "https://jobs.ashbyhq.com/api/non-user-graphql?op=ApiJobPosting",
+            headers=headers,
+            json_payload=payload,
+            timeout=max(5, int(timeout_seconds)),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError):
+        return None
+
+    posting = (data or {}).get("data", {}).get("jobPosting") if isinstance(data, dict) else None
+    if not isinstance(posting, dict):
+        return None
+
+    title = normalize_space(str(posting.get("title") or "")) or "Job Posting"
+    company = normalize_space(slug.replace("-", " ").replace("_", " ")).title() or None
+    location = normalize_space(str(posting.get("locationName") or "")) or None
+    department = normalize_space(str(posting.get("departmentName") or ""))
+
+    content_html = str(posting.get("descriptionHtml") or "")
+    detail_text = normalize_space(BeautifulSoup(content_html, "html.parser").get_text("\n", strip=True)) if content_html else ""
+    if department:
+        detail_text = f"Department: {department}\n{detail_text}" if detail_text else f"Department: {department}"
+    if not detail_text:
+        return None
+
+    description_raw = compact_job_description(
+        posting_url=posting_url,
+        title=title,
+        company=company,
+        location=location,
+        site="ashby",
+        detail_text=detail_text,
+    )
+    highlights = _extract_highlights(detail_text or description_raw)
+    if not highlights:
+        highlights = [line for line in description_raw.splitlines() if ":" in line][:5]
+
+    return ScrapedJobPosting(
+        title=title,
+        company=company,
+        location=location,
+        description=description_raw,
+        highlights=highlights,
+        source_url=posting_url,
+    )
+
+
+def _extract_workday_job_ref(posting_url: str) -> tuple[str, str, str, str] | None:
+    """Parse `{company}.{wd_num}.myworkdayjobs.com/{site_id}/job/{external_path}`
+    into (company, wd_num, site_id, external_path)."""
+    parsed = urlparse(posting_url)
+    host_parts = parsed.hostname.split(".") if parsed.hostname else []
+    if len(host_parts) < 4 or not host_parts[1].lower().startswith("wd"):
+        return None
+    company, wd_num = host_parts[0], host_parts[1]
+
+    path = parsed.path.strip("/")
+    if not path:
+        return None
+    segments = path.split("/")
+    if "job" not in segments:
+        return None
+    job_index = segments.index("job")
+    site_id = "/".join(segments[:job_index])
+    external_path = "/" + "/".join(segments[job_index:])
+    if not site_id or external_path == "/":
+        return None
+    return company, wd_num, site_id, external_path
+
+
+def _scrape_workday_job_posting_with_api(
+    posting_url: str,
+    timeout_seconds: int,
+    user_agent: str,
+) -> ScrapedJobPosting | None:
+    """Fetch a Workday job posting via its `wday/cxs` JSON API — the same
+    endpoint Workday's own careers page calls client-side, and (unlike the
+    rendered page) always plain JSON with no TLS fingerprinting involved."""
+    job_ref = _extract_workday_job_ref(posting_url)
+    if job_ref is None:
+        return None
+    company, wd_num, site_id, external_path = job_ref
+
+    base_url = f"https://{company}.{wd_num}.myworkdayjobs.com"
+    api_url = f"{base_url}/wday/cxs/{company}/{site_id}{external_path}"
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": "application/json",
+        "Origin": base_url,
+        "Referer": posting_url,
+    }
+    try:
+        response = _get_with_retry(api_url, headers=headers, timeout=max(5, int(timeout_seconds)))
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError):
+        return None
+
+    if not isinstance(data, dict):
+        return None
+    info = data.get("jobPostingInfo") if isinstance(data.get("jobPostingInfo"), dict) else None
+    if not info:
+        return None
+
+    title = normalize_space(str(info.get("title") or "")) or "Job Posting"
+    hiring_org = data.get("hiringOrganization") if isinstance(data.get("hiringOrganization"), dict) else {}
+    company_name = normalize_space(str(hiring_org.get("name") or "")) or None
+    location = normalize_space(str(info.get("location") or "")) or None
+
+    content_html = str(info.get("jobDescription") or "")
+    detail_text = normalize_space(BeautifulSoup(content_html, "html.parser").get_text("\n", strip=True)) if content_html else ""
+    if not detail_text:
+        return None
+
+    description_raw = compact_job_description(
+        posting_url=posting_url,
+        title=title,
+        company=company_name,
+        location=location,
+        site="workday",
+        detail_text=detail_text,
+    )
+    highlights = _extract_highlights(detail_text or description_raw)
+    if not highlights:
+        highlights = [line for line in description_raw.splitlines() if ":" in line][:5]
+
+    return ScrapedJobPosting(
+        title=title,
+        company=company_name,
+        location=location,
+        description=description_raw,
+        highlights=highlights,
+        source_url=posting_url,
+    )
+
+
+_LD_JSON_PATTERN = re.compile(r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', re.DOTALL)
+
+
+def _scrape_icims_job_posting_with_ld_json(
+    posting_url: str,
+    timeout_seconds: int,
+    user_agent: str,
+) -> ScrapedJobPosting | None:
+    """Fetch an iCIMS job posting's structured (JSON-LD) data.
+
+    Many iCIMS career portals serve a client-side-rendered shell for the
+    plain job URL (no JSON-LD present) but return the fully rendered page,
+    JSON-LD included, for the same URL with `in_iframe=1` appended — the
+    parameter iCIMS's own portal uses to load the job content into an
+    iframe. Neither variant is fingerprint-gated; this just targets the one
+    that actually contains the data.
+    """
+    parsed = urlparse(posting_url)
+    query = parse_qs(parsed.query or "")
+    query["in_iframe"] = ["1"]
+    iframe_url = parsed._replace(query="&".join(f"{k}={v[0]}" for k, v in query.items())).geturl()
+
+    headers = {"User-Agent": user_agent, "Accept": "text/html,application/xhtml+xml"}
+    try:
+        response = _get_with_retry(iframe_url, headers=headers, timeout=max(5, int(timeout_seconds)))
+        response.raise_for_status()
+        html_text = response.text
+    except requests.RequestException:
+        return None
+
+    if not html_text:
+        return None
+
+    posting: dict[str, Any] | None = None
+    for match in _LD_JSON_PATTERN.finditer(html_text):
+        try:
+            candidate = json.loads(match.group(1))
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(candidate, list):
+            candidate = next((item for item in candidate if isinstance(item, dict) and item.get("@type") == "JobPosting"), None)
+        if isinstance(candidate, dict) and candidate.get("@type") == "JobPosting":
+            posting = candidate
+            break
+
+    if posting is None:
+        return None
+
+    title = normalize_space(str(posting.get("title") or "")) or "Job Posting"
+    hiring_org = posting.get("hiringOrganization") if isinstance(posting.get("hiringOrganization"), dict) else {}
+    company = normalize_space(str(hiring_org.get("name") or "")) or None
+
+    job_location = posting.get("jobLocation")
+    if isinstance(job_location, list):
+        job_location = job_location[0] if job_location else None
+    location = None
+    if isinstance(job_location, dict):
+        address = job_location.get("address") or {}
+        if isinstance(address, dict):
+            parts = [
+                normalize_space(str(address.get("addressLocality") or "")),
+                normalize_space(str(address.get("addressRegion") or "")),
+                normalize_space(str(address.get("addressCountry") or "")),
+            ]
+            location = ", ".join(part for part in parts if part) or None
+
+    content_html = str(posting.get("description") or "")
+    detail_text = normalize_space(BeautifulSoup(content_html, "html.parser").get_text("\n", strip=True)) if content_html else ""
+    if not detail_text:
+        return None
+
+    description_raw = compact_job_description(
+        posting_url=posting_url,
+        title=title,
+        company=company,
+        location=location,
+        site="icims",
+        detail_text=detail_text,
+    )
+    highlights = _extract_highlights(detail_text or description_raw)
+    if not highlights:
+        highlights = [line for line in description_raw.splitlines() if ":" in line][:5]
+
+    return ScrapedJobPosting(
+        title=title,
+        company=company,
+        location=location,
+        description=description_raw,
+        highlights=highlights,
+        source_url=posting_url,
+    )
+
+
+# Sites with a stable, public, non-fingerprint-gated JSON/HTML API for a
+# *specific* posting. Tried before the generic page fetch, since it's the
+# only one of these fallbacks precise enough to hit the exact posting (the
+# job-board search fallback further below only does generic keyword search).
+_DIRECT_API_SCRAPERS: dict[str, Callable[[str, int, str], "ScrapedJobPosting | None"]] = {
+    "linkedin": _scrape_linkedin_job_posting_with_guest_api,
+    "greenhouse": _scrape_greenhouse_job_posting_with_api,
+    "lever": _scrape_lever_job_posting_with_api,
+    "ashby": _scrape_ashby_job_posting_with_api,
+    "workday": _scrape_workday_job_posting_with_api,
+    "icims": _scrape_icims_job_posting_with_ld_json,
+}
+
+
 def _fallback_scrape_job_posting_with_job_service(posting_url: str) -> ScrapedJobPosting | None:
     site = job_site_from_url(posting_url)
     if site is None:
@@ -373,34 +1000,66 @@ def _fallback_scrape_job_posting_with_job_service(posting_url: str) -> ScrapedJo
     )
 
 
+def _scrape_job_posting_with_browser(
+    posting_url: str,
+    timeout_seconds: int,
+) -> str | None:
+    """Fetch a posting page through the persistent Chrome context.
+
+    Sites like LinkedIn block plain `requests` calls via TLS/JA3 fingerprinting
+    or bot detection (surfaces as SSLError/EOF), but allow a real browser
+    through. Returns rendered HTML, or None if the browser layer is
+    unavailable or the fetch fails.
+    """
+    if not browser_service.ensure_ready():
+        return None
+    return browser_service.fetch_html(posting_url, timeout_ms=max(5000, int(timeout_seconds) * 1000))
+
+
 def scrape_job_posting(
     posting_url: str,
     timeout_seconds: int = 20,
     user_agent: str = "Mozilla/5.0 (compatible; RebuiltResumeBot/1.0)",
 ) -> ScrapedJobPosting:
+    # Some job sites (LinkedIn especially) block plain `requests` clients via
+    # TLS/JA3 fingerprinting (surfaces as SSLError/EOF). For sites with a
+    # public, non-fingerprint-gated API for a specific posting, try that
+    # first — it's both more reliable and more precise than the generic
+    # page-fetch path below (which, on fallback, can only search by keyword,
+    # not fetch the exact posting).
+    direct_api_scraper = _DIRECT_API_SCRAPERS.get(job_site_from_url(posting_url) or "")
+    if direct_api_scraper is not None:
+        direct_result = direct_api_scraper(posting_url, timeout_seconds, user_agent)
+        if direct_result is not None:
+            return direct_result
+
+    html_text: str | None = None
     try:
-        response = requests.get(
+        response = _get_with_retry(
             posting_url,
             headers={"User-Agent": user_agent},
             timeout=max(5, int(timeout_seconds)),
         )
         response.raise_for_status()
+        html_text = response.text
     except requests.RequestException:
-        if job_site_from_url(posting_url) == "indeed":
-            graphql_fallback = _scrape_indeed_job_posting_with_graphql(
-                posting_url=posting_url,
-                timeout_seconds=timeout_seconds,
-                user_agent=user_agent,
-            )
-            if graphql_fallback is not None:
-                return graphql_fallback
+        html_text = _scrape_job_posting_with_browser(posting_url, timeout_seconds)
+        if html_text is None:
+            if job_site_from_url(posting_url) == "indeed":
+                graphql_fallback = _scrape_indeed_job_posting_with_graphql(
+                    posting_url=posting_url,
+                    timeout_seconds=timeout_seconds,
+                    user_agent=user_agent,
+                )
+                if graphql_fallback is not None:
+                    return graphql_fallback
 
-        fallback = _fallback_scrape_job_posting_with_job_service(posting_url)
-        if fallback is not None:
-            return fallback
-        raise
+            fallback = _fallback_scrape_job_posting_with_job_service(posting_url)
+            if fallback is not None:
+                return fallback
+            raise
 
-    soup = BeautifulSoup(response.text, "html.parser")
+    soup = BeautifulSoup(html_text, "html.parser")
     h1 = soup.select_one("h1")
     page_title = normalize_space(str((soup.title.string if soup.title else "") or (h1.get_text(" ", strip=True) if h1 else "")))
     visible_text = _visible_text_from_soup(soup)
@@ -438,7 +1097,10 @@ def load_baseinfo_text(extra_paths: list[Path] | None = None) -> str:
         except OSError:
             continue
         if text:
-            sections.append(f"Source: {path.name}\n{text}")
+            if path.name == "baseinfo.txt":
+                sections.append(f"<context>\n{text}\n</context>")
+            else:
+                sections.append(text)
     return "\n\n".join(sections)
 
 
@@ -456,11 +1118,14 @@ def load_supporting_prompt_context(
         except OSError:
             continue
         if text:
-            sections.append(f"Source: {path.name}\n{text}")
+            if path.name == "instructions.txt":
+                sections.append(f"<instructions>\n{text}\n</instructions>")
+            else:
+                sections.append(text)
 
     template_text = read_resume_template(template_path).strip() if template_path.exists() else ""
     if template_text:
-        sections.append(f"Source: template.tex\n{template_text}")
+        sections.append(f"<template>\n{template_text}\n</template>")
 
     return "\n\n".join(sections)
 
@@ -471,10 +1136,11 @@ def build_resume_rewrite_prompt(job: JobContext, scraped_job: ScrapedJobPosting,
     location_text = scraped_job.location or "Unknown location"
 
     return (
-        "Rewrite and tailor the resume content for this job. Keep claims factual and grounded in cached resume context.\n"
-        "Do not invent achievements, employers, dates, certifications, or technologies that are not present in the cached candidate context or base info.\n"
-        "The LaTeX output must be derived from the provided template.tex structure and style.\n"
-        "Return JSON with keys exactly: summary, targeted_bullets, revised_profile, rewritten_tex.\n\n"
+        "<task>\n"
+        "Tailor the resume for the job in <input>. Only use facts present in <context> — do not invent achievements, employers, dates, certifications, or technologies. Follow the structure and style of <template> exactly.\n"
+        "Where sections or bullets are irrelevant to the listing, comment them out using % for single lines or \\begin{comment}...\\end{comment} for multi-line blocks. Where commented-out sections are relevant, uncomment them. Only include content that meaningfully matches the role.\n"
+        "</task>\n\n"
+        "<input>\n"
         "Job metadata:\n"
         f"- Requested title: {job.title}\n"
         f"- Posting URL: {job.posting_url}\n"
@@ -484,17 +1150,23 @@ def build_resume_rewrite_prompt(job: JobContext, scraped_job: ScrapedJobPosting,
         "Job highlights:\n"
         f"{highlights}\n\n"
         "Job description excerpt:\n"
-        f"{scraped_job.description[:4500]}\n\n"
-        "Base information:\n"
-        f"{baseinfo or 'No baseinfo content available.'}\n\n"
-        "LaTeX instructions and template context:\n"
-        f"{supporting_context or 'No additional LaTeX instructions provided.'}\n\n"
-        "Output contract:\n"
-        "1. summary: 3 to 5 sentence rationale for changes.\n"
-        "2. targeted_bullets: 6 to 10 resume bullet points tailored to this role.\n"
-        "3. revised_profile: one concise professional summary paragraph tailored to this role.\n"
-        "4. rewritten_tex: a complete compilable standalone LaTeX document that follows template.tex.\n"
-        "5. Also append exactly one <latex>...</latex> block containing the same rewritten_tex document."
+        f"{scraped_job.description[:4500]}\n"
+        "</input>\n\n"
+        f"{baseinfo or '<context>No baseinfo content available.</context>'}\n\n"
+        f"{supporting_context or '<instructions>No additional instructions provided.</instructions>'}\n\n"
+        "<output_format>\n"
+        "1. rewritten_tex: a complete compilable standalone LaTeX document that follows template.tex.\n"
+        "2. Append exactly one <latex>...</latex> block containing the same rewritten_tex document.\n"
+        "3. Write concisely — do not pad bullets, summaries, or descriptions. Every line must earn its place or the PDF will overflow.\n"
+        "4. LaTeX comment environments use \\begin{comment}...\\end{comment} to close — NEVER </comment> (that is an HTML closing tag and will cause a fatal pdflatex error).\n"
+        "5. STRICTLY FORBIDDEN IN OUTPUT (examples):\\n"
+        "   - Adding non-template sections such as 'Summary', 'Objective', or standalone 'Contact Information'.\\n"
+        "   - Placeholder identity/contact text such as '[Insert Address]', '[Insert Phone Number]', 'example.com', or dummy numbers.\\n"
+        "   - Replacing real candidate details with fake identities (for example 'John Doe').\\n"
+        "   - HTML tags in LaTeX output (for example </comment>, </ul>, </li>).\\n"
+        "   - Unsupported domain claims/terms not grounded in baseinfo (for example power systems hardware, SCADA, HVAC, substation work).\\n"
+        "6. If any forbidden pattern appears, regenerate before returning.\n"
+        "</output_format>"
     )
 
 
@@ -566,7 +1238,7 @@ def _provider_switch_candidates(settings: GeminiSettings) -> list[ResumeProvider
         "gemini-flash": ResumeProviderCandidate(
             name="gemini-flash",
             api_key=gemini_api_key,
-            model=normalize_gemini_model_name("gemini-2.5-flash"),
+            model=normalize_gemini_model_name("gemini-3.1-flash-lite"),
         ),
         "openrouter": ResumeProviderCandidate(
             name="openrouter",
@@ -582,12 +1254,23 @@ def _provider_switch_candidates(settings: GeminiSettings) -> list[ResumeProvider
     return [providers[name] for name in LLM_PROVIDER_SWITCH_ORDER if name in providers]
 
 
+def _build_json_response_config() -> Any:
+    try:
+        from google.genai import types
+
+        return types.GenerateContentConfig(response_mime_type="application/json")
+    except Exception:
+        # Keep fallback simple for test doubles and degraded environments.
+        return {"response_mime_type": "application/json"}
+
+
 def _generate_with_gemini(
     settings: GeminiSettings,
     prompt: str,
     cache_name: str | None,
     client_factory: Callable[[str], Any] | None,
     model_override: str | None = None,
+    json_response: bool = False,
 ) -> str:
     factory = client_factory
     if factory is None:
@@ -600,6 +1283,8 @@ def _generate_with_gemini(
     kwargs: dict[str, Any] = {"model": model, "contents": prompt}
     if cache_name:
         kwargs["config"] = _build_cached_content_config(cache_name)
+    elif json_response:
+        kwargs["config"] = _build_json_response_config()
 
     response = client.models.generate_content(**kwargs)
     return _extract_generation_text(response)
@@ -642,6 +1327,7 @@ def _generate_with_openai_compatible_provider(
     prompt: str,
     include_openrouter_headers: bool = False,
     timeout_seconds: int = 45,
+    json_response: bool = False,
 ) -> str:
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -651,19 +1337,185 @@ def _generate_with_openai_compatible_provider(
         headers["HTTP-Referer"] = "https://discord.com"
         headers["X-Title"] = "Rebuilt Resume Bot"
 
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+    }
+    if json_response:
+        body["response_format"] = {"type": "json_object"}
+
     response = requests.post(
         endpoint,
         headers=headers,
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.2,
-        },
+        json=body,
         timeout=max(10, int(timeout_seconds)),
     )
+    if json_response and response.status_code == 400:
+        # Some models behind OpenRouter/Groq reject response_format; retry
+        # without it rather than losing the provider entirely.
+        body.pop("response_format", None)
+        response = requests.post(
+            endpoint,
+            headers=headers,
+            json=body,
+            timeout=max(10, int(timeout_seconds)),
+        )
     response.raise_for_status()
     payload = response.json()
     return _extract_openai_compatible_content(payload)
+
+
+def _generate_structured_rewrite(
+    settings: GeminiSettings,
+    job: JobContext,
+    scraped_job: ScrapedJobPosting,
+    catalog: Any,
+    families: list[Any],
+    client_factory: Callable[[str], Any] | None,
+) -> ResumeRewriteResult:
+    """Structured pipeline: LLM returns JSON decisions, Python renders LaTeX.
+
+    Falls back to a fully deterministic render (canonical bullets, keyword-based
+    role detection) when every provider fails, so a resume is always produced.
+    """
+    job_text = f"{job.title}\n{scraped_job.title}\n{scraped_job.description}"
+    prompt = build_structured_prompt(
+        job_title=job.title,
+        job_description=scraped_job.description,
+        job_highlights=scraped_job.highlights,
+        catalog=catalog,
+        families=families,
+        extra_guidance=catalog.guidance,
+    )
+
+    provider_errors: list[str] = []
+    selection: StructuredSelection | None = None
+    used_provider: str | None = None
+    raw_response = ""
+
+    for provider in _provider_switch_candidates(settings):
+        if not provider.api_key:
+            provider_errors.append(f"{provider.name}: missing API key")
+            continue
+
+        capabilities = PROVIDER_CAPABILITIES.get(provider.name)
+        effective_prompt = (
+            _truncate_prompt_for_provider(prompt, capabilities.max_prompt_chars)
+            if capabilities and len(prompt) > capabilities.max_prompt_chars
+            else prompt
+        )
+        timeout = capabilities.request_timeout_seconds if capabilities else 45
+
+        try:
+            if provider.name in ("gemini", "gemini-flash"):
+                # No context cache here: the cached profile files instruct the
+                # legacy full-LaTeX output format, which conflicts with the
+                # JSON-only contract of the structured prompt.
+                text = _generate_with_gemini(
+                    settings,
+                    effective_prompt,
+                    None,
+                    client_factory,
+                    model_override=provider.model if provider.name == "gemini-flash" else None,
+                    json_response=True,
+                )
+            elif provider.name == "openrouter":
+                text = _generate_with_openai_compatible_provider(
+                    endpoint=OPENROUTER_CHAT_COMPLETIONS_URL,
+                    api_key=provider.api_key,
+                    model=provider.model,
+                    prompt=effective_prompt,
+                    include_openrouter_headers=True,
+                    timeout_seconds=timeout,
+                    json_response=True,
+                )
+            elif provider.name == "groq":
+                text = _generate_with_openai_compatible_provider(
+                    endpoint=GROQ_CHAT_COMPLETIONS_URL,
+                    api_key=provider.api_key,
+                    model=provider.model,
+                    prompt=effective_prompt,
+                    timeout_seconds=timeout,
+                    json_response=True,
+                )
+            else:
+                provider_errors.append(f"{provider.name}: unsupported provider")
+                continue
+        except Exception as exc:
+            provider_errors.append(f"{provider.name}: {exc}")
+            continue
+
+        if not text.strip():
+            provider_errors.append(f"{provider.name}: empty response")
+            continue
+
+        candidate = parse_structured_response(text, catalog, families, job_text)
+        if candidate is None:
+            provider_errors.append(f"{provider.name}: response contained no valid JSON decisions")
+            continue
+
+        selection = candidate
+        used_provider = provider.name
+        raw_response = text
+        break
+
+    deterministic_fallback = False
+    if selection is None:
+        family = detect_role_family(job_text, families)
+        if family is None:
+            details = "; ".join(provider_errors) if provider_errors else "No providers attempted"
+            return ResumeRewriteResult(
+                status="error",
+                message=f"All resume providers failed and no role family could be detected: {details}",
+                prompt_preview=prompt[:500],
+                scraped_job=scraped_job,
+            )
+        selection = StructuredSelection(role_family_key=family.key)
+        deterministic_fallback = True
+
+    latex_document, report = render_structured_resume(catalog, families, selection)
+
+    summary = {
+        "mode": "structured",
+        "rewrite_scope": report.rewrite_scope,
+        "role_family": report.role_family_key,
+        "visible_entries": report.visible_entries,
+        "hidden_entries": report.hidden_entries,
+        "visible_bullet_count": report.visible_bullet_count,
+        "tailored_bullets_used": report.tailored_bullets_used,
+        "canonical_fallbacks": report.canonical_fallbacks,
+        "excluded_entries": report.excluded_entries,
+        "ignored_exclusions": report.ignored_exclusions,
+        "included_extras": report.included_extras,
+        "ignored_inclusions": report.ignored_inclusions,
+        "fidelity_findings": report.fidelity_findings,
+        "keywords": selection.keywords,
+        "deterministic_fallback": deterministic_fallback,
+        "provider_errors": provider_errors,
+    }
+
+    if deterministic_fallback:
+        message = (
+            "Structured resume rendered deterministically (all LLM providers failed: "
+            + ("; ".join(provider_errors) or "none attempted")
+            + ")."
+        )
+    else:
+        message = (
+            f"Structured resume tailored via {used_provider}: family {report.role_family_key}, "
+            f"{report.visible_bullet_count} bullets, {report.tailored_bullets_used} tailored."
+        )
+
+    return ResumeRewriteResult(
+        status="ok",
+        message=message,
+        rewritten_resume=json.dumps(summary, indent=2, ensure_ascii=True),
+        prompt_preview=prompt[:500],
+        scraped_job=scraped_job,
+        latex_document=latex_document,
+        used_provider=used_provider,
+    )
 
 
 def generate_resume_rewrite(
@@ -681,6 +1533,22 @@ def generate_resume_rewrite(
         scraped_job = scrape(job.posting_url)
     except Exception as exc:
         return ResumeRewriteResult(status="error", message=f"Failed to scrape posting URL: {exc}")
+
+    # Profiles whose template uses the % [category] convention get the
+    # structured pipeline: the LLM only returns JSON decisions and the LaTeX is
+    # rendered deterministically from template parts, so it always compiles.
+    baseinfo_path = (baseinfo_paths or [DEFAULT_BASEINFO_PATH])[0]
+    structured_profile = load_structured_profile(template_path, baseinfo_path)
+    if structured_profile is not None:
+        catalog, families = structured_profile
+        return _generate_structured_rewrite(
+            settings,
+            job,
+            scraped_job,
+            catalog,
+            families,
+            client_factory,
+        )
 
     baseinfo = load_baseinfo_text(baseinfo_paths)
     supporting_context = load_supporting_prompt_context(support_paths, template_path=template_path)
@@ -812,6 +1680,240 @@ def generate_resume_rewrite(
         latex_document=latex_document,
         used_provider=used_provider or None,
     )
+
+
+def build_latex_repair_prompt(broken_latex: str, compile_error_excerpt: str) -> str:
+    return (
+        "<task>\n"
+        "The LaTeX document in <broken_latex> failed to compile with pdflatex/xelatex. "
+        "The compiler's error output is in <compile_error>. Fix ONLY the syntax that is "
+        "breaking compilation. Do not rewrite, reword, shorten, expand, or restructure "
+        "any content — every word, bullet, section, and command that isn't the direct "
+        "cause of the compile error must remain byte-for-byte identical.\n"
+        "</task>\n\n"
+        "<compile_error>\n"
+        f"{compile_error_excerpt[-3000:]}\n"
+        "</compile_error>\n\n"
+        "<broken_latex>\n"
+        f"{broken_latex}\n"
+        "</broken_latex>\n\n"
+        "<output_format>\n"
+        "1. Return the complete corrected LaTeX document — not just the fixed line/section.\n"
+        "2. Append exactly one <latex>...</latex> block containing that document.\n"
+        "3. Do not add commentary, explanations, or markdown fences outside the tag.\n"
+        "</output_format>"
+    )
+
+
+def generate_validated_with_providers(
+    prompt: str,
+    settings: GeminiSettings,
+    validate: Callable[[str], Any],
+    client_factory: Callable[[str], Any] | None = None,
+) -> tuple[Any, str | None]:
+    """Run a prompt through the provider fallback chain (Gemini -> OpenRouter
+    -> Groq) and return the first response that `validate` accepts.
+
+    `validate` maps raw response text to a usable value, or None to reject it
+    (rejection advances to the next provider). Returns (value, provider_name),
+    or (None, None) when no configured provider produced an accepted response.
+    """
+    for provider in _provider_switch_candidates(settings):
+        if not provider.api_key:
+            continue
+
+        capabilities = PROVIDER_CAPABILITIES.get(provider.name)
+        effective_prompt = (
+            _truncate_prompt_for_provider(prompt, capabilities.max_prompt_chars)
+            if capabilities and len(prompt) > capabilities.max_prompt_chars
+            else prompt
+        )
+        timeout = capabilities.request_timeout_seconds if capabilities else 45
+
+        try:
+            if provider.name in ("gemini", "gemini-flash"):
+                text = _generate_with_gemini(
+                    settings,
+                    effective_prompt,
+                    None,
+                    client_factory,
+                    model_override=provider.model if provider.name == "gemini-flash" else None,
+                )
+            elif provider.name == "openrouter":
+                text = _generate_with_openai_compatible_provider(
+                    endpoint=OPENROUTER_CHAT_COMPLETIONS_URL,
+                    api_key=provider.api_key,
+                    model=provider.model,
+                    prompt=effective_prompt,
+                    include_openrouter_headers=True,
+                    timeout_seconds=timeout,
+                )
+            elif provider.name == "groq":
+                text = _generate_with_openai_compatible_provider(
+                    endpoint=GROQ_CHAT_COMPLETIONS_URL,
+                    api_key=provider.api_key,
+                    model=provider.model,
+                    prompt=effective_prompt,
+                    timeout_seconds=timeout,
+                )
+            else:
+                continue
+        except Exception:
+            continue
+
+        if not text.strip():
+            continue
+        value = validate(text)
+        if value is not None:
+            return value, provider.name
+
+    return None, None
+
+
+def _generate_fixed_latex_with_providers(
+    prompt: str,
+    original_latex: str,
+    settings: GeminiSettings,
+    client_factory: Callable[[str], Any] | None = None,
+) -> tuple[str | None, str | None]:
+    """Run a LaTeX-fixing prompt through the provider fallback chain and
+    return the first response containing a complete LaTeX document different
+    from the input. Returns (fixed_latex, provider_name) or (None, None)."""
+
+    def _validate(text: str) -> str | None:
+        fixed = extract_latex_document(text)
+        if fixed and "\\documentclass" in fixed and "\\end{document}" in fixed and fixed != original_latex:
+            return fixed
+        return None
+
+    return generate_validated_with_providers(prompt, settings, _validate, client_factory)
+
+
+def repair_latex_with_llm(
+    broken_latex: str,
+    compile_error_excerpt: str,
+    settings: GeminiSettings,
+    client_factory: Callable[[str], Any] | None = None,
+) -> tuple[str | None, str | None]:
+    """Ask an available LLM provider to fix a LaTeX document that failed to
+    compile, as a last resort after the deterministic auto-fix passes in
+    resume.py's `compile_latex_to_pdf` have been exhausted.
+
+    Returns (fixed_latex, provider_name), or (None, None) if no configured
+    provider produced a usable fix.
+    """
+    prompt = build_latex_repair_prompt(broken_latex, compile_error_excerpt)
+    return _generate_fixed_latex_with_providers(prompt, broken_latex, settings, client_factory)
+
+
+def repair_latex_until_compiles(
+    latex_document: str,
+    initial_result: Any,
+    settings: GeminiSettings,
+    compiler: Callable[[str], Any],
+    max_rounds: int = 2,
+    client_factory: Callable[[str], Any] | None = None,
+) -> tuple[str, Any, str | None, int]:
+    """Iteratively LLM-repair a failing LaTeX document, feeding each new
+    compile error back to the model, until it compiles or rounds run out.
+
+    A single repair pass often trades one compile error for another (fixing
+    an unclosed brace can expose a bad macro further down); iterating on the
+    *fresh* error each round converges where the one-shot approach gave up.
+
+    `compiler` maps a LaTeX document to a LatexCompileResult-like object
+    (duck-typed: `.status` and `.log_excerpt` are used). Returns
+    (final_document, final_result, provider_name, rounds_attempted); the
+    original inputs come back unchanged when no repair succeeded, so callers
+    can use the result unconditionally.
+    """
+    current_document = latex_document
+    current_result = initial_result
+    rounds_attempted = 0
+
+    for _ in range(max(0, int(max_rounds))):
+        if getattr(current_result, "status", None) != "error" or not getattr(current_result, "log_excerpt", None):
+            break
+        fixed_latex, provider = repair_latex_with_llm(
+            current_document,
+            current_result.log_excerpt,
+            settings,
+            client_factory,
+        )
+        if not fixed_latex:
+            break
+        rounds_attempted += 1
+        repaired_result = compiler(fixed_latex)
+        if getattr(repaired_result, "status", None) == "ok":
+            return fixed_latex, repaired_result, provider, rounds_attempted
+        current_document = fixed_latex
+        current_result = repaired_result
+
+    return latex_document, initial_result, None, rounds_attempted
+
+
+def build_latex_condense_prompt(latex_document: str, page_count: int, max_pages: int) -> str:
+    return (
+        "<task>\n"
+        f"The LaTeX resume in <overflowing_latex> compiles cleanly but produces {page_count} pages; "
+        f"the expected format is at most {max_pages} page(s). Reduce it to fit by commenting out the "
+        "LEAST relevant bullet points using a leading % (never delete lines, never use "
+        "\\begin{comment}). Prefer commenting out whole bullets over rewording. You may tighten "
+        "wording only where a bullet barely wraps onto a new line. Do not remove or comment out "
+        "section headers, education, contact details, or entire experience/project blocks, and do "
+        "not change the preamble, packages, or any formatting commands.\n"
+        "</task>\n\n"
+        "<overflowing_latex>\n"
+        f"{latex_document}\n"
+        "</overflowing_latex>\n\n"
+        "<output_format>\n"
+        "1. Return the complete condensed LaTeX document — every line of the original must still be "
+        "present, either active or %-commented.\n"
+        "2. Append exactly one <latex>...</latex> block containing that document.\n"
+        "3. Do not add commentary, explanations, or markdown fences outside the tag.\n"
+        "</output_format>"
+    )
+
+
+def condense_latex_if_overflowing(
+    latex_document: str,
+    compile_result: Any,
+    max_pages: int,
+    settings: GeminiSettings,
+    compiler: Callable[[str], Any],
+    client_factory: Callable[[str], Any] | None = None,
+) -> tuple[str, Any, str | None]:
+    """If a compiled resume exceeds the page budget, ask an LLM to comment
+    out the least-relevant bullets and recompile. Strictly best-effort: the
+    condensed version is only adopted when it compiles AND has fewer pages
+    than the original, so the caller can never end up worse off.
+
+    Returns (document, compile_result, provider_name); provider_name is None
+    when the original was kept.
+    """
+    page_count = getattr(compile_result, "page_count", None)
+    if (
+        getattr(compile_result, "status", None) != "ok"
+        or not page_count
+        or page_count <= max(1, int(max_pages))
+    ):
+        return latex_document, compile_result, None
+
+    prompt = build_latex_condense_prompt(latex_document, page_count, max_pages)
+    condensed_latex, provider = _generate_fixed_latex_with_providers(prompt, latex_document, settings, client_factory)
+    if not condensed_latex:
+        return latex_document, compile_result, None
+
+    condensed_result = compiler(condensed_latex)
+    condensed_pages = getattr(condensed_result, "page_count", None)
+    if (
+        getattr(condensed_result, "status", None) == "ok"
+        and condensed_pages is not None
+        and condensed_pages < page_count
+    ):
+        return condensed_latex, condensed_result, provider
+
+    return latex_document, compile_result, None
 
 
 def extract_job_urls(lines: list[str], message_content: str) -> tuple[str | None, str | None]:

@@ -16,8 +16,11 @@ LATEX_WRAPPER_PACKAGE = "pdflatex"
 RESUMES_CACHE_ROOT = Path(__file__).resolve().parent / "resumes_cache"
 TEMPLATE_PATH = RESUMES_CACHE_ROOT / "template.tex"
 PROFILE_ALLOWED_FILE_NAMES = ("baseinfo.txt", "instructions.txt", "template.tex")
+# Optional per-profile files (structured pipeline). Never required, never
+# seeded from the example profile, and never purged.
+PROFILE_OPTIONAL_FILE_NAMES = ("structured_config.json", "structured_guidance.txt")
 EXAMPLE_PROFILE_KEY = "example"
-LLM_PROVIDER_SWITCH_ORDER = ("gemini", "gemini-flash", "groq", "openrouter")
+LLM_PROVIDER_SWITCH_ORDER = ("gemini", "gemini-flash", "openrouter", "groq")
 MAX_PROFILE_NAME_PART_LEN = 80
 MAX_PROFILE_ID_PART_LEN = 80
 
@@ -126,6 +129,7 @@ PROFILE_ID_SUFFIX_PATTERN = re.compile(r"^(?P<prefix>.+)-(?P<id>\d+)$")
 XELATEX_HINT_PATTERN = re.compile(r"\\usepackage(?:\[[^\]]*\])?\{[^}]*fontspec[^}]*\}|\\setmainfont\{|\\newfontfamily\{", re.IGNORECASE)
 LUALATEX_HINT_PATTERN = re.compile(r"\\usepackage(?:\[[^\]]*\])?\{[^}]*unicode-math[^}]*\}|\\directlua\{|\\begin\{luacode\}", re.IGNORECASE)
 LATEX_RERUN_HINT_PATTERN = re.compile(r"Rerun to get cross-references right|Label\(s\) may have changed", re.IGNORECASE)
+LATEX_PAGE_COUNT_PATTERN = re.compile(r"Output written on [^(]*\((\d+)\s+pages?", re.IGNORECASE)
 LATEX_ALIGNMENT_ERROR_PATTERN = re.compile(r"Misplaced alignment tab character\s*&", re.IGNORECASE)
 LATEX_BRACE_ERROR_PATTERN = re.compile(
 	r"Runaway argument\?|File ended while scanning use of|Missing \} inserted|Too many \}|Paragraph ended before",
@@ -196,6 +200,7 @@ class LatexCompileResult:
 	repairs_applied: list[str] = field(default_factory=list)
 	repair_attempts: int = 0
 	lint_findings: list[str] = field(default_factory=list)
+	page_count: int | None = None
 
 
 @dataclass(slots=True)
@@ -390,7 +395,6 @@ def resolve_profile_seed_dir(cache_root: Path = RESUMES_CACHE_ROOT, seed_profile
 def ensure_profile_cache(
 	user_id: int | str,
 	cache_root: Path = RESUMES_CACHE_ROOT,
-	seed_profile_key: int | str | None = None,
 ) -> Path:
 	cache_root.mkdir(parents=True, exist_ok=True)
 	example_dir = profile_cache_dir(EXAMPLE_PROFILE_KEY, cache_root)
@@ -424,7 +428,7 @@ def ensure_profile_cache(
 
 
 def _purge_unexpected_profile_entries(profile_dir: Path) -> None:
-	allowed = set(PROFILE_ALLOWED_FILE_NAMES)
+	allowed = set(PROFILE_ALLOWED_FILE_NAMES) | set(PROFILE_OPTIONAL_FILE_NAMES)
 	for entry in profile_dir.iterdir():
 		if entry.is_file() and entry.name in allowed:
 			continue
@@ -851,6 +855,18 @@ def _normalize_color_package_option_case(latex_document: str) -> str:
 	return COLOR_DVIPS_OPTION_CASE_PATTERN.sub(r"\g<prefix>dvipsnames\g<suffix>", latex_document)
 
 
+def _fix_html_comment_tags(latex_document: str) -> str:
+	"""Replace HTML-style </comment> and </comment} closing tags with \\end{comment}.
+
+	LLMs (especially Gemini) occasionally emit HTML-style closing tags for LaTeX
+	comment environments. Both </comment> and </comment} are invalid LaTeX and
+	leave the comment block unclosed, causing a 'Runaway argument' fatal error.
+	"""
+	import re
+	fixed = re.sub(r"</comment[}>]?", r"\\end{comment}", latex_document)
+	return fixed
+
+
 def _remove_dangling_single_line_backslashes(latex_document: str) -> str:
 	"""Remove accidental single trailing backslashes at end-of-line.
 
@@ -861,13 +877,50 @@ def _remove_dangling_single_line_backslashes(latex_document: str) -> str:
 		return latex_document
 
 	updated_lines: list[str] = []
+	removed_any = False
 	for line in latex_document.splitlines():
 		trimmed = line.rstrip()
 		if trimmed.endswith("\\") and not trimmed.endswith("\\\\") and not trimmed.lstrip().startswith("%"):
-			trimmed = trimmed[:-1]
-		updated_lines.append(trimmed)
+			updated_lines.append(trimmed[:-1])
+			removed_any = True
+		else:
+			# Leave untouched lines byte-identical: whitespace-only rstrip
+			# changes here made the caller report this repair on every
+			# document, even when no backslash was removed.
+			updated_lines.append(line)
 
+	if not removed_any:
+		return latex_document
 	return "\n".join(updated_lines)
+
+
+MARKDOWN_BOLD_PATTERN = re.compile(r"\*\*([^*\n]+)\*\*")
+BARE_TEXT_COMMAND_PATTERN = re.compile(r"(?<![\\a-zA-Z])(textbf|textit|texttt)\{")
+SMART_QUOTE_TRANSLATION = str.maketrans({
+	"“": "``",
+	"”": "''",
+	"‘": "`",
+	"’": "'",
+	"„": "``",
+})
+
+
+def _convert_markdown_bold_to_textbf(latex_document: str) -> str:
+	"""LLMs slip markdown emphasis into LaTeX output; `**x**` renders as
+	literal asterisks in the PDF instead of bold text."""
+	return MARKDOWN_BOLD_PATTERN.sub(r"\\textbf{\1}", latex_document)
+
+
+def _restore_bare_text_command_backslashes(latex_document: str) -> str:
+	"""A `textbf{`/`textit{` whose backslash was eaten (JSON escaping, model
+	error) renders as literal 'textbf{...}' text in the PDF."""
+	return BARE_TEXT_COMMAND_PATTERN.sub(r"\\\1{", latex_document)
+
+
+def _normalize_smart_quotes(latex_document: str) -> str:
+	"""Map Unicode curly quotes to LaTeX quote ligatures so the PDF shows
+	proper typography regardless of engine/inputenc handling."""
+	return latex_document.translate(SMART_QUOTE_TRANSLATION)
 
 
 def lint_latex_document_for_compile(latex_document: str) -> LatexLintResult:
@@ -897,9 +950,34 @@ def lint_latex_document_for_compile(latex_document: str) -> LatexLintResult:
 		repairs.append("normalized color package option casing")
 		updated = next_text
 
+	next_text = _fix_html_comment_tags(updated)
+	if next_text != updated:
+		repairs.append("replaced HTML </comment> tags with \\end{comment}")
+		updated = next_text
+
+	next_text = _close_unclosed_comment_environments(updated)
+	if next_text != updated:
+		repairs.append("closed unclosed \\begin{comment} environments")
+		updated = next_text
+
 	next_text = _remove_dangling_single_line_backslashes(updated)
 	if next_text != updated:
 		repairs.append("removed dangling single trailing backslashes")
+		updated = next_text
+
+	next_text = _convert_markdown_bold_to_textbf(updated)
+	if next_text != updated:
+		repairs.append("converted markdown **bold** to \\textbf")
+		updated = next_text
+
+	next_text = _restore_bare_text_command_backslashes(updated)
+	if next_text != updated:
+		repairs.append("restored missing backslashes on text commands")
+		updated = next_text
+
+	next_text = _normalize_smart_quotes(updated)
+	if next_text != updated:
+		repairs.append("normalized smart quotes to LaTeX quote ligatures")
 		updated = next_text
 
 	if "\\documentclass" not in updated:
@@ -923,10 +1001,17 @@ def lint_latex_document_for_compile(latex_document: str) -> LatexLintResult:
 
 def _run_chktex(cwd: Path, tex_name: str, chktex_path: str) -> tuple[list[str], str | None]:
 	"""Run chktex if available and return compact finding summaries."""
+	# Suppressed warnings are template-level false positives on every render:
+	# 1 = "command terminated with space" (\raggedright at line end),
+	# 8 = "wrong length of dash" (phone numbers, date ranges),
+	# 27 = "could not execute LaTeX command" (\input{glyphtounicode}).
 	command = [
 		chktex_path,
 		"-q",
 		"-I0",
+		"-n1",
+		"-n8",
+		"-n27",
 		"-f%l:%c:%k:%n:%m\\n",
 		tex_name,
 	]
@@ -1015,6 +1100,12 @@ def sanitize_latex_document_for_compile(
 
 	# Keep compile resilient to minor brace mismatches in cached profile/template text.
 	latex_document = _close_unbalanced_latex_braces(latex_document)
+
+	# Fix LLM writing </comment> (HTML) instead of \end{comment} (LaTeX environment).
+	latex_document = _fix_html_comment_closing_tags(latex_document)
+
+	# Close any \begin{comment} blocks that the LLM left without a matching \end{comment}.
+	latex_document = _close_unclosed_comment_environments(latex_document)
 
 	# Strip XML/JSON artifacts that sometimes appear after \end{document} (e.g. </latex>, quotes).
 	latex_document = _strip_post_end_document_artifacts(latex_document)
@@ -1231,6 +1322,58 @@ def _close_unclosed_resume_list_macros(latex_document: str) -> str:
 		insert += "\\end{itemize}\n" * missing_explicit
 
 	return latex_document.replace("\\end{document}", insert + "\\end{document}", 1)
+
+
+_HTML_COMMENT_CLOSE_PATTERN = re.compile(r"</comment\s*>", re.IGNORECASE)
+
+
+def _fix_html_comment_closing_tags(latex_document: str) -> str:
+	"""Replace HTML-style </comment> closing tags with \\end{comment}.
+
+	LLMs trained on mixed HTML/LaTeX data sometimes write </comment> instead of
+	the correct LaTeX environment closer \\end{comment}, leaving comment blocks
+	unclosed and hiding the rest of the document from pdflatex.
+	"""
+	if "</comment" not in latex_document.lower():
+		return latex_document
+	return _HTML_COMMENT_CLOSE_PATTERN.sub("\\\\end{comment}", latex_document)
+
+
+def _close_unclosed_comment_environments(latex_document: str) -> str:
+	"""Insert missing \\end{comment} before the next \\begin{comment} or \\end{document}.
+
+	LLMs sometimes omit the closing tag entirely (rather than writing </comment>),
+	leaving \\begin{comment} blocks open. This causes pdflatex to fail with
+	'File ended while scanning use of \\next'. The fix inserts \\end{comment}
+	immediately before any \\begin{comment} or \\end{document} line that would
+	otherwise be swallowed by an unclosed block.
+	"""
+	if r"\begin{comment}" not in latex_document:
+		return latex_document
+	lines = latex_document.splitlines()
+	open_count = 0
+	result: list[str] = []
+	for line in lines:
+		stripped = line.strip()
+		if stripped == r"\begin{comment}":
+			if open_count > 0:
+				result.append(r"\end{comment}")
+				open_count = 0
+			open_count += 1
+			result.append(line)
+		elif stripped == r"\end{comment}":
+			if open_count > 0:
+				open_count -= 1
+			result.append(line)
+		elif stripped == r"\end{document}" and open_count > 0:
+			result.append(r"\end{comment}")
+			open_count = 0
+			result.append(line)
+		else:
+			result.append(line)
+	if open_count > 0:
+		result.append(r"\end{comment}")
+	return "\n".join(result)
 
 
 def _strip_post_end_document_artifacts(latex_document: str) -> str:
@@ -1746,6 +1889,11 @@ def compile_latex_to_pdf(
 						last_excerpt = f"{engine_name} completed without producing a PDF."[-1500:]
 						break
 
+					page_count: int | None = None
+					page_match = LATEX_PAGE_COUNT_PATTERN.search(final_stdout or "")
+					if page_match:
+						page_count = int(page_match.group(1))
+
 					_write_compile_log(resolved_log_path, "\n\n".join(attempt_logs), "")
 					return LatexCompileResult(
 						status="ok",
@@ -1756,6 +1904,7 @@ def compile_latex_to_pdf(
 						repairs_applied=repairs_applied.copy(),
 						repair_attempts=repair_attempts,
 						lint_findings=lint_findings,
+						page_count=page_count,
 					)
 
 				last_excerpt = ((final_stderr or "").strip() or (final_stdout or "").strip())[-1500:] or None

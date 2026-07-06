@@ -54,7 +54,12 @@ def load_resume_source_bundle(profiles_dir: Path) -> tuple[str, str, list[Path]]
         digest.update(b"\0")
         digest.update(text.encode("utf-8"))
         digest.update(b"\0")
-        sections.append(f"Source file: {path.name}\n{text}")
+        if path.name == "instructions.txt":
+            sections.append(f"<instructions>\n{text}\n</instructions>")
+        elif path.name == "baseinfo.txt":
+            sections.append(f"<context>\n{text}\n</context>")
+        else:
+            sections.append(text)
 
     if not sections:
         return None

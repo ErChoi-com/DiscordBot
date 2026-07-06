@@ -7,11 +7,14 @@ set "LAST_START_FILE=%~dp0.last_start.txt"
 set "START_LOCK_DIR=%~dp0.start.lock"
 set "ARG_FORCERUN=0"
 set "ARG_SCHEDULER=0"
-set "ARG_NOVENV=0"
 for %%A in (%*) do (
   if /i "%%~A"=="forcerun" set "ARG_FORCERUN=1"
   if /i "%%~A"=="scheduler" set "ARG_SCHEDULER=1"
-  if /i "%%~A"=="novenv" set "ARG_NOVENV=1"
+)
+
+if "%ARG_FORCERUN%"=="1" if exist "%START_LOCK_DIR%" (
+  echo [run.bat] forcerun: removing stale start lock.
+  rmdir "%START_LOCK_DIR%" >nul 2>nul
 )
 
 2>nul mkdir "%START_LOCK_DIR%"
@@ -33,34 +36,53 @@ if "%ARG_FORCERUN%"=="1" (
 
 echo [run.bat] Checking whether the bot should start...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$existing = Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(pythonw?|py)(\.exe)?$' -and $_.CommandLine -and ($_.CommandLine -match 'src[/\\]app\.py' -or $_.CommandLine -match 'rebuilt_app[/\\]src[/\\]app\.py') }; if ($existing) { Write-Output ('[run.bat] Existing bot process(es) detected: ' + $existing.Count + '. Skipping start.'); foreach ($proc in $existing) { Write-Output ('[run.bat] active PID ' + $proc.ProcessId + ' :: ' + $proc.Name) }; exit 10 }; $lastStartFile = $env:LAST_START_FILE; if (Test-Path $lastStartFile) { try { $lastStart = [DateTimeOffset]::Parse((Get-Content $lastStartFile -ErrorAction Stop | Select-Object -First 1).Trim()); $elapsed = (Get-Date) - $lastStart.LocalDateTime; if ($elapsed.TotalHours -lt 24) { Write-Output ('[run.bat] Last start was at ' + $lastStart.ToString('u') + '. Skipping because it has been less than 24 hours.'); exit 11 } } catch { Write-Output '[run.bat] Last start timestamp is invalid. Ignoring file and continuing.' } }"
+  "$existing = Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(pythonw?|py)(\.exe)?$' -and $_.CommandLine -and ($_.CommandLine -match 'src[/\\]app\.py' -or $_.CommandLine -match 'rebuilt_app[/\\]src[/\\]app\.py') }; if ($existing) { $lastStartFile = $env:LAST_START_FILE; if (Test-Path $lastStartFile) { try { $lastStart = [DateTimeOffset]::Parse((Get-Content $lastStartFile -ErrorAction Stop | Select-Object -First 1).Trim()); $elapsed = (Get-Date) - $lastStart.LocalDateTime; if ($elapsed.TotalHours -lt 24) { Write-Output ('[run.bat] Bot is running and last start was ' + $lastStart.ToString('u') + '. Skipping restart.'); exit 10 } } catch {} }; Write-Output ('[run.bat] Bot is running but 24h+ since last start. Graceful restart...'); foreach ($proc in $existing) { Write-Output ('[run.bat] Requesting graceful stop for PID ' + $proc.ProcessId); try { Stop-Process -Id $proc.ProcessId -ErrorAction Stop } catch { Write-Output ('[run.bat] Graceful stop failed, will force kill.') } }; Start-Sleep -Seconds 5; $survivors = Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(pythonw?|py)(\.exe)?$' -and $_.CommandLine -and ($_.CommandLine -match 'src[/\\]app\.py' -or $_.CommandLine -match 'rebuilt_app[/\\]src[/\\]app\.py') }; if ($survivors) { Write-Output '[run.bat] Bot still running after graceful wait. Force killing.'; foreach ($proc in $survivors) { Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue } ; Start-Sleep -Milliseconds 1500 }; exit 0 } else { Write-Output '[run.bat] No bot process found. Starting fresh.'; exit 0 }"
 set "CHECK_EXIT=%ERRORLEVEL%"
 if "%CHECK_EXIT%"=="10" (
-  call :release_lock
-  exit /b 0
-)
-if "%CHECK_EXIT%"=="11" (
   call :release_lock
   exit /b 0
 )
 
 :start_bot
 
-if "%ARG_NOVENV%"=="1" echo [run.bat] novenv: skipping .venv interpreter discovery.
-if not "%ARG_NOVENV%"=="1" if not defined PYTHON_EXE if exist "%~dp0.venv\Scripts\python.exe" set "PYTHON_EXE=%~dp0.venv\Scripts\python.exe"
-if not "%ARG_NOVENV%"=="1" if not defined PYTHON_EXE if exist "%~dp0..\.venv\Scripts\python.exe" set "PYTHON_EXE=%~dp0..\.venv\Scripts\python.exe"
-if not defined PYTHON_EXE set "PYTHON_EXE=python"
+echo [run.bat] Syncing ATS company lists...
+if defined PYTHON_EXE (
+  "%PYTHON_EXE%" sync_ats_companies.py
+) else (
+  py -3.11 sync_ats_companies.py
+)
+
+if not defined PYTHON_EXE (
+  where py >nul 2>nul
+  if errorlevel 1 (
+    echo [run.bat] ERROR: PYTHON_EXE is not set and py launcher was not found.
+    echo [run.bat] Set PYTHON_EXE to a non-virtual interpreter path and try again.
+    call :release_lock
+    exit /b 1
+  )
+)
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "Set-Content -Path $env:LAST_START_FILE -Value (Get-Date -Format o) -Encoding ascii"
 
-echo [run.bat] Starting bot with: "%PYTHON_EXE%" src\app.py
-if "%ARG_SCHEDULER%"=="1" (
-  echo [run.bat] Scheduler mode: running bot in foreground so Task Scheduler can enforce single instance.
-  "%PYTHON_EXE%" src\app.py
+if defined PYTHON_EXE (
+  echo [run.bat] Starting bot with: "%PYTHON_EXE%" src\app.py
+  if "%ARG_SCHEDULER%"=="1" (
+    echo [run.bat] Scheduler mode: running bot in foreground so Task Scheduler can enforce single instance.
+    "%PYTHON_EXE%" src\app.py
+  ) else (
+    start "Discord Bot" "%PYTHON_EXE%" src\app.py
+    timeout /t 1 /nobreak >nul
+  )
 ) else (
-  start "Discord Bot" "%PYTHON_EXE%" src\app.py
-  timeout /t 1 /nobreak >nul
+  echo [run.bat] Starting bot with: py -3.11 src\app.py
+  if "%ARG_SCHEDULER%"=="1" (
+    echo [run.bat] Scheduler mode: running bot in foreground so Task Scheduler can enforce single instance.
+    py -3.11 src\app.py
+  ) else (
+    start "Discord Bot" py -3 src\app.py
+    timeout /t 1 /nobreak >nul
+  )
 )
 
 call :release_lock

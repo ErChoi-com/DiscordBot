@@ -82,6 +82,15 @@ dedup_listings/
 *.pem
 secrets.json
 
+# VPN credentials and configs (never commit these)
+vpn/auth.txt
+vpn/*.ovpn
+vpn/*.conf
+
+# Chrome profile (contains session cookies — never commit)
+chrome_profile/
+chrome_profile_runtime/
+
 # Misc
 node_modules/
 
@@ -95,8 +104,13 @@ models/**/*.pth
 models/**/*.ckpt
 models/**/*.gguf
 
+# Nested ATS company list repo (has its own git history)
+data/ats_companies/
+
 # Large archives / dataset dumps
 *.zip
+# Allow monthly job archive zips (committed by the bot)
+!data/jba/jobs/*/*.zip
 *.7z
 *.tar
 *.tar.gz

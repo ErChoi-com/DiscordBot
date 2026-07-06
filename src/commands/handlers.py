@@ -13,9 +13,17 @@ import discord
 
 from config import AppConfig
 from services import job_service, scrape_service
+from services.health import WatcherHealthTracker, build_channel_health_embed, build_all_health_embed
 from services.resumes.configkey import GeminiSettings, load_gemini_settings
 from services.resumes.cache import ResumeExplicitCacheManager, ResumeExplicitCacheStatus
-from services.resumes.listing import JobContext, extract_job_context_from_message, generate_resume_rewrite
+from services.resumes.listing import (
+    JobContext,
+    condense_latex_if_overflowing,
+    extract_job_context_from_message,
+    generate_resume_rewrite,
+    repair_latex_until_compiles,
+)
+from services.resumes.structured import load_structured_profile
 from services.resumes.resume import (
     compile_latex_to_pdf,
     discord_profile_key,
@@ -85,6 +93,7 @@ CMD_HELLO = ".hi"
 CMD_JOB_SETTINGS = ".job"
 CMD_JOB_SETTINGS_ALIAS = ".jobs"
 CMD_JOBBANK_TEST = ".jtest"
+CMD_JOB_PIPELINE_TEST = ".jobtest"
 CMD_JOBBANK_FILTERS = ".jfilters"
 CMD_REDDIT_SETTINGS = ".reddit"
 CMD_REDDIT_SETTINGS_ALIAS = ".rset"
@@ -93,6 +102,7 @@ CMD_RESET_REDDIT_SEEN = ".rreset"
 CMD_SCRAPE_SETTINGS = ".scrapecfg"
 CMD_SCRAPE_SETTINGS_ALIAS = ".cfg"
 CMD_SCRAPE = ".scrape"
+CMD_HEALTH = ".health"
 PRIMARY_RESUME_SLASH_COMMAND = "/resumebuild"
 
 
@@ -107,6 +117,7 @@ _COMMAND_ALIASES: dict[str, tuple[str, ...]] = {
     CMD_JOB_SETTINGS: ("/job", "/jobsettings"),
     CMD_JOB_SETTINGS_ALIAS: ("/jobs", "/jobsinit"),
     CMD_JOBBANK_TEST: ("/jtest", "/jobbanktest"),
+    CMD_JOB_PIPELINE_TEST: ("/jobtest", "/jobpipelinetest"),
     CMD_JOBBANK_FILTERS: ("/jfilters", "/jobbankfilters"),
     CMD_REDDIT_SETTINGS: ("/reddit", "/redditsettings"),
     CMD_REDDIT_SETTINGS_ALIAS: ("/rset",),
@@ -115,6 +126,7 @@ _COMMAND_ALIASES: dict[str, tuple[str, ...]] = {
     CMD_SCRAPE_SETTINGS: ("/scrapecfg", "/settings"),
     CMD_SCRAPE_SETTINGS_ALIAS: ("/cfg",),
     CMD_SCRAPE: ("/scrape",),
+    CMD_HEALTH: ("/health", "/whealth"),
 }
 
 
@@ -132,8 +144,10 @@ def build_commands_cheatsheet_embed(sheet_kind: str = CHEATSHEET_KIND_GENERAL) -
             value=(
                 f"`{CMD_JOB_SETTINGS}` / `{CMD_JOB_SETTINGS_ALIAS}` - Open job settings\n"
                 f"`{CMD_JOBBANK_TEST}` - Run Job Bank listing test\n"
+                f"`{CMD_JOB_PIPELINE_TEST}` - Full pipeline test with metrics\n"
                 f"`{CMD_JOBBANK_FILTERS} [query|clear]` - Additional native filters\n"
-                f"`{CMD_STATUS}` - Watcher status"
+                f"`{CMD_STATUS}` - Watcher status\n"
+                f"`{CMD_HEALTH}` - Scrape health dashboard · `.health all` for all channels"
             ),
             inline=False,
         )
@@ -186,6 +200,7 @@ def build_commands_cheatsheet_embed(sheet_kind: str = CHEATSHEET_KIND_GENERAL) -
         value=(
             f"`{CMD_JOB_SETTINGS}` / `{CMD_JOB_SETTINGS_ALIAS}` - Open job settings\n"
             f"`{CMD_JOBBANK_TEST}` - Run Job Bank listing test\n"
+            f"`{CMD_JOB_PIPELINE_TEST}` - Full pipeline test with metrics\n"
             f"`{CMD_JOBBANK_FILTERS} [query|clear]` - Additional native filters"
         ),
         inline=False,
@@ -285,11 +300,12 @@ def command_handler(*prefixes: str, normalize: bool = False) -> Callable[[Messag
 
 
 class CommandRouter:
-    def __init__(self, client: discord.Client, config: AppConfig, store: RuntimeStore, watcher_manager: WatcherManager) -> None:
+    def __init__(self, client: discord.Client, config: AppConfig, store: RuntimeStore, watcher_manager: WatcherManager, health: WatcherHealthTracker) -> None:
         self.client = client
         self.config = config
         self.store = store
         self.watcher_manager = watcher_manager
+        self.health = health
         self.resume_cache_manager = ResumeExplicitCacheManager(
             profiles_dir=config.resume_profiles_dir,
             cache_dir=config.resume_cache_dir,
@@ -302,7 +318,9 @@ class CommandRouter:
             self.handle_resume,
             self.handle_resume_check,
             self.handle_status,
+            self.handle_health,
             self.handle_jobbank_test,
+            self.handle_job_pipeline_test,
             self.handle_jobbank_filters,
             self.handle_clear_reddit_seen,
             self.handle_reddit_settings,
@@ -332,17 +350,7 @@ class CommandRouter:
             return
 
         expected_title, expected_description = CHEATSHEET_METADATA.get(sheet_kind, CHEATSHEET_METADATA[CHEATSHEET_KIND_GENERAL])
-
-        def _is_cheatsheet(message: Any) -> bool:
-            embed = message.embeds[0] if getattr(message, "embeds", None) else None
-            if embed is None:
-                return False
-            if embed.title != expected_title or embed.description != expected_description:
-                return False
-            current_user = getattr(self.client, "user", None)
-            if current_user is None:
-                return True
-            return getattr(getattr(message, "author", None), "id", None) == getattr(current_user, "id", None)
+        new_embed = build_commands_cheatsheet_embed(sheet_kind=sheet_kind)
 
         permissions = None
         if hasattr(channel, "permissions_for"):
@@ -359,6 +367,30 @@ class CommandRouter:
 
         can_pin = True if permissions is None else bool(getattr(permissions, "manage_messages", True))
 
+        def _is_bot_cheatsheet(message: Any) -> bool:
+            embed = message.embeds[0] if getattr(message, "embeds", None) else None
+            if embed is None:
+                return False
+            current_user = getattr(self.client, "user", None)
+            if current_user is not None and getattr(getattr(message, "author", None), "id", None) != getattr(current_user, "id", None):
+                return False
+            return embed.title == expected_title
+
+        stored_id = self.store.get_cheatsheet_message_id(channel_id, sheet_kind)
+        if stored_id is not None:
+            try:
+                existing = await channel.fetch_message(stored_id)
+                if _is_bot_cheatsheet(existing):
+                    try:
+                        await existing.edit(embed=new_embed)
+                    except Exception as exc:
+                        print(f"Could not edit stored cheat sheet in channel {channel_id}: {exc}")
+                    return
+            except discord.NotFound:
+                self.store.clear_cheatsheet_message_id(channel_id, sheet_kind)
+            except Exception as exc:
+                print(f"Could not fetch stored cheat sheet {stored_id} in channel {channel_id}: {exc}")
+
         pinned_messages: list[Any] = []
         if hasattr(channel, "pins"):
             try:
@@ -367,20 +399,30 @@ class CommandRouter:
                 print(f"Could not read pinned messages in channel {channel_id}: {exc}")
 
         for message in pinned_messages:
-            if _is_cheatsheet(message):
+            if _is_bot_cheatsheet(message):
+                try:
+                    await message.edit(embed=new_embed)
+                except Exception as exc:
+                    print(f"Could not edit pinned cheat sheet in channel {channel_id}: {exc}")
+                self.store.set_cheatsheet_message_id(channel_id, sheet_kind, message.id)
                 return
 
-        # If pinning is unavailable, avoid repost spam by accepting an existing unpinned cheat sheet.
-        if not can_pin and hasattr(channel, "history"):
+        if hasattr(channel, "history"):
             try:
                 async for recent in channel.history(limit=50):
-                    if _is_cheatsheet(recent):
+                    if _is_bot_cheatsheet(recent):
+                        try:
+                            await recent.edit(embed=new_embed)
+                        except Exception as exc:
+                            print(f"Could not edit unpinned cheat sheet in channel {channel_id}: {exc}")
+                        self.store.set_cheatsheet_message_id(channel_id, sheet_kind, recent.id)
                         return
             except Exception as exc:
                 print(f"Could not read history in channel {channel_id}: {exc}")
 
         try:
-            sent_message = await channel.send(embed=build_commands_cheatsheet_embed(sheet_kind=sheet_kind))
+            sent_message = await channel.send(embed=new_embed)
+            self.store.set_cheatsheet_message_id(channel_id, sheet_kind, sent_message.id)
             if can_pin:
                 try:
                     await sent_message.pin(reason="Ensure command cheat sheet is pinned for watcher channel")
@@ -412,6 +454,49 @@ class CommandRouter:
             f"active process lock: `{active_process}`",
         ]
         await message.channel.send("\n".join(lines))
+        return True
+
+    @command_handler(CMD_HEALTH, normalize=True)
+    async def handle_health(self, message: discord.Message) -> bool:
+        channel_id = message.channel.id
+        payload = _extract_command_payload(message.content, CMD_HEALTH).strip().lower()
+
+        active_job = sum(
+            1 for t in self.watcher_manager.channel_job_tasks.values() if not t.done()
+        )
+        active_reddit = sum(
+            1 for t in self.watcher_manager.channel_reddit_tasks.values() if not t.done()
+        )
+
+        if payload == "all":
+            channel_names: dict[int, str] = {}
+            for cid in self.health.all_job_health():
+                ch = self.client.get_channel(cid)
+                channel_names[cid] = getattr(ch, "name", str(cid))
+            embed = build_all_health_embed(
+                self.health,
+                self.watcher_manager.channel_job_tasks,
+                channel_names,
+                active_job,
+                active_reddit,
+            )
+            await message.channel.send(embed=embed)
+            return True
+
+        job_task = self.watcher_manager.channel_job_tasks.get(channel_id)
+        reddit_task = self.watcher_manager.channel_reddit_tasks.get(channel_id)
+        channel_name = getattr(message.channel, "name", str(channel_id))
+
+        embeds = build_channel_health_embed(
+            self.health,
+            channel_id,
+            channel_name,
+            job_task_alive=bool(job_task and not job_task.done()),
+            reddit_task_alive=bool(reddit_task and not reddit_task.done()),
+            active_job_watchers=active_job,
+            active_reddit_watchers=active_reddit,
+        )
+        await message.channel.send(embeds=embeds)
         return True
 
     async def resolve_referenced_message(self, message: discord.Message) -> discord.Message | None:
@@ -694,7 +779,6 @@ class CommandRouter:
                     ensure_profile_cache,
                     profile_key,
                     cache_root,
-                    self.owner_profile_key(guild_owner_id),
                 )
             except FileNotFoundError as exc:
                 await message.channel.send(f"Resume cache setup failed: {exc}",
@@ -755,7 +839,18 @@ class CommandRouter:
             cache_dir=self.config.resume_cache_dir / f".cache_{cache_scope}",
         )
 
-        if settings.api_key:
+        # Structured-mode profiles never use the Gemini context cache (the
+        # cached legacy instructions conflict with the JSON-only prompt), so
+        # skip the cache round-trip entirely for them.
+        is_structured_profile = await asyncio.to_thread(
+            lambda: load_structured_profile(template_path, profile_dir / "baseinfo.txt") is not None
+        )
+        if is_structured_profile:
+            cache_status = ResumeExplicitCacheStatus(
+                status="skipped",
+                message="Gemini cache skipped: structured profile mode.",
+            )
+        elif settings.api_key:
             cache_status = await asyncio.to_thread(user_resume_cache_manager.ensure_cache, settings)
         else:
             cache_status = ResumeExplicitCacheStatus(
@@ -789,15 +884,81 @@ class CommandRouter:
             template_log_path,
             self.config.resume_normalize_json_latex,
         )
+
+        def _recompile(latex_document: str):
+            return compile_latex_to_pdf(
+                latex_document,
+                job.title,
+                template_path,
+                template_log_path,
+                self.config.resume_normalize_json_latex,
+            )
+
+        # Deterministic auto-fixes in compile_latex_to_pdf only catch known
+        # failure patterns. For anything novel, iteratively ask an LLM to fix
+        # the specific compile error (not re-tailor the resume), feeding each
+        # fresh error back, bounded to two rounds to cap added latency/cost.
+        llm_repair_provider: str | None = None
+        llm_repair_attempted = False
+        if compile_result.status == "error" and compile_result.log_excerpt:
+            llm_repair_attempted = True
+            repaired_latex, compile_result, llm_repair_provider, _repair_rounds = await asyncio.to_thread(
+                repair_latex_until_compiles,
+                rewrite_result.latex_document,
+                compile_result,
+                settings,
+                _recompile,
+            )
+            if llm_repair_provider:
+                rewrite_result.latex_document = repaired_latex
+
+        # A compiling resume can still violate the expected format by
+        # overflowing the page budget. Best-effort: ask an LLM to comment out
+        # the least-relevant bullets; the original PDF is kept unless the
+        # condensed one compiles with fewer pages.
+        llm_condense_provider: str | None = None
+        if compile_result.status == "ok":
+            condensed_latex, compile_result, llm_condense_provider = await asyncio.to_thread(
+                condense_latex_if_overflowing,
+                rewrite_result.latex_document,
+                compile_result,
+                self.config.resume_max_pages,
+                settings,
+                _recompile,
+            )
+            if llm_condense_provider:
+                rewrite_result.latex_document = condensed_latex
+
         if compile_result.status == "ok" and compile_result.pdf_bytes and compile_result.pdf_name:
-            used_provider = rewrite_result.used_provider or "gemini"
-            if used_provider == "openrouter":
-                used_model = settings.openrouter_model
-            elif used_provider == "groq":
-                used_model = settings.groq_model
+            structured_summary: dict[str, Any] | None = None
+            try:
+                parsed_summary = json.loads(rewrite_result.rewritten_resume or "")
+                if isinstance(parsed_summary, dict) and parsed_summary.get("mode") == "structured":
+                    structured_summary = parsed_summary
+            except (json.JSONDecodeError, TypeError):
+                structured_summary = None
+
+            if structured_summary is not None and rewrite_result.used_provider is None:
+                content = (
+                    "Compiled PDF from canonical content (all LLM providers failed; "
+                    f"role family `{structured_summary.get('role_family', '?')}` detected by keywords)."
+                )
             else:
-                used_model = settings.model
-            content = f"Compiled PDF using `{used_provider}` (`{used_model}`)."
+                used_provider = rewrite_result.used_provider or "gemini"
+                if used_provider == "openrouter":
+                    used_model = settings.openrouter_model
+                elif used_provider == "groq":
+                    used_model = settings.groq_model
+                else:
+                    used_model = settings.model
+                content = f"Compiled PDF using `{used_provider}` (`{used_model}`)."
+                if structured_summary is not None:
+                    tailored = structured_summary.get("tailored_bullets_used", 0)
+                    total_bullets = structured_summary.get("visible_bullet_count", 0)
+                    family = structured_summary.get("role_family", "?")
+                    content = (
+                        f"{content} Tailored {tailored}/{total_bullets} bullets for `{family}` role."
+                    )
             if compile_result.repairs_applied:
                 shown_repairs = compile_result.repairs_applied[:3]
                 extra_repairs = len(compile_result.repairs_applied) - len(shown_repairs)
@@ -805,6 +966,18 @@ class CommandRouter:
                 if extra_repairs > 0:
                     repair_note = f"{repair_note}, +{extra_repairs} more"
                 content = f"{content} Auto-fixed LaTeX: {repair_note}."
+            if llm_repair_provider:
+                content = f"{content} LLM-repaired a compile error via `{llm_repair_provider}`."
+            if llm_condense_provider:
+                content = (
+                    f"{content} LLM-condensed to fit {self.config.resume_max_pages} page(s) "
+                    f"via `{llm_condense_provider}`."
+                )
+            elif compile_result.page_count and compile_result.page_count > self.config.resume_max_pages:
+                content = (
+                    f"{content} Note: PDF is {compile_result.page_count} pages "
+                    f"(target {self.config.resume_max_pages}); auto-condense could not shrink it."
+                )
             await message.channel.send(
                 content=content,
                 file=discord.File(io.BytesIO(compile_result.pdf_bytes), filename=compile_result.pdf_name),
@@ -826,6 +999,8 @@ class CommandRouter:
                 failure_dump_name = None
 
             error_msg = f"PDF compile failed: {compile_result.message}"
+            if llm_repair_attempted:
+                error_msg += " (LLM auto-repair was also attempted and did not produce a compiling document.)"
             if failure_dump_name:
                 error_msg += f"\nSaved failed LaTeX: `{failure_dump_name}`"
             if compile_result.log_excerpt:
@@ -870,7 +1045,6 @@ class CommandRouter:
                 ensure_profile_cache,
                 profile_key,
                 cache_root,
-                self.owner_profile_key(guild_owner_id),
             )
             try:
                 profile_key = resolve_discord_profile_key(
@@ -996,6 +1170,180 @@ class CommandRouter:
             lines.append(self.watcher_manager.format_job_watcher_message(item))
 
         await message.channel.send(self.set_continuation(message.channel.id, "\n\n".join(lines)))
+        return True
+
+    @command_handler(CMD_JOB_PIPELINE_TEST, normalize=True)
+    async def handle_job_pipeline_test(self, message: discord.Message) -> bool:
+        import time as _time
+
+        try:
+            return await self._job_pipeline_test_inner(message, _time)
+        except Exception as exc:
+            try:
+                await message.channel.send(f"`.jobtest` failed: {exc}")
+            except discord.HTTPException:
+                print(f".jobtest unrecoverable: {exc}")
+            return True
+
+    async def _job_pipeline_test_inner(self, message: discord.Message, _time: Any) -> bool:
+        settings = self.store.get_job_settings(message.channel.id)
+        keywords = str(settings.get("keywords") or "").strip()
+        location = str(settings.get("location") or "").strip()
+        if not keywords:
+            await message.channel.send("No job watcher configured for this channel. Use `.job` first.")
+            return True
+
+        sites = list(settings.get("sites") or [])
+        if not sites:
+            await message.channel.send("No sites configured for this channel's watcher.")
+            return True
+
+        role_filters = list(settings.get("role_filters") or [])
+        exclusion_terms = list(settings.get("exclusion_terms") or [])
+        results_wanted = max(1, int(settings.get("results_wanted") or 10))
+        hours_old = max(1, int(settings.get("hours_old") or 72))
+        radius_miles = max(0, int(settings.get("radius_miles") or 25))
+        country_indeed = str(settings.get("country_indeed") or "AUTO")
+        allow_na = bool(settings.get("allow_north_america", False))
+        native_query = job_service.effective_jobbank_native_query(str(settings.get("jobbank_native_query") or ""))
+        try:
+            sem_threshold = float(settings.get("semantic_threshold") or 0.30)
+        except (TypeError, ValueError):
+            sem_threshold = 0.30
+
+        status_msg = await message.channel.send(
+            f"Running full pipeline test: `{keywords}` in `{location}` "
+            f"(sites={len(sites)}, results_wanted={results_wanted})..."
+        )
+
+        t_start = _time.perf_counter()
+        async with self.watcher_manager.work_guard():
+            raw_items = await asyncio.to_thread(
+                job_service.scrape_job_postings,
+                sites,
+                keywords,
+                location,
+                self.config.jobspy_python_exe,
+                hours_old,
+                results_wanted,
+                radius_miles,
+                country_indeed,
+                "command:jobtest",
+                allow_na,
+                native_query,
+            )
+        t_scrape = _time.perf_counter()
+
+        count_raw = len(raw_items)
+
+        after_role = [i for i in raw_items if job_service.matches_role_filters(str(i.get("title", "")), role_filters)]
+        count_role_removed = count_raw - len(after_role)
+
+        after_excl = [i for i in after_role if not job_service.matches_exclusion_terms(i, exclusion_terms)]
+        count_excl_removed = len(after_role) - len(after_excl)
+
+        after_semantic = [
+            i for i in after_excl
+            if job_service.matches_search_parameters_semantic(
+                i, keywords, location, role_filters, threshold=sem_threshold,
+            )
+        ]
+        t_filter = _time.perf_counter()
+        count_sem_removed = len(after_excl) - len(after_semantic)
+
+        # Layer 1: URL dedup — read-only snapshot of channel_job_seen
+        seen_snapshot: set[str] = set()
+        try:
+            seen_raw = self.store.channel_job_seen.get(message.channel.id) or set()
+            seen_snapshot = {
+                job_service.canonicalize_job_link(str(link)) or str(link)
+                for link in seen_raw
+                if str(link).strip()
+            }
+        except Exception:
+            pass
+
+        count_url_dedup = 0
+        after_url_dedup: list[dict[str, Any]] = []
+        local_seen: set[str] = set(seen_snapshot)
+        for item in after_semantic:
+            raw_link = str(item.get("link") or "").strip()
+            canonical = job_service.canonicalize_job_link(raw_link) or raw_link
+            if not canonical or canonical in local_seen:
+                count_url_dedup += 1
+                continue
+            local_seen.add(canonical)
+            after_url_dedup.append(item)
+
+        # Layer 2: FIFO title-signature dedup — read-only check against listing files
+        listing_file = self.watcher_manager._attached_listing_file(message.channel.id, "job")
+        months_threshold = self.watcher_manager.dedup_months_threshold()
+        count_fifo_dedup = 0
+        after_fifo_dedup: list[dict[str, Any]] = []
+        for item in after_url_dedup:
+            formatted = self.watcher_manager.format_job_watcher_message(item)
+            if job_service.is_message_duplicate(formatted, listing_file, months_threshold):
+                count_fifo_dedup += 1
+                continue
+            after_fifo_dedup.append(item)
+
+        # Layer 3: Discord history dedup — check recent messages in channel
+        count_history_dedup = 0
+        fresh: list[dict[str, Any]] = []
+        for item in after_fifo_dedup:
+            formatted = self.watcher_manager.format_job_watcher_message(item)
+            if await self.watcher_manager.should_skip_duplicate_message(
+                message.channel.id, message.channel, formatted, watcher_type="job",
+            ):
+                count_history_dedup += 1
+                continue
+            fresh.append(item)
+
+        scrape_sec = t_scrape - t_start
+        filter_sec = t_filter - t_scrape
+        total_sec = _time.perf_counter() - t_start
+
+        site_counts: dict[str, int] = {}
+        for item in raw_items:
+            label = str(item.get("site_label") or item.get("site") or "unknown")
+            site_counts[label] = site_counts.get(label, 0) + 1
+
+        lines = [
+            "**Pipeline Test Results**",
+            f"Query: `{keywords}` | Location: `{location}`",
+            f"Sites: {', '.join(sites)} | results_wanted: {results_wanted}",
+            "",
+            f"**Total retrieved: {count_raw}**",
+        ]
+        for site_name, cnt in sorted(site_counts.items()):
+            lines.append(f"  {site_name}: {cnt}")
+
+        lines += [
+            "",
+            "**Filtering**",
+            f"  Role filters ({', '.join(role_filters) or 'none'}): -{count_role_removed}",
+            f"  Exclusion terms ({len(exclusion_terms)} term(s)): -{count_excl_removed}",
+            f"  Semantic match (threshold {sem_threshold:.2f}): -{count_sem_removed}",
+            "",
+            "**Dedup (all read-only)**",
+            f"  URL seen set ({len(seen_snapshot)} tracked): -{count_url_dedup}",
+            f"  FIFO title signature: -{count_fifo_dedup}",
+            f"  Discord history: -{count_history_dedup}",
+            "",
+            f"**Would send: {len(fresh)}** of {count_raw} retrieved",
+            "",
+            f"Timing — scrape: {scrape_sec:.1f}s | filters+dedup: {total_sec:.1f}s",
+        ]
+
+        if fresh:
+            lines.append(f"\n**Sample results** (first 3 of {len(fresh)}):")
+            for item in fresh[:3]:
+                lines.append(self.watcher_manager.format_job_watcher_message(item))
+
+        try:
+            await status_msg.edit(content=self.set_continuation(message.channel.id, "\n".join(lines)))
+        except discord.HTTPException:
+            await message.channel.send(self.set_continuation(message.channel.id, "\n".join(lines)))
         return True
 
     @command_handler(CMD_JOBBANK_FILTERS, normalize=True)
@@ -1235,7 +1583,6 @@ class CommandRouter:
                 ensure_profile_cache,
                 profile_key,
                 cache_root,
-                self.owner_profile_key(guild_owner_id),
             )
             profile_key = resolve_discord_profile_key(
                 message.author.id,

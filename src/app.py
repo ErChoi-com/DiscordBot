@@ -11,7 +11,9 @@ from discord.ext import commands
 from commands.handlers import CommandRouter
 from config import load_config
 from services import job_service
+from services.health import WatcherHealthTracker
 from services.resumes.resume import migrate_legacy_profile_keys_with_usernames
+from services import browser_service
 from state.store import RuntimeStore, init_store_defaults
 from watchers.manager import WatcherManager
 
@@ -247,7 +249,7 @@ def bind_client_events(
     @client.event
     async def on_ready() -> None:
         nonlocal slash_synced
-        restored = watcher_manager.restore_enabled_watchers()
+        restored = await watcher_manager.restore_enabled_watchers()
         print("Restored scraper processes: " f"jobs={restored['job']}, reddit={restored['reddit']}")
         if not slash_synced:
             try:
@@ -340,6 +342,8 @@ def run_bot() -> None:
             print(f"Another runtime owner is active (pid={owner_pid}).")
         raise SystemExit(0)
 
+    browser_service.start()
+
     # Push settings.toml values into service/store module globals
     job_service.configure_job_service(config)
     init_store_defaults(config)
@@ -347,9 +351,10 @@ def run_bot() -> None:
     store = RuntimeStore(config.state_path)
     store.load()
 
+    health = WatcherHealthTracker()
     client = create_client()
-    watcher_manager = WatcherManager(client=client, config=config, store=store)
-    router = CommandRouter(client=client, config=config, store=store, watcher_manager=watcher_manager)
+    watcher_manager = WatcherManager(client=client, config=config, store=store, health=health)
+    router = CommandRouter(client=client, config=config, store=store, watcher_manager=watcher_manager, health=health)
     watcher_manager.set_cheatsheet_ensurer(router.ensure_commands_cheatsheet_pinned)
     sync_guild_id_raw = (
         os.getenv("DISCORD_SYNC_GUILD_ID")
@@ -378,10 +383,30 @@ def run_bot() -> None:
         force_sync_marker_path=force_sync_marker_path,
     )
 
+    _original_close = client.close
+
+    async def _graceful_close() -> None:
+        try:
+            try:
+                work_drained = await watcher_manager.drain_active_work(timeout=120)
+                print("[shutdown] All scrapes complete." if work_drained else "[shutdown] Timed out waiting for scrapes. Closing anyway.")
+            except Exception as exc:
+                print(f"[shutdown] drain_active_work raised unexpectedly: {exc}. Closing anyway.")
+            try:
+                sends_drained = await watcher_manager.drain_active_sends(timeout=30)
+                print("[shutdown] All watcher sends complete. Closing." if sends_drained else "[shutdown] Timed out waiting for watcher sends. Closing anyway.")
+            except Exception as exc:
+                print(f"[shutdown] drain_active_sends raised unexpectedly: {exc}. Closing anyway.")
+        finally:
+            await _original_close()
+
+    client.close = _graceful_close  # type: ignore[method-assign]
+
     register_current_process(config.pid_path)
     try:
         client.run(config.discord_token)
     finally:
+        browser_service.stop()
         unregister_current_process(config.pid_path)
         release_runtime_lock(config.lock_path)
 

@@ -1,0 +1,225 @@
+"""Proof that the structured pipeline is domain-agnostic: a synthetic nursing
+profile (no software content anywhere) must parse, route, validate, and render
+end to end. Families, categories, skill anchors, and skills ordering all come
+from profile content — nothing in the code may assume a tech resume."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from services.resumes.structured import (
+    StructuredSelection,
+    detect_role_family,
+    load_structured_profile,
+    render_structured_resume,
+    validate_tailored_bullet,
+)
+
+NURSING_TEMPLATE = r"""\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\begin{document}
+
+\begin{center}
+\textbf{Casey Cardinal} \\
+casey@example.com | 555-0100
+\end{center}
+
+\section*{Clinical Experience}
+
+% [clinical]
+\textbf{Student Nurse,} {General Hospital} -- Toronto \hfill 2025 \\
+\begin{itemize}
+  \item Charted patient vitals in \textbf{Epic} for a 12-bed unit, cutting handoff errors by 18\%.
+  \item Administered medications under supervision with zero dosing incidents across 40 shifts.
+\end{itemize}
+
+\smallskip
+% [community]
+\textbf{Health Outreach Volunteer,} {Community Clinic} -- Toronto \hfill 2024 \\
+\begin{itemize}
+  \item Screened 300 patients for blood pressure and glucose at community events.
+  \item Coordinated intake scheduling with \textbf{Excel}, reducing wait times by 25\%.
+\end{itemize}
+
+\section*{Administration}
+
+% [admin]
+\textbf{Ward Clerk,} {General Hospital} -- Toronto \hfill 2023 \\
+\begin{itemize}
+  \item Processed admissions paperwork and bed assignments for 30 patients daily.
+  \item Maintained supply inventory logs in \textbf{Meditech}, cutting stock-outs by 12\%.
+\end{itemize}
+
+\section*{Skills}
+\textbf{Clinical:} Vital signs, Medication administration, Wound care, IV setup \\
+\textbf{Systems:} Excel, Epic, Meditech \\
+\textbf{Certifications:} CPR, First Aid
+
+\section*{Education}
+Nursing College -- BScN \hfill 2023--2027
+
+\end{document}
+"""
+
+NURSING_BASEINFO = """Casey Cardinal -- nursing student, Toronto.
+
+== EXPERIENCE ==
+
+[clinical] Student Nurse, General Hospital -- 2025
+- Charted patient vitals in Epic for a 12-bed unit, cutting handoff errors by 18%.
+- Administered medications under supervision with zero dosing incidents across 40 shifts.
+
+[community] Health Outreach Volunteer, Community Clinic -- 2024
+- Screened 300 patients for blood pressure and glucose at community events.
+- Coordinated intake scheduling with Excel, reducing wait times by 25%.
+
+[admin] Ward Clerk, General Hospital -- 2023
+- Processed admissions paperwork and bed assignments for 30 patients daily.
+- Maintained supply inventory logs in Meditech, cutting stock-outs by 12%.
+
+== SKILL ANCHORS ==
+Systems: Epic, Excel, Meditech
+Certifications: CPR, First Aid
+Clinical: IV setup, Wound care, Vital signs
+
+== ROLE TYPE SELECTION GUIDE ==
+
+CLINICAL / BEDSIDE roles
+  Keywords: nurse, patient, clinical, bedside, medication, acute, ward, charting
+  MUST SHOW: clinical
+  SHOW:      community, admin
+  HIDE:      none
+
+ADMIN / COORDINATION roles
+  Keywords: administration, scheduling, records, clerk, intake, coordinator
+  MUST SHOW: admin
+  SHOW:      clinical, community
+  HIDE:      none
+"""
+
+NURSING_CONFIG = {
+    "min_visible_bullets": 4,
+    "max_visible_bullets": 8,
+    "rewrite_scope": "full",
+    "family_skill_priority": {
+        "CLINICAL": ["Epic", "Meditech", "CPR", "IV setup"],
+        "ADMIN": ["Excel", "Meditech"],
+    },
+}
+
+
+@pytest.fixture(scope="module")
+def nursing_profile(tmp_path_factory):
+    profile_dir = tmp_path_factory.mktemp("nursing_profile")
+    (profile_dir / "template.tex").write_text(NURSING_TEMPLATE, encoding="utf-8")
+    (profile_dir / "baseinfo.txt").write_text(NURSING_BASEINFO, encoding="utf-8")
+    (profile_dir / "structured_config.json").write_text(json.dumps(NURSING_CONFIG), encoding="utf-8")
+    loaded = load_structured_profile(profile_dir / "template.tex", profile_dir / "baseinfo.txt")
+    assert loaded is not None, "nursing profile failed to load as a structured profile"
+    return loaded
+
+
+def test_nursing_profile_parses_entries_and_families(nursing_profile) -> None:
+    catalog, families = nursing_profile
+    assert len(catalog.entries) == 3
+    assert {f.key for f in families} == {"CLINICAL", "ADMIN"}
+    assert "epic" in catalog.skill_anchors
+
+
+def test_nursing_listing_routes_to_clinical_family(nursing_profile) -> None:
+    _, families = nursing_profile
+    family = detect_role_family(
+        "Registered Nurse - acute care ward, medication administration, patient charting",
+        families,
+    )
+    assert family is not None and family.key == "CLINICAL"
+
+
+def test_admin_listing_routes_to_admin_family(nursing_profile) -> None:
+    _, families = nursing_profile
+    family = detect_role_family(
+        "Medical Records Coordinator - scheduling, intake, records administration",
+        families,
+    )
+    assert family is not None and family.key == "ADMIN"
+
+
+def test_nursing_render_is_clean_and_complete(nursing_profile) -> None:
+    catalog, families = nursing_profile
+    latex, report = render_structured_resume(
+        catalog, families, StructuredSelection(role_family_key="CLINICAL")
+    )
+    assert report.fidelity_findings == []
+    assert "Student Nurse" in latex
+    assert "Casey Cardinal" in latex
+    assert "18\\%" in latex
+    assert latex.count("\\begin{itemize}") == latex.count("\\end{itemize}")
+    assert "\\end{document}" in latex
+
+
+def test_nursing_skills_lines_order_by_family_priority(nursing_profile) -> None:
+    catalog, families = nursing_profile
+    latex, _ = render_structured_resume(
+        catalog, families, StructuredSelection(role_family_key="CLINICAL")
+    )
+    systems = next(l for l in latex.splitlines() if l.startswith("\\textbf{Systems:}"))
+    # CLINICAL priority: Epic, Meditech ahead of canonical-first Excel.
+    items = systems.split("}", 1)[1].strip()
+    assert items.startswith("Epic, Meditech, Excel")
+
+
+def test_nursing_bullet_validation_grounds_on_clinical_anchors(nursing_profile) -> None:
+    catalog, _ = nursing_profile
+    clinical = next(e for e in catalog.entries if "clinical" in e.categories)
+    canonical = clinical.bullets[0]
+
+    # Bolding a real anchor the canonical bullet lacks (Meditech) is allowed.
+    ok_text, ok_reason = validate_tailored_bullet(
+        "Charted patient vitals in \\textbf{Epic} and \\textbf{Meditech} for a 12-bed unit, cutting handoff errors by 18\\%.",
+        canonical,
+        catalog.render_config,
+        skill_anchors=catalog.skill_anchors,
+        entry_context=" ".join(clinical.bullets),
+    )
+    assert ok_reason is None and ok_text is not None
+
+    # Bolding a clinical system the candidate never used is an invented tool.
+    bad_text, bad_reason = validate_tailored_bullet(
+        "Charted patient vitals in \\textbf{Cerner} for a 12-bed unit, cutting handoff errors by 18\\%.",
+        canonical,
+        catalog.render_config,
+        skill_anchors=catalog.skill_anchors,
+        entry_context=" ".join(clinical.bullets),
+    )
+    assert bad_text is None and "invented tool" in str(bad_reason)
+
+
+def test_nursing_bullet_validation_rejects_invented_metric(nursing_profile) -> None:
+    catalog, _ = nursing_profile
+    clinical = next(e for e in catalog.entries if "clinical" in e.categories)
+    text, reason = validate_tailored_bullet(
+        "Charted patient vitals in \\textbf{Epic}, cutting handoff errors by 45\\%.",
+        clinical.bullets[0],
+        catalog.render_config,
+        skill_anchors=catalog.skill_anchors,
+        entry_context=" ".join(clinical.bullets),
+    )
+    assert text is None and "invented number" in str(reason)
+
+
+def test_nursing_selection_scope_renders_pure_canonical(nursing_profile, monkeypatch) -> None:
+    catalog, families = nursing_profile
+    monkeypatch.setattr(catalog.render_config, "rewrite_scope", "selection")
+    selection = StructuredSelection(
+        role_family_key="CLINICAL",
+        bullets={e.entry_id: ["Totally rewritten bullet."] for e in catalog.entries},
+    )
+    latex, report = render_structured_resume(catalog, families, selection)
+    assert "Totally rewritten" not in latex
+    assert report.tailored_bullets_used == 0

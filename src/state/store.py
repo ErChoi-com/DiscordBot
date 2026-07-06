@@ -26,16 +26,18 @@ JOB_DEFAULTS: dict[str, Any] = {
     "role_filters": [],
     "exclusion_terms": [],
     "hours_old": 72,
-    "results_wanted": 10,
+    "results_wanted": 50,
     "refresh_seconds": 300,
     "country_indeed": "AUTO",
     "allow_north_america": False,
     "jobbank_native_query": "",
+    "semantic_threshold": 0.30,
+    "ats_semantic_threshold": 0.20,
     "enabled": False,
 }
 
 REDDIT_DEFAULTS: dict[str, Any] = {
-    "subreddit": "wallpapers",
+    "subreddits": ["wallpapers"],
     "sort": "new",
     "time_filter": "day",
     "flair_tags": "",
@@ -72,7 +74,6 @@ DEFAULT_CONFIG_OVERRIDES: tuple[tuple[dict[str, Any], tuple[tuple[str, str, type
     (
         REDDIT_DEFAULTS,
         (
-            ("subreddit", "reddit_default_subreddit", str),
             ("sort", "reddit_default_sort", str),
             ("time_filter", "reddit_default_time_filter", str),
             ("limit", "reddit_default_limit", int),
@@ -89,6 +90,7 @@ def init_store_defaults(config: Any) -> None:
     for defaults, overrides in DEFAULT_CONFIG_OVERRIDES:
         for key, config_attr, value_type in overrides:
             defaults[key] = value_type(getattr(config, config_attr, defaults[key]))
+    REDDIT_DEFAULTS["subreddits"] = [str(getattr(config, "reddit_default_subreddit", "wallpapers"))]
 
 
 class RuntimeStore:
@@ -98,7 +100,19 @@ class RuntimeStore:
         self.channel_scrape_settings: dict[int, dict[str, Any]] = {}
         self.channel_job_settings: dict[int, dict[str, Any]] = {}
         self.channel_reddit_settings: dict[int, dict[str, Any]] = {}
-        self.channel_job_seen: dict[int, set[str]] = {}
+        self.channel_job_seen: dict[int, dict[str, None]] = {}
+        self.channel_cheatsheet_ids: dict[str, int] = {}
+
+    def get_cheatsheet_message_id(self, channel_id: int, sheet_kind: str) -> int | None:
+        return self.channel_cheatsheet_ids.get(f"{channel_id}:{sheet_kind}")
+
+    def set_cheatsheet_message_id(self, channel_id: int, sheet_kind: str, message_id: int) -> None:
+        self.channel_cheatsheet_ids[f"{channel_id}:{sheet_kind}"] = message_id
+        self.save()
+
+    def clear_cheatsheet_message_id(self, channel_id: int, sheet_kind: str) -> None:
+        self.channel_cheatsheet_ids.pop(f"{channel_id}:{sheet_kind}", None)
+        self.save()
 
     def get_mode(self, channel_id: int) -> str:
         return self.channel_modes.get(channel_id, DEFAULT_MODE)
@@ -132,9 +146,20 @@ class RuntimeStore:
         current[key] = value
         self.save()
 
+    def remove_job_channel(self, channel_id: int) -> None:
+        """Remove all persisted job-watcher state for a channel."""
+        self.channel_job_settings.pop(channel_id, None)
+        self.channel_job_seen.pop(channel_id, None)
+        self.save()
+
     def get_reddit_settings(self, channel_id: int) -> dict[str, Any]:
         merged = dict(REDDIT_DEFAULTS)
         merged.update(self.channel_reddit_settings.get(channel_id, {}))
+        if "subreddit" in merged and "subreddits" not in merged:
+            raw = str(merged.pop("subreddit")).strip()
+            merged["subreddits"] = [raw[2:] if raw.lower().startswith("r/") else raw]
+        else:
+            merged.pop("subreddit", None)
         return merged
 
     def update_reddit_setting(self, channel_id: int, key: str, value: Any) -> None:
@@ -148,7 +173,8 @@ class RuntimeStore:
             "channel_scrape_settings": {str(k): v for k, v in self.channel_scrape_settings.items()},
             "channel_job_settings": {str(k): v for k, v in self.channel_job_settings.items()},
             "channel_reddit_settings": {str(k): v for k, v in self.channel_reddit_settings.items()},
-            "channel_job_seen": {str(k): sorted(v) for k, v in self.channel_job_seen.items()},
+            "channel_job_seen": {str(k): list(v) for k, v in self.channel_job_seen.items()},
+            "channel_cheatsheet_ids": dict(self.channel_cheatsheet_ids),
         }
         try:
             self.state_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
@@ -166,8 +192,22 @@ class RuntimeStore:
         self.channel_modes = {int(k): str(v) for k, v in payload.get("channel_modes", {}).items()}
         self.channel_scrape_settings = {int(k): dict(v) for k, v in payload.get("channel_scrape_settings", {}).items()}
         self.channel_job_settings = {int(k): dict(v) for k, v in payload.get("channel_job_settings", {}).items()}
-        self.channel_reddit_settings = {int(k): dict(v) for k, v in payload.get("channel_reddit_settings", {}).items()}
+        reddit_raw = payload.get("channel_reddit_settings", {})
+        migrated_reddit: dict[int, dict[str, Any]] = {}
+        for k, v in reddit_raw.items():
+            d = dict(v)
+            if "subreddit" in d:
+                if "subreddits" not in d:
+                    raw = str(d["subreddit"]).strip()
+                    d["subreddits"] = [raw[2:] if raw.lower().startswith("r/") else raw]
+                del d["subreddit"]
+            migrated_reddit[int(k)] = d
+        self.channel_reddit_settings = migrated_reddit
         self.channel_job_seen = {
             int(k): {str(item) for item in values}
             for k, values in payload.get("channel_job_seen", {}).items()
+        }
+        self.channel_cheatsheet_ids = {
+            str(k): int(v)
+            for k, v in payload.get("channel_cheatsheet_ids", {}).items()
         }

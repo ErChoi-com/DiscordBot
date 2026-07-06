@@ -10,7 +10,7 @@ from typing import Any
 import discord
 
 from services import job_service
-from services.resumes.resume import compile_latex_to_pdf, ensure_profile_cache, resolve_discord_profile_key
+from services.resumes.resume import compile_latex_to_pdf
 from state.store import MODE_DESCRIPTIONS, RuntimeStore
 from watchers.manager import WatcherManager
 
@@ -27,7 +27,12 @@ def _sanitize_modal_text_input_labels(modal: discord.ui.Modal) -> list[int]:
     """Normalize modal text-input labels to Discord's 1..45 char constraint."""
     lengths: list[int] = []
     for child in modal.children:
-        label = getattr(child, "label", None)
+        if not isinstance(child, discord.ui.TextInput):
+            continue
+        underlying = getattr(child, "_underlying", None)
+        if underlying is None:
+            continue
+        label = getattr(underlying, "label", None)
         if not isinstance(label, str):
             continue
         normalized = label.strip() or "Field"
@@ -35,11 +40,11 @@ def _sanitize_modal_text_input_labels(modal: discord.ui.Modal) -> list[int]:
             normalized = normalized[:DISCORD_TEXT_INPUT_LABEL_LIMIT]
         if normalized != label:
             try:
-                setattr(child, "label", normalized)
+                underlying.label = normalized
             except Exception:
                 # If discord.py rejects runtime relabeling, keep the original and let send_modal fail loudly.
                 pass
-        lengths.append(len(getattr(child, "label", "") or ""))
+        lengths.append(len(getattr(underlying, "label", "") or ""))
     return lengths
 
 
@@ -84,7 +89,9 @@ def format_job_settings_summary(store: RuntimeStore, channel_id: int) -> str:
         f"- Exclusion terms: `{exclusion_terms}`\n"
         f"- Date window: last `{settings['hours_old']}` hours\n"
         f"- Results per check: `{settings['results_wanted']}`\n"
-        f"- Refresh rate: every `{settings['refresh_seconds']}` seconds"
+        f"- Refresh rate: every `{settings['refresh_seconds']}` seconds\n"
+        f"- Match threshold: `{settings.get('semantic_threshold', 0.30)}`\n"
+        f"- ATS match threshold: `{settings.get('ats_semantic_threshold', settings.get('semantic_threshold', 0.30))}`"
     )
     log_panel_output("job_settings", channel_id, summary)
     return summary
@@ -202,7 +209,7 @@ def format_reddit_settings_summary(store: RuntimeStore, channel_id: int) -> str:
     return (
         "Reddit media watcher for this channel:\n"
         f"- Status: `{status}`\n"
-        f"- Subreddit: `r/{settings['subreddit']}`\n"
+        f"- Subreddits: `r/{', r/'.join(str(s) for s in settings['subreddits'])}`\n"
         f"- Media mode: `{settings['media_mode']}`\n"
         f"- Sort: `{settings['sort']}`\n"
         f"- Time filter: `{settings['time_filter']}`\n"
@@ -335,9 +342,6 @@ class JobSourceDropdown(discord.ui.Select):
         super().__init__(placeholder="Job sources", min_values=1, max_values=len(options), options=options, row=0)
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("Only the menu owner can change settings.", ephemeral=True)
-            return
         self.store.update_job_setting(self.channel_id, "sites", list(self.values))
         await interaction.response.edit_message(content=format_job_settings_summary(self.store, self.channel_id), view=self.view)
 
@@ -356,9 +360,6 @@ class JobDateDropdown(discord.ui.Select):
         super().__init__(placeholder="Date window", min_values=1, max_values=1, options=options, row=1)
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("Only the menu owner can change settings.", ephemeral=True)
-            return
         self.store.update_job_setting(self.channel_id, "hours_old", int(self.values[0]))
         await interaction.response.edit_message(content=format_job_settings_summary(self.store, self.channel_id), view=self.view)
 
@@ -400,9 +401,6 @@ class JobRefreshDropdown(discord.ui.Select):
         super().__init__(placeholder="Refresh rate", min_values=1, max_values=1, options=options, row=2)
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("Only the menu owner can change settings.", ephemeral=True)
-            return
         self.store.update_job_setting(self.channel_id, "refresh_seconds", int(self.values[0]))
         await interaction.response.edit_message(content=format_job_settings_summary(self.store, self.channel_id), view=self.view)
 
@@ -420,26 +418,25 @@ class JobTextModal(discord.ui.Modal, title="Edit Job Watcher"):
         self.location = discord.ui.TextInput(label="Location", placeholder="United States", required=True, max_length=120)
         self.radius_miles = discord.ui.TextInput(label="Radius (miles)", placeholder="25", required=True, max_length=4)
         self.results_wanted = discord.ui.TextInput(label="Results per check", placeholder="10", required=True, max_length=3)
-        self.exclusion_terms = discord.ui.TextInput(
-            label="Exclusions (comma-separated)",
-            placeholder="contract, remote, part.?time",
+        self.role_filters = discord.ui.TextInput(
+            label="Role filters (comma-separated)",
+            placeholder="internship, entry, junior, mid, senior",
             required=False,
-            max_length=500,
-            style=discord.TextStyle.paragraph,
+            max_length=100,
         )
         self.add_item(self.keywords)
         self.add_item(self.location)
         self.add_item(self.radius_miles)
         self.add_item(self.results_wanted)
-        self.add_item(self.exclusion_terms)
+        self.add_item(self.role_filters)
 
         current = self.store.get_job_settings(channel_id)
         self.keywords.default = str(current["keywords"])
         self.location.default = str(current["location"])
         self.radius_miles.default = str(current.get("radius_miles", 25))
         self.results_wanted.default = str(current["results_wanted"])
-        exclusion_list = current.get("exclusion_terms", [])
-        self.exclusion_terms.default = ", ".join(exclusion_list) if exclusion_list else ""
+        role_filter_list = current.get("role_filters", [])
+        self.role_filters.default = ", ".join(role_filter_list) if role_filter_list else ""
         log_interaction_event(
             "job_text_modal.init",
             channel_id=channel_id,
@@ -459,9 +456,13 @@ class JobTextModal(discord.ui.Modal, title="Edit Job Watcher"):
             await interaction.response.defer(ephemeral=True)
 
             radius_miles = parse_bounded_int(str(self.radius_miles.value), "Radius", 1, 500)
-            results_wanted = parse_bounded_int(str(self.results_wanted.value), "Results per check", 1, 50)
-            raw_exclusions = str(self.exclusion_terms.value).strip()
-            exclusion_list = [term.strip() for term in raw_exclusions.split(",") if term.strip()] if raw_exclusions else []
+            results_wanted = parse_bounded_int(str(self.results_wanted.value), "Results per check", 1, 400)
+            raw_role_filters = str(self.role_filters.value).strip()
+            _valid_roles = {"internship", "entry", "junior", "mid", "senior"}
+            role_filter_list = [t.strip().lower() for t in raw_role_filters.split(",") if t.strip()] if raw_role_filters else []
+            invalid = [r for r in role_filter_list if r not in _valid_roles]
+            if invalid:
+                raise ValueError(f"Invalid role filters: {', '.join(invalid)}. Use: internship, entry, junior, mid, senior")
         except ValueError as exc:
             await interaction.followup.send(str(exc), ephemeral=True)
             return
@@ -478,7 +479,7 @@ class JobTextModal(discord.ui.Modal, title="Edit Job Watcher"):
             self.store.update_job_setting(self.channel_id, "location", str(self.location.value).strip())
             self.store.update_job_setting(self.channel_id, "radius_miles", radius_miles)
             self.store.update_job_setting(self.channel_id, "results_wanted", results_wanted)
-            self.store.update_job_setting(self.channel_id, "exclusion_terms", exclusion_list)
+            self.store.update_job_setting(self.channel_id, "role_filters", role_filter_list)
             log_interaction_event(
                 "job_text_modal.submit.saved",
                 channel_id=self.channel_id,
@@ -496,6 +497,7 @@ class JobTextModal(discord.ui.Modal, title="Edit Job Watcher"):
                     )
                 except (discord.NotFound, discord.HTTPException):
                     pass
+            await interaction.followup.send("​", ephemeral=True)
         except Exception as exc:
             log_interaction_failure("job_text_modal.persist_or_refresh", exc)
             await interaction.followup.send("Interaction failed while saving settings.", ephemeral=True)
@@ -508,28 +510,29 @@ class JobTextModal(discord.ui.Modal, title="Edit Job Watcher"):
             await interaction.followup.send("Interaction failed. Please try again.", ephemeral=True)
 
 
-class JobExclusionTermsModal(discord.ui.Modal, title="Edit Job Exclusions"):
-    exclusion_terms = discord.ui.TextInput(
-        label="Exclusion terms",
-        placeholder="contract, remote, part.?time",
-        required=False,
-        max_length=500,
-        style=discord.TextStyle.paragraph,
-    )
-
+class JobExclusionTermsModal(discord.ui.Modal, title="Edit Filters"):
     def __init__(self, store: RuntimeStore, channel_id: int, panel_message: discord.Message | None = None, parent_view: discord.ui.View | None = None):
         super().__init__()
         self.store = store
         self.channel_id = channel_id
         self.panel_message = panel_message
         self.parent_view = parent_view
+
+        self.exclusion_terms = discord.ui.TextInput(
+            label="Exclusion terms (comma-separated)",
+            placeholder="contract, remote, part.?time",
+            required=False,
+            max_length=500,
+            style=discord.TextStyle.paragraph,
+        )
+        self.add_item(self.exclusion_terms)
+
         current = self.store.get_job_settings(channel_id)
         exclusion_list = current.get("exclusion_terms", [])
         self.exclusion_terms.default = ", ".join(exclusion_list) if exclusion_list else ""
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        # Modal submit interactions need a deferred channel message response.
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
         raw_exclusions = str(self.exclusion_terms.value).strip()
         exclusion_list = [term.strip() for term in raw_exclusions.split(",") if term.strip()] if raw_exclusions else []
 
@@ -543,12 +546,87 @@ class JobExclusionTermsModal(discord.ui.Modal, title="Edit Job Exclusions"):
                     )
                 except (discord.NotFound, discord.HTTPException):
                     pass
+            await interaction.followup.send("​", ephemeral=True)
         except Exception as exc:
             log_interaction_failure("job_exclusion_terms_modal.persist_or_refresh", exc)
-            await interaction.followup.send("Interaction failed while saving exclusions.", ephemeral=True)
+            await interaction.followup.send("Interaction failed while saving filters.", ephemeral=True)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
         log_interaction_failure("job_exclusion_terms_modal.on_error", error)
+        if not interaction.response.is_done():
+            await interaction.response.send_message("Interaction failed. Please try again.", ephemeral=True)
+        else:
+            await interaction.followup.send("Interaction failed. Please try again.", ephemeral=True)
+
+
+class JobThresholdModal(discord.ui.Modal, title="Edit Match Threshold"):
+    def __init__(self, store: RuntimeStore, channel_id: int, panel_message: discord.Message | None = None, parent_view: discord.ui.View | None = None):
+        super().__init__()
+        self.store = store
+        self.channel_id = channel_id
+        self.panel_message = panel_message
+        self.parent_view = parent_view
+
+        self.semantic_threshold = discord.ui.TextInput(
+            label="Match threshold (0.0 – 1.0)",
+            placeholder="0.30  — lower = more results, higher = stricter",
+            required=True,
+            max_length=5,
+        )
+        self.add_item(self.semantic_threshold)
+
+        self.ats_semantic_threshold = discord.ui.TextInput(
+            label="ATS match threshold (0.0 – 1.0)",
+            placeholder="0.30  — separate threshold for ATS sources",
+            required=False,
+            max_length=5,
+        )
+        self.add_item(self.ats_semantic_threshold)
+
+        current = self.store.get_job_settings(channel_id)
+        self.semantic_threshold.default = str(current.get("semantic_threshold", 0.30))
+        self.ats_semantic_threshold.default = str(current.get("ats_semantic_threshold", current.get("semantic_threshold", 0.30)))
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        raw = str(self.semantic_threshold.value).strip()
+        try:
+            value = float(raw)
+            if not (0.0 <= value <= 1.0):
+                raise ValueError()
+        except ValueError:
+            await interaction.followup.send("Threshold must be a number between 0.0 and 1.0.", ephemeral=True)
+            return
+
+        ats_value = value
+        ats_raw = str(self.ats_semantic_threshold.value).strip()
+        if ats_raw:
+            try:
+                ats_value = float(ats_raw)
+                if not (0.0 <= ats_value <= 1.0):
+                    raise ValueError()
+            except ValueError:
+                await interaction.followup.send("ATS threshold must be a number between 0.0 and 1.0.", ephemeral=True)
+                return
+
+        try:
+            self.store.update_job_setting(self.channel_id, "semantic_threshold", value)
+            self.store.update_job_setting(self.channel_id, "ats_semantic_threshold", ats_value)
+            if self.panel_message is not None:
+                try:
+                    await self.panel_message.edit(
+                        content=format_job_settings_summary(self.store, self.channel_id),
+                        view=self.parent_view,
+                    )
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+            await interaction.followup.send("​", ephemeral=True)
+        except Exception as exc:
+            log_interaction_failure("job_threshold_modal.persist_or_refresh", exc)
+            await interaction.followup.send("Interaction failed while saving threshold.", ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        log_interaction_failure("job_threshold_modal.on_error", error)
         if not interaction.response.is_done():
             await interaction.response.send_message("Interaction failed. Please try again.", ephemeral=True)
         else:
@@ -795,7 +873,6 @@ class JobSettingsView(discord.ui.View):
         self.owner_id = owner_id
         self.resume_profile_dir = resume_profile_dir
         self.resume_cache_root = resume_profile_dir.parent
-        self.resume_seed_profile_key = resume_profile_dir.name
         log_interaction_event(
             "job_settings_view.init",
             channel_id=channel_id,
@@ -803,7 +880,6 @@ class JobSettingsView(discord.ui.View):
         )
         self.add_item(JobSourceDropdown(store=store, channel_id=channel_id, owner_id=owner_id))
         self.add_item(JobDateDropdown(store=store, channel_id=channel_id, owner_id=owner_id))
-        self.add_item(JobRoleFilterDropdown(store=store, channel_id=channel_id, owner_id=owner_id))
         self.add_item(JobRefreshDropdown(store=store, channel_id=channel_id, owner_id=owner_id))
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[Any]) -> None:
@@ -813,11 +889,20 @@ class JobSettingsView(discord.ui.View):
         else:
             await interaction.followup.send("Interaction failed. Please run `.job` and try again.", ephemeral=True)
 
+    def _is_allowed(self, interaction: discord.Interaction) -> bool:
+        user_id = interaction.user.id
+        if user_id == self.owner_id:
+            return True
+        guild_owner_id = getattr(getattr(interaction, "guild", None), "owner_id", None)
+        if guild_owner_id is not None and user_id == guild_owner_id:
+            return True
+        main_user_id = getattr(getattr(self.manager, "config", None), "main_user_id", None)
+        if main_user_id is not None and user_id == main_user_id:
+            return True
+        return False
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.owner_id:
-            custom_id = str(getattr(getattr(interaction, "data", {}), "get", lambda *_: "")("custom_id", ""))
-            if custom_id in {self.RESUME_INFO_BUTTON_ID, self.TEMPLATE_BUTTON_ID}:
-                return True
+        if not self._is_allowed(interaction):
             await interaction.response.send_message("Only the menu owner can change settings.", ephemeral=True)
             return False
         return True
@@ -832,23 +917,20 @@ class JobSettingsView(discord.ui.View):
             return value
         return None
 
-    async def _resolve_profile_dir_for_clicker(self, interaction: discord.Interaction) -> Path:
-        user_id = getattr(getattr(interaction, "user", None), "id", None)
-        if user_id is None:
-            return self.resume_profile_dir
+    def _resolve_profile_dir_for_clicker(self, interaction: discord.Interaction) -> Path:
+        return self.resume_profile_dir
 
-        profile_key = resolve_discord_profile_key(
-            user_id,
-            self._interaction_profile_name(interaction),
-            self.resume_cache_root,
-        )
+    @discord.ui.button(label="Edit exclusions", style=discord.ButtonStyle.secondary, row=3)
+    async def edit_filters(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        modal = JobExclusionTermsModal(store=self.store, channel_id=self.channel_id, panel_message=interaction.message, parent_view=self)
+        _sanitize_modal_text_input_labels(modal)
+        await interaction.response.send_modal(modal)
 
-        return await asyncio.to_thread(
-            ensure_profile_cache,
-            profile_key,
-            self.resume_cache_root,
-            self.resume_seed_profile_key,
-        )
+    @discord.ui.button(label="Advanced", style=discord.ButtonStyle.secondary, row=3)
+    async def edit_threshold(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        modal = JobThresholdModal(store=self.store, channel_id=self.channel_id, panel_message=interaction.message, parent_view=self)
+        _sanitize_modal_text_input_labels(modal)
+        await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="Edit text/results", style=discord.ButtonStyle.primary, row=4)
     async def edit_text(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -875,7 +957,7 @@ class JobSettingsView(discord.ui.View):
         custom_id=RESUME_INFO_BUTTON_ID,
     )
     async def edit_resume_info(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        profile_dir = await self._resolve_profile_dir_for_clicker(interaction)
+        profile_dir = self._resolve_profile_dir_for_clicker(interaction)
         modal = ResumeInfoModal(
             profile_dir=profile_dir,
             panel_message=interaction.message,
@@ -905,7 +987,7 @@ class JobSettingsView(discord.ui.View):
         custom_id=TEMPLATE_BUTTON_ID,
     )
     async def edit_template(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        profile_dir = await self._resolve_profile_dir_for_clicker(interaction)
+        profile_dir = self._resolve_profile_dir_for_clicker(interaction)
         modal = TemplateEditModal(
             profile_dir=profile_dir,
             panel_message=interaction.message,
@@ -1006,7 +1088,7 @@ class RedditRefreshDropdown(discord.ui.Select):
 
 
 class RedditTextModal(discord.ui.Modal, title="Edit Reddit Watcher"):
-    subreddit = discord.ui.TextInput(label="Subreddit", placeholder="wallpapers", required=True, max_length=80)
+    subreddit = discord.ui.TextInput(label="Subreddits (comma-separated)", placeholder="wallpapers, earthporn", required=True, max_length=200)
     flair_tags = discord.ui.TextInput(label="Flair tags (comma-separated)", placeholder="Desktop, Anime", required=False, max_length=120)
     media_mode = discord.ui.TextInput(label="Media mode", placeholder="image | video | link | all", required=True, max_length=20)
     content_filter = discord.ui.TextInput(label="Content filter", placeholder="safe | spoiler | nsfw | both", required=True, max_length=12)
@@ -1017,7 +1099,7 @@ class RedditTextModal(discord.ui.Modal, title="Edit Reddit Watcher"):
         self.store = store
         self.channel_id = channel_id
         current = self.store.get_reddit_settings(channel_id)
-        self.subreddit.default = str(current["subreddit"])
+        self.subreddit.default = ", ".join(str(s) for s in current["subreddits"])
         self.flair_tags.default = str(current["flair_tags"])
         self.media_mode.default = str(current["media_mode"])
         self.content_filter.default = format_reddit_content_mode(bool(current["include_nsfw"]), bool(current["include_spoiler"]))
@@ -1032,7 +1114,10 @@ class RedditTextModal(discord.ui.Modal, title="Edit Reddit Watcher"):
             await interaction.response.send_message(str(exc), ephemeral=True)
             return
 
-        self.store.update_reddit_setting(self.channel_id, "subreddit", str(self.subreddit.value).strip().lstrip("r/"))
+        parsed_subs = [(s[2:] if s.lower().startswith("r/") else s).lower() for s in (p.strip() for p in str(self.subreddit.value).split(",")) if s]
+        if not parsed_subs:
+            parsed_subs = ["wallpapers"]
+        self.store.update_reddit_setting(self.channel_id, "subreddits", parsed_subs)
         self.store.update_reddit_setting(self.channel_id, "flair_tags", str(self.flair_tags.value).strip())
         self.store.update_reddit_setting(self.channel_id, "media_mode", media_mode)
         self.store.update_reddit_setting(self.channel_id, "include_nsfw", include_nsfw)

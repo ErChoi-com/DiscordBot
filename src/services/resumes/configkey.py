@@ -4,10 +4,10 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-pro"
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 DEFAULT_RESUME_CACHE_TTL_SECONDS = 86400
-DEFAULT_OPENROUTER_RESUME_MODEL = "openai/gpt-4o-mini"
-DEFAULT_GROQ_RESUME_MODEL = "llama-3.1-8b-instant"
+DEFAULT_OPENROUTER_RESUME_MODEL = "openai/gpt-oss-120b"
+DEFAULT_GROQ_RESUME_MODEL = "openai/gpt-oss-120b"
 
 
 def _read_dotenv_value(*keys: str) -> str | None:

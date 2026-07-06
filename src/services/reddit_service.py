@@ -8,7 +8,35 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from services.rss_service import extract_link_from_html, fetch_and_parse_atom
+
+
+def parse_proxy_pool(raw: str | None) -> list[str]:
+    """Split a newline/comma-separated proxy string into a clean list."""
+    if not raw:
+        return []
+    return [p.strip() for p in raw.replace(",", "\n").splitlines() if p.strip()]
+
+
+def pick_proxy(proxy_pool: list[str], cursor: int) -> str | None:
+    if not proxy_pool:
+        return None
+    return proxy_pool[cursor % len(proxy_pool)]
+
+try:
+    from curl_cffi import requests as cffi_requests
+    _CURL_CFFI_AVAILABLE = True
+except ImportError:
+    import requests as cffi_requests  # type: ignore[no-redef]
+    _CURL_CFFI_AVAILABLE = False
+
 import requests
+
+try:
+    import praw
+    _PRAW_AVAILABLE = True
+except ImportError:
+    _PRAW_AVAILABLE = False
 
 
 REDDIT_FINGERPRINTS: tuple[str, ...] = (
@@ -17,7 +45,16 @@ REDDIT_FINGERPRINTS: tuple[str, ...] = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
 )
-SEEN_URL_LIMIT = 1000
+
+# curl_cffi browser impersonation targets (rotated alongside UA)
+_CFFI_IMPERSONATIONS: tuple[str, ...] = (
+    "chrome120",
+    "chrome131",
+    "firefox133",
+    "safari18_0",
+)
+
+SEEN_URL_LIMIT = 2000
 
 
 class RedditRateLimitError(Exception):
@@ -43,22 +80,10 @@ def pick_reddit_user_agent(fingerprint_seed: int = 0) -> str:
     return REDDIT_FINGERPRINTS[fingerprint_seed % len(REDDIT_FINGERPRINTS)]
 
 
-def parse_proxy_pool(raw: str | None) -> list[str]:
-    if not raw:
-        return []
-    normalized = raw.replace("\n", ",").replace(";", ",")
-    proxies: list[str] = []
-    for part in normalized.split(","):
-        candidate = part.strip()
-        if candidate and candidate not in proxies:
-            proxies.append(candidate)
-    return proxies
+def _pick_cffi_impersonation(seed: int) -> str:
+    return _CFFI_IMPERSONATIONS[seed % len(_CFFI_IMPERSONATIONS)]
 
 
-def pick_proxy(proxy_pool: list[str], cursor: int) -> str | None:
-    if not proxy_pool:
-        return None
-    return proxy_pool[cursor % len(proxy_pool)]
 
 
 def time_filter_cutoff_unix(time_filter: str) -> int | None:
@@ -148,6 +173,431 @@ def extract_gallery_image_urls(post: dict[str, Any]) -> list[str]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# PRAW (OAuth) helpers
+# ---------------------------------------------------------------------------
+
+def _build_praw_reddit() -> "praw.Reddit | None":
+    """Return a read-only PRAW Reddit instance if credentials are configured."""
+    if not _PRAW_AVAILABLE:
+        return None
+    client_id = os.getenv("REDDIT_CLIENT_ID", "").strip()
+    client_secret = os.getenv("REDDIT_CLIENT_SECRET", "").strip()
+    if not client_id or not client_secret:
+        return None
+    username = os.getenv("REDDIT_USERNAME", "").strip()
+    password = os.getenv("REDDIT_PASSWORD", "").strip()
+    user_agent = os.getenv("REDDIT_USER_AGENT", "RebuiltDiscordBot/2.0 (by u/anonymous)")
+    try:
+        if username and password:
+            return praw.Reddit(
+                client_id=client_id,
+                client_secret=client_secret,
+                username=username,
+                password=password,
+                user_agent=user_agent,
+            )
+        return praw.Reddit(
+            client_id=client_id,
+            client_secret=client_secret,
+            user_agent=user_agent,
+        )
+    except Exception:
+        return None
+
+
+def _post_to_dict(submission: Any, sub: str) -> dict[str, Any]:
+    """Convert a PRAW Submission object to the standard post dict."""
+    post_id = str(submission.id)
+    title = str(submission.title or "(untitled)")
+    permalink = f"https://www.reddit.com{submission.permalink}"
+    flair = str(submission.link_flair_text or "")
+    nsfw = bool(submission.over_18)
+    spoiler = bool(submission.spoiler)
+
+    image_url = ""
+    video_url = ""
+    gallery_urls: list[str] = []
+
+    url = str(submission.url or "")
+    hint = getattr(submission, "post_hint", "") or ""
+
+    if hint == "image" or url.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp")) or "i.redd.it/" in url:
+        image_url = url
+    elif hasattr(submission, "is_gallery") and submission.is_gallery:
+        try:
+            gallery_data = submission.gallery_data or {}
+            media_metadata = submission.media_metadata or {}
+            items = (gallery_data.get("items") or []) if isinstance(gallery_data, dict) else []
+            for item in items:
+                media_id = str(item.get("media_id") or "")
+                meta = media_metadata.get(media_id, {})
+                s = meta.get("s", {})
+                raw = str(s.get("u") or s.get("gif") or s.get("mp4") or "").replace("&amp;", "&")
+                if raw.startswith("http") and raw not in gallery_urls:
+                    gallery_urls.append(raw)
+        except Exception:
+            pass
+        if gallery_urls:
+            image_url = gallery_urls[0]
+    elif hasattr(submission, "media") and submission.media:
+        rv = (submission.media.get("reddit_video") or {})
+        video_url = str(rv.get("fallback_url") or "").replace("&amp;", "&")
+
+    if not image_url and not video_url:
+        try:
+            preview = submission.preview or {}
+            imgs = preview.get("images", [])
+            if imgs:
+                src = imgs[0].get("source", {})
+                image_url = str(src.get("url") or "").replace("&amp;", "&")
+        except Exception:
+            pass
+
+    return {
+        "id": post_id,
+        "title": title,
+        "image_url": image_url,
+        "video_url": video_url,
+        "gallery_urls": gallery_urls,
+        "permalink": permalink,
+        "flair": flair,
+        "nsfw": nsfw,
+        "spoiler": spoiler,
+        "subreddit": sub,
+        "source_url": f"https://www.reddit.com/r/{sub}/",
+    }
+
+
+def _scrape_via_praw(
+    sub: str,
+    listing: str,
+    tf: str,
+    max_items: int,
+    cutoff_unix: int | None,
+    seen_lookup: set[str] | None,
+    include_nsfw: bool,
+    include_spoiler: bool,
+    wanted_flairs: set[str],
+    mode: str,
+    seen_url_set: set[str] | None = None,
+) -> list[dict[str, Any]] | None:
+    """Scrape using PRAW OAuth. Returns None if PRAW is unavailable/unconfigured."""
+    reddit = _build_praw_reddit()
+    if reddit is None:
+        return None
+
+    try:
+        subreddit = reddit.subreddit(sub)
+        sort_fn = {
+            "new": subreddit.new,
+            "top": subreddit.top,
+            "hot": subreddit.hot,
+            "rising": subreddit.rising,
+        }.get(listing, subreddit.new)
+
+        kwargs: dict[str, Any] = {"limit": max_items * 3}
+        if listing == "top":
+            kwargs["time_filter"] = tf
+
+        out: list[dict[str, Any]] = []
+        for submission in sort_fn(**kwargs):
+            if len(out) >= max_items:
+                break
+            if submission.stickied:
+                continue
+            if submission.over_18 and not include_nsfw:
+                continue
+            if submission.spoiler and not include_spoiler:
+                continue
+
+            post_id = str(submission.id)
+            if seen_lookup is not None and post_id in seen_lookup:
+                continue
+
+            if cutoff_unix is not None:
+                try:
+                    if int(submission.created_utc) < cutoff_unix:
+                        continue
+                except Exception:
+                    continue
+
+            flair = str(submission.link_flair_text or "")
+            if wanted_flairs and flair.lower() not in wanted_flairs:
+                continue
+
+            base = _post_to_dict(submission, sub)
+            image_url = base["image_url"]
+            video_url = base["video_url"]
+            gallery_urls = base["gallery_urls"]
+            permalink = base["permalink"]
+            hint = getattr(submission, "post_hint", "") or ""
+
+            link = ""
+            media_type = "image"
+            if mode == "video":
+                media_type = "video"
+                link = video_url
+            elif mode == "link":
+                media_type = "link"
+                link = permalink
+            elif mode == "all":
+                if video_url:
+                    media_type = "video"
+                    link = video_url
+                elif image_url:
+                    media_type = "image"
+                    link = image_url
+                elif hint != "image":
+                    media_type = "link"
+                    link = permalink
+            else:
+                media_type = "image"
+                link = image_url
+
+            if not link:
+                continue
+
+            candidate = {
+                "id": post_id,
+                "title": base["title"],
+                "link": link,
+                "permalink": permalink,
+                "source_url": base["source_url"],
+                "subreddit": sub,
+                "flair": flair,
+                "nsfw": base["nsfw"],
+                "spoiler": base["spoiler"],
+                "type": media_type,
+                "gallery_links": gallery_urls,
+            }
+            if seen_url_set is not None:
+                if any(u in seen_url_set for u in _item_dedup_urls(candidate)):
+                    continue
+            out.append(candidate)
+
+        return out
+    except Exception as exc:
+        print(f"[reddit] PRAW scrape failed for r/{sub}: {exc}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# curl_cffi (TLS impersonation) HTTP layer
+# ---------------------------------------------------------------------------
+
+def _make_cffi_session(proxy_url: str | None, impersonation: str) -> Any:
+    """Return a curl_cffi Session with browser TLS fingerprint."""
+    if not _CURL_CFFI_AVAILABLE:
+        # Fall back to plain requests session
+        sess = requests.Session()
+        if proxy_url:
+            sess.proxies.update({"http": proxy_url, "https": proxy_url})
+        return sess
+
+    sess = cffi_requests.Session(impersonate=impersonation)
+    if proxy_url:
+        sess.proxies = {"http": proxy_url, "https": proxy_url}
+    return sess
+
+
+def _cffi_get(session: Any, url: str, params: dict, headers: dict, timeout: int) -> Any:
+    """Unified GET that works for both curl_cffi and plain requests sessions."""
+    if _CURL_CFFI_AVAILABLE and isinstance(session, cffi_requests.Session):
+        return session.get(url, params=params, headers=headers, timeout=timeout)
+    return session.get(url, params=params, headers=headers, timeout=timeout)
+
+
+# ---------------------------------------------------------------------------
+# RSS scraper (Layer 2 — no auth, no proxy, works when JSON is blocked)
+# Fetching and Atom parsing are delegated to rss_service; only Reddit-specific
+# URL construction, ID extraction, and post filtering live here.
+# ---------------------------------------------------------------------------
+
+# Links to skip when extracting post URLs from Reddit RSS content HTML.
+_RSS_REDDIT_SKIP = ("/comments/", "/user/", "/u/", "reddit.com/r/")
+_RSS_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
+)
+
+
+def _rss_post_id(atom_id: str) -> str:
+    return atom_id.split("_", 1)[-1] if "_" in atom_id else atom_id
+
+
+def _scrape_via_rss(
+    sub: str,
+    listing: str,
+    tf: str,
+    max_items: int,
+    cutoff_unix: int | None,
+    seen_lookup: set[str] | None,
+    include_nsfw: bool,
+    include_spoiler: bool,
+    wanted_flairs: set[str],
+    mode: str,
+    seen_url_set: set[str] | None = None,
+) -> list[dict[str, Any]] | None:
+    """
+    Fetch posts via Reddit's Atom RSS feed.  Returns None on any error so the
+    caller can fall through to the next layer.
+
+    Limitations vs JSON API:
+    - Max 25 posts per request (no pagination)
+    - No flair, NSFW, or spoiler metadata (all posts treated as SFW)
+    - Time filter applied client-side by published timestamp
+    """
+    sort_rss = {"new": "new", "hot": "hot", "top": "top", "rising": "rising"}.get(listing, "new")
+    url = f"https://www.reddit.com/r/{sub}/{sort_rss}.rss"
+    entries = fetch_and_parse_atom(url, user_agent=_RSS_UA)
+    if entries is None:
+        return None
+
+    out: list[dict[str, Any]] = []
+    for entry in entries:
+        if len(out) >= max_items:
+            break
+
+        post_id = _rss_post_id(entry["id"])
+        if seen_lookup is not None and post_id and post_id in seen_lookup:
+            continue
+
+        if cutoff_unix is not None and entry["published"]:
+            try:
+                ts = int(time.mktime(time.strptime(entry["published"][:19], "%Y-%m-%dT%H:%M:%S")))
+                if ts < cutoff_unix:
+                    continue
+            except Exception:
+                pass
+
+        # RSS carries no NSFW/spoiler/flair metadata — those filters are skipped here.
+        # Downstream Discord channel rules handle NSFW gating.
+
+        title = entry["title"]
+        permalink = entry["permalink"]
+        post_link = extract_link_from_html(entry["content_html"], skip=_RSS_REDDIT_SKIP) or permalink
+
+        # Determine media type and link based on mode
+        is_video  = "v.redd.it" in post_link
+        is_image  = any(post_link.lower().endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp"))
+        is_gallery = "/gallery/" in post_link
+
+        if mode == "video":
+            if not is_video:
+                continue
+            media_type, link = "video", post_link
+        elif mode == "link":
+            media_type, link = "link", permalink
+        elif mode == "all":
+            if is_video:
+                media_type, link = "video", post_link
+            elif is_image or is_gallery:
+                media_type, link = "image", post_link
+            else:
+                media_type, link = "link", post_link
+        else:  # image mode
+            if not (is_image or is_gallery):
+                continue
+            media_type, link = "image", post_link
+
+        if not link:
+            continue
+
+        candidate = {
+            "id":          post_id,
+            "title":       title,
+            "link":        link,
+            "permalink":   permalink,
+            "source_url":  f"https://www.reddit.com/r/{sub}/",
+            "subreddit":   sub,
+            "flair":       "",
+            "nsfw":        False,
+            "spoiler":     False,
+            "type":        media_type,
+            "gallery_links": [],
+        }
+        if seen_url_set is not None:
+            if any(u in seen_url_set for u in _item_dedup_urls(candidate)):
+                continue
+        out.append(candidate)
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Gallery supplementation — RSS can't extract gallery image URLs, so after
+# an RSS scrape we try to backfill from a JSON-capable layer (Playwright or
+# curl_cffi).
+# ---------------------------------------------------------------------------
+
+def _supplement_rss_galleries(
+    rss_items: list[dict[str, Any]],
+    sub: str,
+    listing: str,
+    tf: str,
+    max_items: int,
+    cutoff_unix: int | None,
+    mode: str,
+    user_agent: str,
+    fingerprint_seed: int,
+    proxy_url: str | None,
+) -> list[dict[str, Any]]:
+    """Backfill gallery image URLs for RSS posts that link to /gallery/ but have no gallery_links."""
+    needs = {
+        str(item.get("id") or ""): item
+        for item in rss_items
+        if "/gallery/" in str(item.get("link") or "") and not item.get("gallery_links")
+    }
+    needs.pop("", None)
+    if not needs:
+        return rss_items
+
+    print(f"[reddit][diag] r/{sub}: {len(needs)} RSS gallery posts need image URL supplementation")
+
+    # Playwright gallery-only fetch — may succeed if Chrome came back since the earlier attempt
+    json_items = _scrape_via_playwright(
+        sub=sub, listing=listing, tf=tf, max_items=max_items * 3,
+        cutoff_unix=cutoff_unix, seen_lookup=None,
+        include_nsfw=True, include_spoiler=True,
+        wanted_flairs=set(), mode=mode,
+        gallery_only=True, seen_url_set=None,
+    )
+
+    if json_items is None:
+        try:
+            all_items = _scrape_once(
+                proxy_url=proxy_url, sub=sub, listing=listing, tf=tf,
+                max_items=max_items * 3, cutoff_unix=cutoff_unix,
+                seen_lookup=None, include_nsfw=True, include_spoiler=True,
+                wanted_flairs=set(), mode=mode,
+                user_agent=user_agent, fingerprint_seed=fingerprint_seed,
+                seen_url_set=None,
+            )
+            json_items = [p for p in all_items if p.get("gallery_links")]
+        except RedditRateLimitError:
+            raise
+        except Exception as exc:
+            print(f"[reddit][diag] r/{sub}: gallery supplement via curl_cffi failed: {exc}")
+            json_items = []
+
+    supplemented = 0
+    for json_item in (json_items or []):
+        pid = str(json_item.get("id") or "")
+        rss_item = needs.get(pid)
+        if rss_item and json_item.get("gallery_links"):
+            rss_item["gallery_links"] = json_item["gallery_links"]
+            rss_item["link"] = json_item.get("link") or rss_item["link"]
+            supplemented += 1
+
+    print(f"[reddit][diag] r/{sub}: supplemented {supplemented}/{len(needs)} gallery posts")
+    return rss_items
+
+
+# ---------------------------------------------------------------------------
+# Main scrape function
+# ---------------------------------------------------------------------------
+
 def scrape_subreddit_media(
     subreddit: str,
     sort: str = "new",
@@ -161,31 +611,376 @@ def scrape_subreddit_media(
     user_agent: str = "Mozilla/5.0 (compatible; RebuiltDiscordBot/1.0)",
     fingerprint_seed: int = 0,
     proxy_url: str | None = None,
+    seen_url_set: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     sort_map = {"new": "new", "top": "top", "trending": "rising", "rising": "rising", "hot": "hot"}
     allowed_time = {"hour", "day", "week", "month", "year", "all"}
     listing = sort_map.get(sort.lower(), "new")
     tf = time_filter.lower() if time_filter.lower() in allowed_time else "day"
-    sub = subreddit.strip().lstrip("r/")
+    sub = subreddit.strip()
+    if sub.lower().startswith("r/"):
+        sub = sub[2:]
     cutoff_unix = None if listing == "top" else time_filter_cutoff_unix(tf)
 
     wanted_flairs = {part.strip().lower() for part in (flair_tags or []) if part.strip()}
     mode = media_mode.lower()
     max_items = max(1, min(100, limit))
+
+    # --- Layer 1: PRAW OAuth (most reliable when credentials are set) ---
+    praw_result = _scrape_via_praw(
+        sub=sub,
+        listing=listing,
+        tf=tf,
+        max_items=max_items,
+        cutoff_unix=cutoff_unix,
+        seen_lookup=seen_lookup,
+        include_nsfw=include_nsfw,
+        include_spoiler=include_spoiler,
+        wanted_flairs=wanted_flairs,
+        mode=mode,
+        seen_url_set=seen_url_set,
+    )
+    if praw_result is not None:
+        print(f"[reddit][diag] r/{sub}: PRAW returned {len(praw_result)} items")
+        return praw_result
+    print(f"[reddit][diag] r/{sub}: PRAW unavailable, trying Playwright")
+
+    # --- Layer 2: Playwright JSON via Chrome (best data — galleries, NSFW, flairs) ---
+    playwright_result = _scrape_via_playwright(
+        sub=sub,
+        listing=listing,
+        tf=tf,
+        max_items=max_items,
+        cutoff_unix=cutoff_unix,
+        seen_lookup=seen_lookup,
+        include_nsfw=include_nsfw,
+        include_spoiler=include_spoiler,
+        wanted_flairs=wanted_flairs,
+        mode=mode,
+        seen_url_set=seen_url_set,
+    )
+    if playwright_result is not None:
+        print(f"[reddit][diag] r/{sub}: Playwright returned {len(playwright_result)} items")
+        return playwright_result
+    print(f"[reddit][diag] r/{sub}: Playwright unavailable, trying RSS")
+
+    # --- Layer 3: RSS feed (no auth, no proxy, works when JSON is blocked) ---
+    rss_result = _scrape_via_rss(
+        sub=sub,
+        listing=listing,
+        tf=tf,
+        max_items=max_items,
+        cutoff_unix=cutoff_unix,
+        seen_lookup=seen_lookup,
+        include_nsfw=include_nsfw,
+        include_spoiler=include_spoiler,
+        wanted_flairs=wanted_flairs,
+        mode=mode,
+        seen_url_set=seen_url_set,
+    )
+    if rss_result is not None and len(rss_result) > 0:
+        print(f"[reddit][diag] r/{sub}: RSS returned {len(rss_result)} items")
+        rss_result = _supplement_rss_galleries(
+            rss_result, sub=sub, listing=listing, tf=tf,
+            max_items=max_items, cutoff_unix=cutoff_unix, mode=mode,
+            user_agent=user_agent, fingerprint_seed=fingerprint_seed,
+            proxy_url=proxy_url,
+        )
+        return rss_result
+
+    print(f"[reddit][diag] r/{sub}: RSS failed, trying curl_cffi")
+
+    # --- Layer 4: curl_cffi TLS impersonation (with proxy if provided) ---
+    return _scrape_once(
+        sub=sub,
+        listing=listing,
+        tf=tf,
+        max_items=max_items,
+        cutoff_unix=cutoff_unix,
+        seen_lookup=seen_lookup,
+        include_nsfw=include_nsfw,
+        include_spoiler=include_spoiler,
+        wanted_flairs=wanted_flairs,
+        mode=mode,
+        user_agent=user_agent,
+        fingerprint_seed=fingerprint_seed,
+        proxy_url=proxy_url,
+        seen_url_set=seen_url_set,
+    )
+
+
+_PROXY_PROBE_TIMEOUT = 8    # seconds per proxy attempt during rotation
+_PROXY_BATCH_SIZE    = 10   # concurrent probes per round
+
+
+def _scrape_with_proxy_rotation(
+    proxy_candidates: list[str | None],
+    sub: str,
+    listing: str,
+    tf: str,
+    max_items: int,
+    cutoff_unix: int | None,
+    seen_lookup: set[str] | None,
+    include_nsfw: bool,
+    include_spoiler: bool,
+    wanted_flairs: set[str],
+    mode: str,
+    user_agent: str,
+    fingerprint_seed: int,
+    seen_url_set: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Try proxies in parallel batches of _PROXY_BATCH_SIZE.
+    First success wins; rotate to next batch on all-403/timeout.
+    """
+    import concurrent.futures
+
+    kwargs = dict(
+        sub=sub, listing=listing, tf=tf, max_items=max_items,
+        cutoff_unix=cutoff_unix, seen_lookup=seen_lookup,
+        include_nsfw=include_nsfw, include_spoiler=include_spoiler,
+        wanted_flairs=wanted_flairs, mode=mode, user_agent=user_agent,
+        seen_url_set=seen_url_set,
+    )
+    total = len(proxy_candidates)
+    last_exc: Exception | None = None
+
+    for batch_start in range(0, total, _PROXY_BATCH_SIZE):
+        batch = proxy_candidates[batch_start:batch_start + _PROXY_BATCH_SIZE]
+        batch_end = batch_start + len(batch)
+        print(f"[reddit] Probing proxies {batch_start + 1}-{batch_end}/{total}...")
+
+        winner: list[dict[str, Any]] | None = None
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(batch)) as pool:
+            future_to_proxy = {
+                pool.submit(
+                    _scrape_once,
+                    proxy_url=proxy,
+                    fingerprint_seed=fingerprint_seed + batch_start + i,
+                    timeout_override=_PROXY_PROBE_TIMEOUT,
+                    **kwargs,
+                ): proxy
+                for i, proxy in enumerate(batch)
+            }
+            for fut in concurrent.futures.as_completed(future_to_proxy):
+                proxy = future_to_proxy[fut]
+                label = proxy.split("@")[-1] if proxy else "no-proxy"
+                try:
+                    result = fut.result()
+                    print(f"[reddit] Success via {label}")
+                    winner = result
+                    # Cancel remaining futures in this batch
+                    for f in future_to_proxy:
+                        f.cancel()
+                    break
+                except RedditRateLimitError:
+                    for f in future_to_proxy:
+                        f.cancel()
+                    raise
+                except Exception as exc:
+                    last_exc = exc
+
+        if winner is not None:
+            return winner
+
+    raise last_exc or Exception("All proxies exhausted (all 403 or timed out)")
+
+
+def _parse_reddit_json_page(
+    children: list[dict[str, Any]],
+    sub: str,
+    max_items: int,
+    cutoff_unix: int | None,
+    seen_lookup: set[str] | None,
+    include_nsfw: bool,
+    include_spoiler: bool,
+    wanted_flairs: set[str],
+    mode: str,
+    seen_url_set: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Parse one page of Reddit JSON children into post dicts. Shared by all JSON-based layers."""
     out: list[dict[str, Any]] = []
-    session = requests.Session()
-    if proxy_url:
-        session.proxies.update({"http": proxy_url, "https": proxy_url})
+    for child in children:
+        if len(out) >= max_items:
+            break
+        post = child.get("data", {})
+        candidate_posts = _candidate_posts(post)
+        primary = candidate_posts[0]
+        post_id = str(post.get("id") or "")
+        if seen_lookup is not None and post_id and post_id in seen_lookup:
+            continue
+        if cutoff_unix is not None:
+            created_utc = post.get("created_utc")
+            try:
+                if int(float(created_utc)) < cutoff_unix:
+                    continue
+            except (TypeError, ValueError):
+                continue
+        if post.get("stickied"):
+            continue
+        if post.get("over_18") and not include_nsfw:
+            continue
+        if post.get("spoiler") and not include_spoiler:
+            continue
+        flair = str(post.get("link_flair_text") or "")
+        if wanted_flairs and flair.lower() not in wanted_flairs:
+            continue
+        media = primary.get("media") if isinstance(primary.get("media"), dict) else {}
+        secure_media = primary.get("secure_media") if isinstance(primary.get("secure_media"), dict) else {}
+        preview = primary.get("preview") if isinstance(primary.get("preview"), dict) else {}
+        image_url = ""
+        gallery_urls = extract_gallery_image_urls(post)
+        video_url = str(
+            media.get("reddit_video", {}).get("fallback_url")
+            or secure_media.get("reddit_video", {}).get("fallback_url")
+            or preview.get("reddit_video_preview", {}).get("fallback_url")
+            or ""
+        ).replace("&amp;", "&")
+        raw_url = str(primary.get("url_overridden_by_dest") or primary.get("url") or "")
+        if (
+            primary.get("post_hint") == "image"
+            or "i.redd.it/" in raw_url
+            or raw_url.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp"))
+        ):
+            image_url = raw_url
+        elif preview.get("images"):
+            image_url = str(preview["images"][0].get("source", {}).get("url") or "").replace("&amp;", "&")
+        elif gallery_urls:
+            image_url = gallery_urls[0]
+        permalink = f"https://www.reddit.com{post.get('permalink', '')}"
+        media_type = "image"
+        link = image_url
+        if mode == "video":
+            media_type = "video"
+            link = video_url
+        elif mode == "link":
+            media_type = "link"
+            link = permalink
+        elif mode == "all":
+            if video_url:
+                media_type = "video"
+                link = video_url
+            elif image_url:
+                media_type = "image"
+                link = image_url
+            elif primary.get("post_hint") != "image":
+                # Only fall back to permalink for actual link posts, not failed image extractions.
+                media_type = "link"
+                link = permalink
+        if not link:
+            continue
+        candidate = {
+            "id": post_id,
+            "title": str(post.get("title") or "(untitled)"),
+            "link": link,
+            "permalink": permalink,
+            "source_url": f"https://www.reddit.com/r/{sub}/",
+            "subreddit": sub,
+            "flair": flair,
+            "nsfw": bool(post.get("over_18")),
+            "spoiler": bool(post.get("spoiler")),
+            "type": media_type,
+            "gallery_links": gallery_urls,
+        }
+        if seen_url_set is not None:
+            if any(u in seen_url_set for u in _item_dedup_urls(candidate)):
+                continue
+        out.append(candidate)
+    return out
+
+
+def _scrape_via_playwright(
+    sub: str,
+    listing: str,
+    tf: str,
+    max_items: int,
+    cutoff_unix: int | None,
+    seen_lookup: set[str] | None,
+    include_nsfw: bool,
+    include_spoiler: bool,
+    wanted_flairs: set[str],
+    mode: str,
+    gallery_only: bool = False,
+    seen_url_set: set[str] | None = None,
+) -> list[dict[str, Any]] | None:
+    """
+    Fetch via Chrome puppeteered by Playwright using the user's persistent profile.
+    Returns None if the browser isn't ready or the request fails, so the caller
+    can fall through to the next layer.
+
+    When gallery_only=True, only gallery posts are processed — used to supplement
+    the RSS layer which handles single images but cannot extract gallery image URLs.
+    """
+    try:
+        from services import browser_service
+    except ImportError:
+        return None
+    if not browser_service.ensure_ready():
+        return None
+
+    url = (
+        f"https://www.reddit.com/r/{sub}/{listing}.json"
+        f"?limit={max_items * 3}&t={tf}&raw_json=1&include_over_18=1&over18=yes"
+    )
+    data = browser_service.fetch_json(url)
+    if not isinstance(data, dict):
+        return None
+
+    children = (data.get("data") or {}).get("children") or []
+    if not children:
+        return []
+
+    if gallery_only:
+        children = [c for c in children if (c.get("data") or {}).get("is_gallery")]
+        if not children:
+            return []
+
+    return _parse_reddit_json_page(
+        children=children,
+        sub=sub,
+        max_items=max_items,
+        cutoff_unix=cutoff_unix,
+        seen_lookup=seen_lookup,
+        include_nsfw=include_nsfw,
+        include_spoiler=include_spoiler,
+        wanted_flairs=wanted_flairs,
+        mode=mode,
+        seen_url_set=seen_url_set,
+    )
+
+
+def _scrape_once(
+    proxy_url: str | None,
+    sub: str,
+    listing: str,
+    tf: str,
+    max_items: int,
+    cutoff_unix: int | None,
+    seen_lookup: set[str] | None,
+    include_nsfw: bool,
+    include_spoiler: bool,
+    wanted_flairs: set[str],
+    mode: str,
+    user_agent: str,
+    fingerprint_seed: int,
+    timeout_override: int | None = None,
+    seen_url_set: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    timeout = timeout_override if timeout_override is not None else 25
+    impersonation = _pick_cffi_impersonation(fingerprint_seed)
+    out: list[dict[str, Any]] = []
+    session = _make_cffi_session(proxy_url, impersonation)
 
     after: str | None = None
     request_count = 0
     while len(out) < max_items:
         active_user_agent = user_agent or pick_reddit_user_agent(fingerprint_seed + request_count)
-        response = session.get(
+        response = _cffi_get(
+            session,
             f"https://www.reddit.com/r/{sub}/{listing}.json",
-            params={"limit": max_items, "t": tf, "after": after},
+            params={"limit": max_items, "t": tf, "after": after, "raw_json": "1"},
             headers=reddit_headers_for_fingerprint(active_user_agent),
-            timeout=25,
+            timeout=timeout,
         )
         request_count += 1
         if response.status_code == 429:
@@ -201,92 +996,19 @@ def scrape_subreddit_media(
         if not children:
             break
 
-        for child in children:
-            post = child.get("data", {})
-            candidate_posts = _candidate_posts(post)
-            primary = candidate_posts[0]
-            post_id = str(post.get("id") or "")
-            if seen_lookup is not None and post_id and post_id in seen_lookup:
-                continue
-
-            if cutoff_unix is not None:
-                created_utc = post.get("created_utc")
-                try:
-                    if int(float(created_utc)) < cutoff_unix:
-                        continue
-                except (TypeError, ValueError):
-                    continue
-
-            if post.get("stickied"):
-                continue
-            if post.get("over_18") and not include_nsfw:
-                continue
-            if post.get("spoiler") and not include_spoiler:
-                continue
-
-            flair = str(post.get("link_flair_text") or "")
-            if wanted_flairs and flair.lower() not in wanted_flairs:
-                continue
-
-            media = primary.get("media") if isinstance(primary.get("media"), dict) else {}
-            secure_media = primary.get("secure_media") if isinstance(primary.get("secure_media"), dict) else {}
-            preview = primary.get("preview") if isinstance(primary.get("preview"), dict) else {}
-
-            image_url = ""
-            gallery_urls = extract_gallery_image_urls(post)
-            video_url = str(
-                media.get("reddit_video", {}).get("fallback_url")
-                or secure_media.get("reddit_video", {}).get("fallback_url")
-                or preview.get("reddit_video_preview", {}).get("fallback_url")
-                or ""
-            ).replace("&amp;", "&")
-            if primary.get("post_hint") == "image":
-                image_url = str(primary.get("url_overridden_by_dest") or primary.get("url") or "")
-            elif preview.get("images"):
-                image_url = str(preview["images"][0].get("source", {}).get("url") or "").replace("&amp;", "&")
-            elif gallery_urls:
-                image_url = gallery_urls[0]
-
-            permalink = f"https://www.reddit.com{post.get('permalink', '')}"
-            media_type = "image"
-            link = image_url
-            if mode == "video":
-                media_type = "video"
-                link = video_url
-            elif mode == "link":
-                media_type = "link"
-                link = permalink
-            elif mode == "all":
-                if video_url:
-                    media_type = "video"
-                    link = video_url
-                elif image_url:
-                    media_type = "image"
-                    link = image_url
-                else:
-                    media_type = "link"
-                    link = permalink
-
-            if not link:
-                continue
-
-            out.append(
-                {
-                    "id": post_id,
-                    "title": str(post.get("title") or "(untitled)"),
-                    "link": link,
-                    "permalink": permalink,
-                    "source_url": f"https://www.reddit.com/r/{sub}/",
-                    "subreddit": sub,
-                    "flair": flair,
-                    "nsfw": bool(post.get("over_18")),
-                    "spoiler": bool(post.get("spoiler")),
-                    "type": media_type,
-                    "gallery_links": gallery_urls,
-                }
-            )
-            if len(out) >= max_items:
-                break
+        page_items = _parse_reddit_json_page(
+            children=children,
+            sub=sub,
+            max_items=max_items - len(out),
+            cutoff_unix=cutoff_unix,
+            seen_lookup=seen_lookup,
+            include_nsfw=include_nsfw,
+            include_spoiler=include_spoiler,
+            wanted_flairs=wanted_flairs,
+            mode=mode,
+            seen_url_set=seen_url_set,
+        )
+        out.extend(page_items)
 
         after = payload.get("data", {}).get("after")
         if not after:
@@ -295,9 +1017,32 @@ def scrape_subreddit_media(
     return out
 
 
-def load_seen_ids(state_file: Path) -> list[str]:
+def _normalize_seen_url(raw_url: str) -> str:
+    """Strip query params from reddit media hosts for stable dedup comparison."""
+    url = str(raw_url or "").strip()
+    if not url:
+        return ""
+    if "redd.it/" in url or "redditmedia.com/" in url:
+        return url.split("?")[0].split("#")[0]
+    return url
+
+
+def _item_dedup_urls(item: dict[str, Any]) -> list[str]:
+    """All normalized media URLs from a post — link + every gallery image."""
+    urls: list[str] = []
+    link = _normalize_seen_url(str(item.get("link") or ""))
+    if link:
+        urls.append(link)
+    for gallery_url in item.get("gallery_links", []):
+        normalized = _normalize_seen_url(str(gallery_url or ""))
+        if normalized and normalized not in urls:
+            urls.append(normalized)
+    return urls
+
+
+def load_seen_ids(state_file: Path) -> tuple[list[str], list[str]]:
     if not state_file.exists():
-        return []
+        return [], []
     try:
         raw = json.loads(state_file.read_text(encoding="utf-8"))
         seen_ids: list[str] = []
@@ -305,14 +1050,22 @@ def load_seen_ids(state_file: Path) -> list[str]:
             item = str(value)
             if item not in seen_ids:
                 seen_ids.append(item)
-        return seen_ids[-SEEN_URL_LIMIT:]
+        seen_urls: list[str] = []
+        for value in raw.get("seen_urls", []):
+            item = str(value)
+            if item not in seen_urls:
+                seen_urls.append(item)
+        return seen_ids[-SEEN_URL_LIMIT:], seen_urls[-SEEN_URL_LIMIT:]
     except Exception:
-        return []
+        return [], []
 
 
-def save_seen_ids(state_file: Path, seen_ids: list[str], max_keep: int = SEEN_URL_LIMIT) -> None:
-    trimmed = seen_ids[-max(1, max_keep) :]
-    state_file.write_text(json.dumps({"seen_ids": trimmed}, ensure_ascii=True), encoding="utf-8")
+def save_seen_ids(state_file: Path, seen_ids: list[str], seen_urls: list[str] | None = None, max_keep: int = SEEN_URL_LIMIT) -> None:
+    trimmed = seen_ids[-max(1, max_keep):]
+    payload: dict[str, Any] = {"seen_ids": trimmed}
+    if seen_urls is not None:
+        payload["seen_urls"] = seen_urls[-max(1, max_keep):]
+    state_file.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
 
 
 async def poll_subreddit_media(
@@ -328,8 +1081,9 @@ async def poll_subreddit_media(
     limit: int = 25,
     interval_seconds: int = 300,
 ) -> None:
-    seen_ids = load_seen_ids(state_file)
+    seen_ids, seen_urls = load_seen_ids(state_file)
     seen_lookup = set(seen_ids)
+    seen_url_set = set(seen_urls)
     fingerprint_cursor = random.randint(0, max(0, len(REDDIT_FINGERPRINTS) - 1))
     proxy_pool = parse_proxy_pool(os.getenv("REDDIT_PROXIES"))
     proxy_cursor = random.randint(0, max(0, len(proxy_pool) - 1)) if proxy_pool else 0
@@ -352,18 +1106,50 @@ async def poll_subreddit_media(
                 user_agent=pick_reddit_user_agent(fingerprint_cursor),
                 fingerprint_seed=fingerprint_cursor,
                 proxy_url=pick_proxy(proxy_pool, proxy_cursor),
+                seen_url_set=seen_url_set,
             )
-            fresh = [item for item in reversed(items) if item.get("id") and item["id"] not in seen_lookup]
+            print(f"[reddit][diag] r/{subreddit}: scraped {len(items)} items, seen_ids={len(seen_ids)}, seen_urls={len(seen_urls)}")
+            batch_seen_ids = set(seen_lookup)
+            batch_seen_urls = set(seen_url_set)
+            fresh: list[dict[str, Any]] = []
+            for item in reversed(items):
+                post_id = str(item.get("id") or "").strip()
+                if not post_id or post_id in batch_seen_ids:
+                    continue
+                item_urls = _item_dedup_urls(item)
+                hit = [u for u in item_urls if u in batch_seen_urls]
+                if hit:
+                    print(f"[reddit][diag] r/{subreddit}: SKIP id={post_id} url-dup={hit[0][:80]}")
+                    batch_seen_ids.add(post_id)
+                    continue
+                batch_seen_ids.add(post_id)
+                batch_seen_urls.update(item_urls)
+                fresh.append(item)
+            print(f"[reddit][diag] r/{subreddit}: {len(fresh)} fresh posts after filter")
             for item in fresh:
+                post_id = item["id"]
+                item_urls = _item_dedup_urls(item)
+                glinks = item.get("gallery_links", [])
+                print(f"[reddit][diag] r/{subreddit}: POST id={post_id} link={str(item.get('link',''))[:80]} gallery={len(glinks)} urls_tracked={len(item_urls)}")
                 result = post_callback(item)
                 if asyncio.iscoroutine(result):
                     await result
-                seen_ids.append(item["id"])
-                seen_lookup.add(item["id"])
+                seen_ids.append(post_id)
+                seen_lookup.add(post_id)
+                for url in item_urls:
+                    if url not in seen_url_set:
+                        seen_urls.append(url)
+                        seen_url_set.add(url)
                 if len(seen_ids) > SEEN_URL_LIMIT:
-                    dropped = seen_ids.pop(0)
-                    seen_lookup.discard(dropped)
-            save_seen_ids(state_file, seen_ids)
+                    evicted_id = seen_ids.pop(0)
+                    seen_lookup.discard(evicted_id)
+                while len(seen_urls) > SEEN_URL_LIMIT:
+                    evicted_url = seen_urls.pop(0)
+                    seen_url_set.discard(evicted_url)
+                try:
+                    save_seen_ids(state_file, seen_ids, seen_urls)
+                except Exception as save_exc:
+                    print(f"[reddit] Failed to persist seen state for r/{subreddit}: {save_exc}")
             failure_streak = 0
             fingerprint_cursor += 1
             proxy_cursor += 1

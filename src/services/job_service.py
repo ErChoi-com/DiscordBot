@@ -5,6 +5,9 @@ import os
 import re
 import subprocess
 import sys
+import hashlib
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -14,7 +17,7 @@ from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
 import requests
 from bs4 import BeautifulSoup
 
-DEFAULT_JOBSPY_EXE = Path("C:/Users/ernes/AppData/Local/Programs/Python/Python311/python.exe")
+DEFAULT_JOBSPY_EXE = Path(sys.executable)
 JOBBANK_CANADA_SITE = "jobbank_canada"
 JOBBANK_BASE_URL = "https://www.jobbank.gc.ca"
 JOBBANK_SEARCH_URL = f"{JOBBANK_BASE_URL}/jobsearch/jobsearch"
@@ -34,7 +37,7 @@ FALLBACK_JOBSPY_SITES = [
     "naukri",
     "zip_recruiter",
 ]
-CUSTOM_SCRAPER_SITES = {"jobbank_canada", "glassdoor", "zip_recruiter"}
+CUSTOM_SCRAPER_SITES = {"jobbank_canada", "glassdoor", "zip_recruiter", "greenhouse", "lever", "ashby", "workday", "icims", "bamboohr"}
 JOBSPY_SITE_LABELS = {
     "all": "All supported sites",
     JOBBANK_CANADA_SITE: "Job Bank Canada",
@@ -46,6 +49,11 @@ JOBSPY_SITE_LABELS = {
     "linkedin": "LinkedIn",
     "naukri": "Naukri",
     "zip_recruiter": "ZipRecruiter",
+    "greenhouse": "Greenhouse",
+    "lever": "Lever",
+    "ashby": "Ashby",
+    "workday": "Workday",
+    "icims": "iCIMS",
 }
 DISTANCE_UNSUPPORTED_SITES = {"bayt"}
 JOB_BOARD_HOST_PATTERNS = {
@@ -57,12 +65,16 @@ JOB_BOARD_HOST_PATTERNS = {
     "linkedin": ("linkedin.",),
     "naukri": ("naukri.",),
     "zip_recruiter": ("ziprecruiter.",),
+    "greenhouse": ("greenhouse.io", "boards.greenhouse.io"),
+    "lever": ("lever.co", "jobs.lever.co"),
+    "ashby": ("ashbyhq.com", "jobs.ashbyhq.com"),
+    "workday": ("myworkdayjobs.com",),
+    "icims": ("icims.com",),
 }
 TRACKING_QUERY_PREFIXES = ("utm_",)
 TRACKING_QUERY_KEYS = {
     "fbclid",
     "gclid",
-    "gh_jid",
     "gh_src",
     "mc_cid",
     "mc_eid",
@@ -73,6 +85,7 @@ TRACKING_QUERY_KEYS = {
 }
 SPACE_PATTERN = re.compile(r"\s+")
 NON_ALNUM_PATTERN = re.compile(r"[^a-z0-9]+")
+_TITLE_CHUNK_RE = re.compile(r"\s+[-–/]\s+")
 JOBBANK_POSTING_LINK_PATTERN = re.compile(r"/jobsearch/jobposting/[^\"'\s<>]+", re.IGNORECASE)
 JOBBANK_POSTING_ID_PATTERN = re.compile(r"/jobsearch/jobposting/(\d+)", re.IGNORECASE)
 JOBBANK_EMAIL_PATTERN = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
@@ -106,32 +119,6 @@ CANADIAN_PROVINCE_CODES = {value: value for value in CANADIAN_PROVINCE_NAMES.val
 GLASSDOOR_LOCATION_LOCALITY_PATTERN = re.compile(r'"addressLocality"\s*:\s*"([^"]+)"', re.IGNORECASE)
 GLASSDOOR_LOCATION_REGION_PATTERN = re.compile(r'"addressRegion"\s*:\s*"([^"]+)"', re.IGNORECASE)
 GLASSDOOR_CARD_AGE_PATTERN = re.compile(r'(?<!\d)(\d+)\s*([hd])\+?(?!\d)', re.IGNORECASE)
-CANADA_REGION_HINTS = (
-    "canada",
-    "ontario",
-    "toronto",
-    "vancouver",
-    "montreal",
-    "calgary",
-    "edmonton",
-    "ottawa",
-    "quebec",
-    "alberta",
-    "british columbia",
-    "saskatchewan",
-    "manitoba",
-    "nova scotia",
-    "new brunswick",
-    "newfoundland",
-    "prince edward island",
-)
-US_REGION_HINTS = (
-    "united states",
-    "united states of america",
-    "usa",
-    "u.s.",
-    "us",
-)
 JOBBANK_MAX_SEARCH_PAGES: int = 5
 JOBBANK_USER_AGENT_OVERRIDE: str | None = None  # set via configure_job_service
 
@@ -146,11 +133,43 @@ SEMANTIC_DESCRIPTION_CHAR_LIMIT: int = 2200
 DEDUP_MAX_FIFO_FILES: int = 6
 DEDUP_MAX_ENTRIES_PER_FILE: int = 500
 DEDUP_MONTHS_THRESHOLD: int = 2
+DEDUP_SEEN_LINKS_CAP: int = 80_000
 
 # ── Network timeouts (overridden at startup) ──────────────────────────────────
 HTTP_REQUEST_TIMEOUT: int = 20
 SUBPROCESS_SCRAPE_TIMEOUT: int = 90
 MAX_KEYWORD_VARIANTS: int = 8
+
+# ── Per-site concurrency limiting (overridden at startup) ────────────────────
+SITE_CONCURRENCY_LIMIT: int = 2
+SITE_SEMAPHORE_TIMEOUT: int = 120
+
+_site_semaphores: dict[str, threading.Semaphore] = {}
+_site_semaphores_lock = threading.Lock()
+
+
+def _get_site_semaphore(site: str) -> threading.Semaphore:
+    sem = _site_semaphores.get(site)
+    if sem is not None:
+        return sem
+    with _site_semaphores_lock:
+        sem = _site_semaphores.get(site)
+        if sem is None:
+            sem = threading.Semaphore(SITE_CONCURRENCY_LIMIT)
+            _site_semaphores[site] = sem
+        return sem
+
+
+@contextmanager
+def _site_scrape_slot(site: str, timeout: int | None = None):
+    effective_timeout = timeout if timeout is not None else SITE_SEMAPHORE_TIMEOUT
+    sem = _get_site_semaphore(site)
+    acquired = sem.acquire(timeout=effective_timeout)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            sem.release()
 
 
 def message_to_ascii_signature(message: str) -> str:
@@ -213,108 +232,383 @@ def extract_title_from_message(message_content: str) -> str:
     return title_line
 
 
+def dedup_namespace_from_listing_file(listing_file: Path) -> str:
+    """Build a safe, collision-resistant dedup namespace key.
+
+    Canonical watcher files preserve their historical namespace shape so existing
+    channel-specific dedup folders continue to work:
+    - .message_listing_<channel_id>_job.json -> message_listing_<channel_id>_job
+    - .message_listing_<channel_id>_reddit.json -> message_listing_<channel_id>_reddit
+
+    Non-canonical names get a deterministic hash suffix so different paths cannot
+    collapse into the same dedup directory via sanitization.
+    """
+    stem = listing_file.stem
+    canonical = re.search(r"message_listing_(\d+)_(job|reddit)$", stem)
+    if canonical:
+        return f"message_listing_{canonical.group(1)}_{canonical.group(2)}"
+
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
+    # Include parent path to prevent collisions across different directories.
+    fingerprint = hashlib.sha1(str(listing_file.resolve()).encode("utf-8", errors="ignore")).hexdigest()[:10]
+    if safe:
+        return f"{safe}_{fingerprint}"
+    return f"listing_{fingerprint}"
+
+
+def dedup_namespace_token_for_listing_file(listing_file: Path) -> str:
+    """Return a stable numeric token for watcher-scoped dedup signatures.
+
+    Uses the channel id in canonical listing names like:
+    - .message_listing_<channel_id>_job.json
+    - .message_listing_<channel_id>_reddit.json
+
+    Falls back to a deterministic numeric checksum for non-canonical names.
+    """
+    stem = dedup_namespace_from_listing_file(listing_file)
+    match = re.search(r"message_listing_(\d+)_(job|reddit)$", stem)
+    if match:
+        return match.group(1)
+
+    checksum = sum(ord(ch) for ch in stem)
+    return str(checksum if checksum > 0 else 1)
+
+
+def dedup_directory_for_listing_file(listing_file: Path) -> Path:
+    """Return the watcher-scoped dedup directory derived from listing_file."""
+    return listing_file.parent / "dedup_listings" / dedup_namespace_from_listing_file(listing_file)
+
+
+def ensure_dedup_directory_for_listing_file(listing_file: Path) -> Path:
+    """Ensure watcher-scoped dedup directory exists and return its path."""
+    listings_dir = dedup_directory_for_listing_file(listing_file)
+    listings_dir.mkdir(parents=True, exist_ok=True)
+    return listings_dir
+
+
+def _iter_listing_files_by_index(listings_dir: Path, include_extra: bool = True) -> list[tuple[int, Path]]:
+    pairs: list[tuple[int, Path]] = []
+    for file_path in listings_dir.glob("listing_*.json"):
+        try:
+            stem = file_path.stem
+            if not stem.startswith("listing_"):
+                continue
+            idx = int(stem.split("_", 1)[1])
+        except Exception:
+            continue
+        if include_extra or idx < DEDUP_MAX_FIFO_FILES:
+            pairs.append((idx, file_path))
+    pairs.sort(key=lambda p: p[0])
+    return pairs
+
+
+def _read_fifo_rows(listings_dir: Path, include_extra: bool = True) -> list[str]:
+    """Read FIFO rows in logical order (newest -> oldest)."""
+    rows: list[str] = []
+    for _, file_path in _iter_listing_files_by_index(listings_dir, include_extra=include_extra):
+        try:
+            file_rows = [line.strip() for line in file_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        except Exception:
+            continue
+        rows.extend(file_rows)
+    return rows
+
+
+def _write_fifo_rows(listings_dir: Path, rows: list[str]) -> bool:
+    """Write logical FIFO rows back into split listing_i files.
+
+    Rows are expected in newest -> oldest order.
+    """
+    changed = False
+
+    # Remove out-of-range files first.
+    for idx, extra_path in _iter_listing_files_by_index(listings_dir, include_extra=True):
+        if idx >= DEDUP_MAX_FIFO_FILES:
+            try:
+                extra_path.unlink(missing_ok=True)
+                changed = True
+            except Exception:
+                continue
+
+    max_total_rows = DEDUP_MAX_FIFO_FILES * DEDUP_MAX_ENTRIES_PER_FILE
+    trimmed_rows = rows[:max_total_rows]
+
+    for file_idx in range(DEDUP_MAX_FIFO_FILES):
+        start = file_idx * DEDUP_MAX_ENTRIES_PER_FILE
+        end = start + DEDUP_MAX_ENTRIES_PER_FILE
+        chunk = trimmed_rows[start:end]
+        file_path = listings_dir / f"listing_{file_idx}.json"
+
+        if chunk:
+            new_text = "\n".join(chunk) + "\n"
+            current_text = ""
+            if file_path.exists():
+                try:
+                    current_text = file_path.read_text(encoding="utf-8")
+                except Exception:
+                    current_text = ""
+            if new_text != current_text:
+                try:
+                    file_path.write_text(new_text, encoding="utf-8")
+                    changed = True
+                except Exception:
+                    continue
+        elif file_path.exists():
+            try:
+                file_path.unlink(missing_ok=True)
+                changed = True
+            except Exception:
+                continue
+
+    return changed
+
+
+def _row_timestamp(row: str) -> int:
+    parts = row.strip().split()
+    try:
+        return int(parts[-1])
+    except (IndexError, ValueError):
+        return 0
+
+
+def enforce_dedup_fifo_structure_for_listing_file(listing_file: Path) -> bool:
+    """Enforce FIFO structure limits for watcher-scoped dedup storage.
+
+    Guarantees:
+    - Only listing_0 .. listing_(DEDUP_MAX_FIFO_FILES-1) are kept.
+    - Each listing_i file has at most DEDUP_MAX_ENTRIES_PER_FILE non-empty rows.
+    - Rows are sorted newest-first (descending timestamp) so the cascade
+      insert's rows.pop() always evicts the oldest entry.
+    """
+    try:
+        listings_dir = ensure_dedup_directory_for_listing_file(listing_file)
+    except Exception:
+        return False
+
+    rows = _read_fifo_rows(listings_dir, include_extra=True)
+    rows.sort(key=_row_timestamp, reverse=True)
+    return _write_fifo_rows(listings_dir, rows)
+
+
+def dedup_signature_for_message(message_content: str, listing_file: Path) -> str | None:
+    """Return watcher-scoped numeric signature (ascii sums + namespace token)."""
+    title = extract_title_from_message(message_content)
+    if not title:
+        return None
+    title_sig = message_to_ascii_signature(title)
+    if not title_sig:
+        return None
+    namespace_token = dedup_namespace_token_for_listing_file(listing_file)
+    return f"{title_sig} {namespace_token}"
+
+
+def dedup_legacy_signature_from_scoped(scoped_signature: str, listing_file: Path) -> str:
+    """Return legacy signature form without namespace token.
+
+    Legacy rows are stored as: <ascii sums> <timestamp>
+    Scoped rows are stored as: <ascii sums> <namespace_token> <timestamp>
+    """
+    token = dedup_namespace_token_for_listing_file(listing_file)
+    parts = [p for p in scoped_signature.split() if p]
+    if parts and parts[-1] == token:
+        parts = parts[:-1]
+    return " ".join(parts)
+
+
+def normalize_dedup_storage_for_listing_file(listing_file: Path) -> bool:
+    """Normalize dedup rows to plain 'numeric_signature timestamp' format.
+
+    Also converts legacy namespace/version rows like:
+    - v2:message_listing_123_job:500 520 1700000000
+    into:
+    - 500 520 <namespace_token> 1700000000
+    """
+    try:
+        listings_dir = ensure_dedup_directory_for_listing_file(listing_file)
+    except Exception:
+        return False
+
+    changed = False
+    namespace_token = dedup_namespace_token_for_listing_file(listing_file)
+
+    for file_idx in range(DEDUP_MAX_FIFO_FILES):
+        file_path = listings_dir / f"listing_{file_idx}.json"
+        if not file_path.exists():
+            continue
+        try:
+            lines = file_path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            continue
+
+        normalized_lines: list[str] = []
+        for raw_line in lines:
+            line = raw_line.lstrip("\ufeff").strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            sig = " ".join(parts[:-1])
+            ts_raw = parts[-1]
+            try:
+                int(ts_raw)
+            except ValueError:
+                continue
+            clean_sig = sig
+            if ":" in clean_sig and clean_sig.startswith("v"):
+                # Convert namespaced/versioned signatures back to plain ascii signature.
+                clean_sig = clean_sig.rsplit(":", 1)[-1].strip()
+            if not clean_sig:
+                continue
+            sig_parts = [part for part in clean_sig.split() if part]
+            if not sig_parts:
+                continue
+            if sig_parts[-1] != namespace_token:
+                sig_parts.append(namespace_token)
+            clean_sig = " ".join(sig_parts)
+            normalized_lines.append(f"{clean_sig} {ts_raw}")
+
+        if normalized_lines != [line.lstrip("\ufeff").strip() for line in lines if line.lstrip("\ufeff").strip()]:
+            changed = True
+            if normalized_lines:
+                try:
+                    file_path.write_text("\n".join(normalized_lines) + "\n", encoding="utf-8")
+                except Exception:
+                    continue
+            else:
+                try:
+                    file_path.unlink(missing_ok=True)
+                except Exception:
+                    continue
+
+    # After row normalization, enforce hard FIFO structure limits.
+    if enforce_dedup_fifo_structure_for_listing_file(listing_file):
+        changed = True
+
+    return changed
+
+
+def is_message_duplicate(message_content: str, listing_file: Path, months_threshold: int = 2) -> bool:
+    """Check whether message title exists inside threshold in watcher-scoped dedup storage."""
+    ascii_sig = dedup_signature_for_message(message_content, listing_file)
+    if not ascii_sig:
+        return False
+    legacy_sig = dedup_legacy_signature_from_scoped(ascii_sig, listing_file)
+
+    current_time = compress_timestamp()
+    threshold_seconds = months_threshold * 30 * 24 * 3600
+
+    try:
+        listings_dir = ensure_dedup_directory_for_listing_file(listing_file)
+    except Exception:
+        return False
+
+    expired_cutoff = current_time - threshold_seconds
+
+    for file_idx in range(DEDUP_MAX_FIFO_FILES):
+        file_path = listings_dir / f"listing_{file_idx}.json"
+        if not file_path.exists():
+            continue
+        try:
+            file_exhausted = False
+            for line in file_path.read_text(encoding="utf-8").splitlines():
+                line = line.lstrip("\ufeff").strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) <= 1:
+                    continue
+                try:
+                    timestamp = int(parts[-1])
+                except ValueError:
+                    continue
+                if timestamp < expired_cutoff:
+                    file_exhausted = True
+                    break
+                sig = " ".join(parts[:-1])
+                if sig == ascii_sig or sig == legacy_sig:
+                    return True
+            if file_exhausted:
+                break
+        except Exception:
+            continue
+
+    return False
+
+
+def record_message_for_dedup(message_content: str, listing_file: Path) -> bool:
+    """Record message title signature in watcher-scoped split FIFO files.
+
+    True cascading insert: new entry goes to front of listing_0. If that file
+    exceeds DEDUP_MAX_ENTRIES_PER_FILE, its last row overflows to the front of
+    listing_1, and so on through each file. Overflow past the final file is
+    permanently deleted.
+    """
+    ascii_sig = dedup_signature_for_message(message_content, listing_file)
+    if not ascii_sig:
+        return False
+
+    current_time = compress_timestamp()
+    new_entry = f"{ascii_sig} {current_time}"
+
+    try:
+        listings_dir = ensure_dedup_directory_for_listing_file(listing_file)
+        enforce_dedup_fifo_structure_for_listing_file(listing_file)
+    except Exception:
+        return False
+
+    overflow: str | None = new_entry
+    for file_idx in range(DEDUP_MAX_FIFO_FILES):
+        if overflow is None:
+            break
+
+        file_path = listings_dir / f"listing_{file_idx}.json"
+        rows: list[str] = []
+        if file_path.exists():
+            try:
+                rows = [line.strip() for line in file_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            except Exception:
+                rows = []
+
+        rows.insert(0, overflow)
+
+        if len(rows) > DEDUP_MAX_ENTRIES_PER_FILE:
+            overflow = rows.pop()
+        else:
+            overflow = None
+
+        try:
+            file_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        except Exception:
+            return False
+
+    return True
+
+
 def check_and_record_message(message_content: str, listing_file: Path, months_threshold: int = 2) -> bool:
     """Check if job title is a duplicate and record it in FIFO rotating files.
     
     Args:
         message_content: The Discord message to check
-        listing_file: Base path for listing storage (unused, kept for compatibility)
+        listing_file: Base path used to derive watcher-specific dedup namespace
         months_threshold: Number of months to look back for duplicates
         
     Returns:
         True if title is a duplicate (should be filtered), False if new
         
-    Uses rotating FIFO files in dedup_listings/ folder:
+    Uses split FIFO files in dedup_listings/<namespace>/ folder:
     - Max 6 JSON files
     - Max 500 entries per file
-    - When file 0 hits 500, entries go to file 1, etc.
-    - When file 5 hits 500, oldest file is deleted and others shift down
+    - listing_0 stores newest segment of the queue
+    - New rows are inserted at top of listing_0 and overflow cascades downward
+    - Rows beyond the last segment are dropped (oldest removed)
     """
-    # Extract title only (ignore URL and apply link)
-    title = extract_title_from_message(message_content)
-    if not title:
-        return False  # No title = not a real job posting
-    
-    ascii_sig = message_to_ascii_signature(title)
-    current_time = compress_timestamp()
-    threshold_seconds = months_threshold * 30 * 24 * 3600
-    
-    # Create listings directory if needed
-    listings_dir = listing_file.parent / "dedup_listings"
-    try:
-        listings_dir.mkdir(exist_ok=True)
-    except Exception:
-        return False  # Can't create directory = skip dedup
-    
-    # Load all entries from all FIFO files
-    all_entries: list[tuple[str, int]] = []
-    for file_idx in range(DEDUP_MAX_FIFO_FILES):
-        file_path = listings_dir / f"listing_{file_idx}.json"
-        if file_path.exists():
-            try:
-                for line in file_path.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    parts = line.split()
-                    if len(parts) > 1:
-                        timestamp = int(parts[-1])
-                        sig = " ".join(parts[:-1])
-                        all_entries.append((sig, timestamp))
-            except Exception:
-                pass
-    
-    # Check for duplicates within threshold
-    for sig, time_recorded in all_entries:
-        if sig == ascii_sig:
-            time_diff = current_time - time_recorded
-            if time_diff <= threshold_seconds:
-                return True  # Duplicate found
-    
-    # Record new message in the appropriate file
-    new_entry = f"{ascii_sig} {current_time}\n"
-    
-    # Find which file to write to (prefer file 0, move to 1, 2, etc. as they fill)
-    target_file_idx = 0
-    max_file_idx = DEDUP_MAX_FIFO_FILES - 1
-    for idx in range(DEDUP_MAX_FIFO_FILES):
-        file_path = listings_dir / f"listing_{idx}.json"
-        try:
-            line_count = 0
-            if file_path.exists():
-                line_count = sum(1 for _ in file_path.read_text(encoding="utf-8").splitlines() if _.strip())
-            if line_count < DEDUP_MAX_ENTRIES_PER_FILE:
-                target_file_idx = idx
-                break
-        except Exception:
-            target_file_idx = idx
-            break
+    if is_message_duplicate(message_content, listing_file, months_threshold=months_threshold):
+        return True
 
-    # If the last slot is also full, rotate: drop oldest, shift remaining down
-    if target_file_idx == max_file_idx:
-        file_path = listings_dir / f"listing_{target_file_idx}.json"
-        try:
-            line_count = sum(1 for _ in file_path.read_text(encoding="utf-8").splitlines() if _.strip()) if file_path.exists() else 0
-            if line_count >= DEDUP_MAX_ENTRIES_PER_FILE:
-                file_path.unlink(missing_ok=True)
-                for idx in range(max_file_idx - 1, -1, -1):
-                    src = listings_dir / f"listing_{idx}.json"
-                    dst = listings_dir / f"listing_{idx + 1}.json"
-                    if src.exists():
-                        src.rename(dst)
-                target_file_idx = 0
-        except Exception:
-            pass
-    
-    # Append new entry
-    target_file = listings_dir / f"listing_{target_file_idx}.json"
-    try:
-        with target_file.open("a", encoding="utf-8") as f:
-            f.write(new_entry)
-    except Exception:
-        pass
-    
-    return False  # Not a duplicate
+    # Preserve legacy behavior: treat storage failures as "not duplicate".
+    record_message_for_dedup(message_content, listing_file)
+    return False
 
 
 @lru_cache(maxsize=8)
@@ -396,19 +690,23 @@ def normalize_indeed_country(country_indeed: str | None, location: str) -> str:
     if requested and requested != "AUTO":
         return requested
 
-    normalized_location = str(location or "").lower()
-    canada_tokens = ("canada", "ontario", "toronto", "vancouver", "montreal", "calgary", "edmonton", "ottawa")
-    if any(token in normalized_location for token in canada_tokens):
+    from services.ats_service import _infer_country
+    cc = _infer_country(location)
+    if cc == "CA":
         return "CANADA"
     return "USA"
 
 
 def infer_job_region(row: dict[str, Any]) -> str:
-    location_text = str(row.get("location") or "").strip().lower()
-    if any(token in location_text for token in CANADA_REGION_HINTS):
+    from services.ats_service import _infer_country
+    location_text = str(row.get("location") or "").strip()
+    cc = _infer_country(location_text)
+    if cc == "CA":
         return "canada"
-    if any(token in location_text for token in US_REGION_HINTS):
+    if cc == "US":
         return "us"
+    if cc is not None:
+        return "other"
 
     raw_url = str(row.get("job_url") or row.get("url") or row.get("job_url_direct") or "").strip()
     if not raw_url:
@@ -426,11 +724,53 @@ def infer_job_region(row: dict[str, Any]) -> str:
     return "unknown"
 
 
+def _posting_age_ok(row: dict[str, Any], hours_old: int) -> bool:
+    """Return True if the job's date_posted is within hours_old of now.
+    Rows with no date_posted (bamboohr, ashby) always pass.
+    """
+    posted = str(row.get("date_posted") or "").strip()
+    if not posted:
+        return True
+    try:
+        posted_dt = datetime.fromisoformat(posted.replace("Z", "+00:00"))
+        if posted_dt.tzinfo is None:
+            from datetime import timezone as _tz
+            posted_dt = posted_dt.replace(tzinfo=_tz.utc)
+        age_hours = (datetime.now(posted_dt.tzinfo) - posted_dt).total_seconds() / 3600
+        return 0 <= age_hours <= hours_old
+    except (ValueError, TypeError):
+        return True
+
+
 def filter_rows_by_region(rows: list[dict[str, Any]], allow_north_america: bool = False) -> list[dict[str, Any]]:
     if not rows:
         return []
+    from services.ats_service import ATS_PLATFORMS as _ats_plats
+    _ats_set = set(_ats_plats)
     allowed_regions = {"canada", "us"} if allow_north_america else {"canada"}
-    return [row for row in rows if infer_job_region(row) in allowed_regions]
+    result = []
+    for row in rows:
+        region = infer_job_region(row)
+        if region in allowed_regions:
+            result.append(row)
+        elif region == "unknown":
+            sites = set(row.get("_source_sites") or [row.get("_source_site", "")])
+            if sites & _ats_set:
+                result.append(row)
+    return result
+
+
+def _python_has_jobspy(executable: Path) -> bool:
+    try:
+        proc = subprocess.run(
+            [str(executable), "-c", "import importlib.util; raise SystemExit(0 if importlib.util.find_spec('jobspy') else 1)"],
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
 
 
 def jobspy_python_executable(configured_exe: str | None = None) -> Path | None:
@@ -443,13 +783,23 @@ def jobspy_python_executable(configured_exe: str | None = None) -> Path | None:
         candidates.append(Path(env_override).expanduser())
     candidates.append(DEFAULT_JOBSPY_EXE)
     candidates.append(Path(sys.executable))
+    for minor in ("3.11", "3.12", "3.13", "3.14"):
+        try:
+            proc = subprocess.run(
+                ["py", f"-{minor}", "-c", "import sys; print(sys.executable)"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                candidates.append(Path(proc.stdout.strip()))
+        except Exception:
+            pass
 
     seen: set[Path] = set()
     for candidate in candidates:
         if candidate in seen:
             continue
         seen.add(candidate)
-        if candidate.exists():
+        if candidate.exists() and _python_has_jobspy(candidate):
             return candidate
     return None
 
@@ -890,8 +1240,13 @@ def all_supported_job_sites(configured_python_exe: str | None = None) -> list[st
             ordered.append(candidate)
 
     if "indeed" not in ordered:
-        # Keep Indeed explicit so callers can rely on it even if runtime probing is incomplete.
         ordered.append("indeed")
+
+    from services.ats_service import ATS_PLATFORMS
+    for ats_site in ATS_PLATFORMS:
+        if ats_site not in ordered:
+            ordered.append(ats_site)
+
     return ordered
 
 
@@ -1285,6 +1640,9 @@ def build_site_scrape_code(
         "    if site_name != 'glassdoor':\n"
         "        return run_with_bdjobs_patch(base_kwargs)\n"
         "\n    # Glassdoor often fails location parsing and certain filters; retry with a simpler query shape.\n"
+        "    # Print-and-exit as soon as the first attempt yields results so the subprocess output is\n"
+        "    # flushed before the 90-second kill window; later attempts only run if the earlier ones\n"
+        "    # came back empty.\n"
         "    location_value = str(base_kwargs.get('location') or '').strip()\n"
         "    city_only = location_value.split(',')[0].strip() if location_value else location_value\n"
         "    country_value = str(base_kwargs.get('country_indeed') or '').strip()\n"
@@ -1299,12 +1657,15 @@ def build_site_scrape_code(
         "    relaxed.pop('hours_old', None)\n"
         "    relaxed.pop('distance', None)\n"
         "    attempts.append(relaxed)\n"
-        "\n    jobs = None\n"
+        "\n    last_jobs = None\n"
         "    for attempt_kwargs in attempts:\n"
         "        jobs = run_with_bdjobs_patch(attempt_kwargs)\n"
         "        if jobs is not None and len(jobs) > 0:\n"
-        "            return jobs\n"
-        "    return jobs\n"
+        "            rows = jobs.to_dict('records')\n"
+        "            print(json.dumps(rows, ensure_ascii=True, default=str))\n"
+        "            raise SystemExit(0)\n"
+        "        last_jobs = jobs\n"
+        "    return last_jobs\n"
         "\njobs=execute_with_site_workarounds(kwargs)\n"
         "rows=[] if jobs is None else jobs.to_dict('records')\n"
         "print(json.dumps(rows, ensure_ascii=True, default=str))\n"
@@ -1312,13 +1673,17 @@ def build_site_scrape_code(
 
 
 def run_site_scrape_subprocess(python_executable: Path, site: str, code: str) -> list[dict[str, Any]]:
-    proc = subprocess.run(
-        [str(python_executable), "-c", code],
-        capture_output=True,
-        text=True,
-        timeout=SUBPROCESS_SCRAPE_TIMEOUT,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            [str(python_executable), "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_SCRAPE_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"Job site '{site}' timed out after {SUBPROCESS_SCRAPE_TIMEOUT}s; skipping variant")
+        return []
     if proc.returncode != 0:
         stderr_lines = [line.strip() for line in (proc.stderr or "").splitlines() if line.strip()]
         if stderr_lines:
@@ -1344,6 +1709,12 @@ def shape_job_item(row: dict[str, Any], source: str) -> dict[str, Any]:
     location_text = fix_text_encoding(row.get("location") or "").strip()
     source_sites = collect_job_sites(row)
     source_label = site_labels_for_sites(source_sites)
+    from services.ats_service import ATS_PLATFORMS as _ats_platforms
+    _ats_set = set(_ats_platforms)
+    _company_lower = company.lower().replace("-", " ").replace("_", " ").strip()
+    _is_job_board_name = _company_lower in JOBSPY_SITE_LABELS or _company_lower in {s.replace("_", " ") for s in JOBSPY_SITE_LABELS}
+    if company and source_sites and source_sites[0] in _ats_set and not _is_job_board_name:
+        source_label = f"{source_label}/{company.replace('-', ' ').title()}"
     suffix = ", ".join(part for part in [company, location_text] if part)
     if suffix:
         title = f"{title} ({suffix})"
@@ -1411,13 +1782,17 @@ def scrape_glassdoor_postings(
             session.get("https://www.glassdoor.com/", timeout=10)
         except Exception:
             pass  # Continue anyway
-        
+
+        # Resolve location to Glassdoor's internal locId/locT via autocomplete API
+        from services.jba.geo_db import resolve_glassdoor_location
+        loc_id, loc_type = resolve_glassdoor_location(location, session)
+
         # Step 2: Request job search page with valid session
         search_url = f"{glassdoor_base_url(country_indeed, location)}/Job/jobs.htm"
         params = {
             "sc.keyword": keywords,
-            "locT": "C",
-            "locId": "0",
+            "locT": loc_type,
+            "locId": loc_id,
         }
         if radius_miles:
             params["radius"] = str(max(1, int(radius_miles)))
@@ -1629,10 +2004,10 @@ def scrape_job_postings(
     allow_north_america: bool = False,
     jobbank_search_query: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
-    if not site_names:
-        return []
-
-    normalized_sites = normalize_requested_sites(site_names, configured_python_exe)
+    if site_names:
+        normalized_sites = normalize_requested_sites(site_names, configured_python_exe)
+    else:
+        normalized_sites = all_supported_job_sites(configured_python_exe)
 
     if not normalized_sites:
         return []
@@ -1640,77 +2015,118 @@ def scrape_job_postings(
     raw: list[dict[str, Any]] = []
     target_count = max(1, results_wanted)
 
+    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+
+    scrape_tasks: list[Any] = []
+
     if JOBBANK_CANADA_SITE in normalized_sites:
-        raw.extend(
-            scrape_jobbank_canada_postings(
-                keywords=keywords,
-                location=location,
-                results_wanted=target_count,
-                search_query=jobbank_search_query,
-            )
-        )
+        def _jobbank_task():
+            with _site_scrape_slot(JOBBANK_CANADA_SITE) as acquired:
+                if not acquired:
+                    print(f"Skipping {JOBBANK_CANADA_SITE}: concurrency limit reached")
+                    return []
+                return scrape_jobbank_canada_postings(
+                    keywords=keywords, location=location,
+                    results_wanted=target_count, search_query=jobbank_search_query,
+                )
+        scrape_tasks.append(_jobbank_task)
 
     if "glassdoor" in normalized_sites:
-        raw.extend(
-            scrape_glassdoor_postings(
-                keywords,
-                location,
-                hours_old=hours_old,
-                radius_miles=radius_miles,
-                country_indeed=country_indeed,
-                results_wanted=target_count,
-            )
-        )
+        def _glassdoor_task():
+            with _site_scrape_slot("glassdoor") as acquired:
+                if not acquired:
+                    print("Skipping glassdoor: concurrency limit reached")
+                    return []
+                return scrape_glassdoor_postings(
+                    keywords, location, hours_old=hours_old,
+                    radius_miles=radius_miles, country_indeed=country_indeed,
+                    results_wanted=target_count,
+                )
+        scrape_tasks.append(_glassdoor_task)
+
     if "zip_recruiter" in normalized_sites:
-        # Use lightweight Playwright-based scraper to bypass Cloudflare/JS protections
-        raw.extend(scrape_ziprecruiter_postings(keywords, location, target_count))
+        def _ziprec_task():
+            with _site_scrape_slot("zip_recruiter") as acquired:
+                if not acquired:
+                    print("Skipping zip_recruiter: concurrency limit reached")
+                    return []
+                return scrape_ziprecruiter_postings(keywords, location, target_count)
+        scrape_tasks.append(_ziprec_task)
+
+    from services.ats_service import ATS_PLATFORMS as _ATS_PLATFORMS, _matches_keywords, _matches_location
+    requested_ats = {s for s in normalized_sites if s in _ATS_PLATFORMS}
+    if requested_ats:
+        try:
+            from services.jba.merge_data import load_daily_log, _today_str
+            from datetime import date, timedelta
+            today = date.today()
+            seen_keys: set[str] = set()
+            cached: list[dict[str, Any]] = []
+            for delta in (0, 1):
+                d = (today - timedelta(days=delta)).strftime("%Y-%m-%d")
+                for row in load_daily_log(d):
+                    key = row.get("job_url") or row.get("_dedup_key") or ""
+                    if key and key not in seen_keys:
+                        seen_keys.add(key)
+                        cached.append(row)
+            if cached:
+                cached_rows = [
+                    row for row in cached
+                    if row.get("_source_site") in requested_ats
+                    and _matches_keywords(str(row.get("title") or ""), keywords)
+                    and _matches_location(str(row.get("location") or ""), location)
+                    and _posting_age_ok(row, hours_old)
+                ]
+                if cached_rows:
+                    raw.extend(cached_rows)
+                    print(f"[jba-log] {len(cached_rows)} ATS jobs from 2-day window ({len(cached)} total)")
+        except Exception as exc:
+            print(f"[jba-log] Failed to read daily log: {exc}")
+
+    from services.ats_service import ATS_PLATFORMS as _ATS_PLATS_SET
+    _ats_names = set(_ATS_PLATS_SET)
 
     jobspy_sites = [site for site in normalized_sites if site not in CUSTOM_SCRAPER_SITES]
     python_executable = jobspy_python_executable(configured_python_exe)
-    if not jobspy_sites or python_executable is None:
-        if not raw:
-            return []
-        deduped_rows = dedupe_job_rows(raw)
-        filtered_rows = filter_rows_by_region(deduped_rows, allow_north_america=allow_north_america)
-        source = source_url or f"jobspy:{','.join(normalized_sites)}"
-        return [shape_job_item(row, source) for row in filtered_rows[:target_count]]
+    if jobspy_sites and python_executable is not None:
+        resolved_country_indeed = normalize_indeed_country(country_indeed, location)
+        proxy_pool = parse_proxy_pool(os.getenv("JOBSPY_PROXIES"))
+        keyword_variants = build_keyword_variants(keywords)
+        for site_idx, site in enumerate(jobspy_sites):
+            for variant_index, keyword_variant in enumerate(keyword_variants):
+                def _make_jobspy_task(si=site_idx, s=site, vi=variant_index, kv=keyword_variant):
+                    def _task():
+                        with _site_scrape_slot(s) as acquired:
+                            if not acquired:
+                                print(f"Skipping {s}: concurrency limit reached")
+                                return []
+                            proxy = pick_proxy(proxy_pool, si)
+                            code = build_site_scrape_code(
+                                site=s, keywords=kv, location=location,
+                                results_wanted=results_wanted, hours_old=hours_old,
+                                radius_miles=radius_miles,
+                                resolved_country_indeed=resolved_country_indeed,
+                                google_search_term=build_google_search_term(kv, location, hours_old),
+                                selected_proxy=proxy,
+                            )
+                            rows = run_site_scrape_subprocess(python_executable, s, code)
+                            for row in rows:
+                                row.setdefault("_source_site", s)
+                                row.setdefault("_source_sites", [s])
+                                row.setdefault("_search_variant", kv)
+                                row.setdefault("_search_variant_index", vi)
+                            return rows
+                    return _task
+                scrape_tasks.append(_make_jobspy_task())
 
-    resolved_country_indeed = normalize_indeed_country(country_indeed, location)
-    proxy_pool = parse_proxy_pool(os.getenv("JOBSPY_PROXIES"))
-    keyword_variants = build_keyword_variants(keywords)
-    for site_idx, site in enumerate(jobspy_sites):
-        if len(raw) >= target_count:
-            break
-        site_proxy = pick_proxy(proxy_pool, site_idx)
-        site_rows: list[dict[str, Any]] = []
-        for variant_index, keyword_variant in enumerate(keyword_variants):
-            if len(raw) >= target_count:
-                break
-            code = build_site_scrape_code(
-                site=site,
-                keywords=keyword_variant,
-                location=location,
-                results_wanted=results_wanted,
-                hours_old=hours_old,
-                radius_miles=radius_miles,
-                resolved_country_indeed=resolved_country_indeed,
-                google_search_term=build_google_search_term(keyword_variant, location, hours_old),
-                selected_proxy=site_proxy,
-            )
-            variant_rows = run_site_scrape_subprocess(python_executable, site, code)
-            for row in variant_rows:
-                row.setdefault("_source_site", site)
-                row.setdefault("_source_sites", [site])
-                row.setdefault("_search_variant", keyword_variant)
-                row.setdefault("_search_variant_index", variant_index)
-                site_rows.append(row)
-                if len(raw) + len(site_rows) >= target_count:
-                    break
-
-            if len(raw) + len(site_rows) >= target_count:
-                break
-
-        raw.extend(site_rows)
+    if scrape_tasks:
+        with ThreadPoolExecutor(max_workers=len(scrape_tasks)) as executor:
+            futures = [executor.submit(t) for t in scrape_tasks]
+            for future in _as_completed(futures):
+                try:
+                    raw.extend(future.result())
+                except Exception as exc:
+                    print(f"Scrape task error: {exc}")
 
     if not raw:
         return []
@@ -1718,7 +2134,9 @@ def scrape_job_postings(
     deduped_rows = dedupe_job_rows(raw)
     filtered_rows = filter_rows_by_region(deduped_rows, allow_north_america=allow_north_america)
     source = source_url or f"jobspy:{','.join(normalized_sites)}"
-    return [shape_job_item(row, source) for row in filtered_rows[: max(1, results_wanted)]]
+    ats_rows = [r for r in filtered_rows if r.get("_source_site") in _ats_names]
+    non_ats_rows = [r for r in filtered_rows if r.get("_source_site") not in _ats_names]
+    return [shape_job_item(row, source) for row in non_ats_rows + ats_rows]
 
 
 def scrape_job_descriptions_from_all_sites(
@@ -1840,6 +2258,7 @@ def scrape_jobs_from_board_url(url: str, configured_python_exe: str | None = Non
 def matches_role_filters(title: str, role_filters: list[str]) -> bool:
     if not role_filters:
         return True
+    import re as _re
     normalized = title.lower()
     keyword_map = {
         "internship": ["intern", "internship", "co-op", "coop"],
@@ -1850,7 +2269,7 @@ def matches_role_filters(title: str, role_filters: list[str]) -> bool:
     }
     for role in role_filters:
         for keyword in keyword_map.get(role, []):
-            if keyword in normalized:
+            if _re.search(r'\b' + _re.escape(keyword) + r'\b', normalized):
                 return True
     return False
 
@@ -1893,8 +2312,9 @@ def configure_job_service(config: Any) -> None:
     """
     global SEMANTIC_PLUGIN_ENABLED, SEMANTIC_PLUGIN_MODEL_NAME, SEMANTIC_PLUGIN_THRESHOLD, SEMANTIC_MATCH_TARGET
     global SEMANTIC_DESCRIPTION_CHAR_LIMIT, JOBBANK_MAX_SEARCH_PAGES, JOBBANK_USER_AGENT_OVERRIDE
-    global DEDUP_MAX_FIFO_FILES, DEDUP_MAX_ENTRIES_PER_FILE, DEDUP_MONTHS_THRESHOLD
+    global DEDUP_MAX_FIFO_FILES, DEDUP_MAX_ENTRIES_PER_FILE, DEDUP_MONTHS_THRESHOLD, DEDUP_SEEN_LINKS_CAP
     global HTTP_REQUEST_TIMEOUT, SUBPROCESS_SCRAPE_TIMEOUT
+    global SITE_CONCURRENCY_LIMIT, SITE_SEMAPHORE_TIMEOUT
 
     SEMANTIC_PLUGIN_ENABLED = bool(getattr(config, "semantic_enabled", SEMANTIC_PLUGIN_ENABLED))
     SEMANTIC_PLUGIN_MODEL_NAME = str(getattr(config, "semantic_model", SEMANTIC_PLUGIN_MODEL_NAME))
@@ -1906,8 +2326,13 @@ def configure_job_service(config: Any) -> None:
     DEDUP_MAX_FIFO_FILES = int(getattr(config, "dedup_max_fifo_files", DEDUP_MAX_FIFO_FILES))
     DEDUP_MAX_ENTRIES_PER_FILE = int(getattr(config, "dedup_max_entries_per_file", DEDUP_MAX_ENTRIES_PER_FILE))
     DEDUP_MONTHS_THRESHOLD = int(getattr(config, "dedup_months_threshold", DEDUP_MONTHS_THRESHOLD))
+    DEDUP_SEEN_LINKS_CAP = int(getattr(config, "dedup_seen_links_cap", DEDUP_SEEN_LINKS_CAP))
     HTTP_REQUEST_TIMEOUT = int(getattr(config, "http_timeout_seconds", HTTP_REQUEST_TIMEOUT))
     SUBPROCESS_SCRAPE_TIMEOUT = int(getattr(config, "subprocess_scrape_timeout_seconds", SUBPROCESS_SCRAPE_TIMEOUT))
+    SITE_CONCURRENCY_LIMIT = int(getattr(config, "site_concurrency_limit", SITE_CONCURRENCY_LIMIT))
+    SITE_SEMAPHORE_TIMEOUT = int(getattr(config, "site_semaphore_timeout_seconds", SITE_SEMAPHORE_TIMEOUT))
+    with _site_semaphores_lock:
+        _site_semaphores.clear()
     # Clear cached model so it re-loads with updated settings if needed
     load_semantic_plugin_model.cache_clear()
     semantic_plugin_available.cache_clear()
@@ -1958,6 +2383,26 @@ def search_text_for_semantic_match(keywords: str, location: str, role_filters: l
     return " | ".join(part for part in [str(keywords).strip(), str(location).strip(), role_text] if part)
 
 
+def _title_chunk_texts(title_text: str) -> list[str]:
+    """Return title_text plus variants with the title portion split on common delimiters.
+
+    e.g. 'Fall Co-op - Mechanical Engineering Technician | Lockheed Martin | Ottawa' yields:
+        ['Fall Co-op - Mechanical Engineering Technician | Lockheed Martin | Ottawa',
+         'Fall Co-op | Lockheed Martin | Ottawa',
+         'Mechanical Engineering Technician | Lockheed Martin | Ottawa']
+    Company/location context is preserved in each chunk so the embedder has full signal.
+    """
+    sep_idx = title_text.find(" | ")
+    title_part = title_text[:sep_idx] if sep_idx != -1 else title_text
+    context = title_text[sep_idx:] if sep_idx != -1 else ""
+    result = [title_text]
+    for sub in _TITLE_CHUNK_RE.split(title_part):
+        sub = sub.strip()
+        if sub and sub != title_part and len(sub) >= 4:
+            result.append(sub + context)
+    return result
+
+
 def semantic_similarity_score(text_a: str, text_b: str) -> float:
     model = load_semantic_plugin_model()
     if model is None:
@@ -1971,6 +2416,27 @@ def semantic_similarity_score(text_a: str, text_b: str) -> float:
         return score
     except Exception as exc:
         print(f"Semantic plugin scoring failed: {exc}")
+        return 1.0
+
+
+def semantic_similarity_score_max(texts: list[str], search_text: str) -> float:
+    """Batch-encode all texts + search_text in one pass, return the max cosine similarity."""
+    if not texts:
+        return 0.0
+    if len(texts) == 1:
+        return semantic_similarity_score(texts[0], search_text)
+    model = load_semantic_plugin_model()
+    if model is None:
+        return 1.0
+    try:
+        from sentence_transformers import util
+        all_texts = [search_text] + texts
+        embeddings = model.encode(all_texts, normalize_embeddings=True)
+        search_emb = embeddings[0]
+        scores = [float(util.cos_sim(search_emb, embeddings[i + 1]).item()) for i in range(len(texts))]
+        return max(scores)
+    except Exception as exc:
+        print(f"Semantic max-chunk scoring failed: {exc}")
         return 1.0
 
 
@@ -1992,11 +2458,11 @@ def matches_search_parameters_semantic(
 
     effective_threshold = SEMANTIC_PLUGIN_THRESHOLD if threshold is None else float(threshold)
     if SEMANTIC_MATCH_TARGET == "title" and title_text:
-        return semantic_similarity_score(title_text, search_text) >= effective_threshold
+        return semantic_similarity_score_max(_title_chunk_texts(title_text), search_text) >= effective_threshold
     if description_text:
         # Prefer description-body semantics when available to avoid title-only false positives.
         description_score = semantic_similarity_score(description_text, search_text)
         return description_score >= effective_threshold
 
-    score = semantic_similarity_score(listing_text, search_text)
-    return score >= effective_threshold
+    # Fallback: no description — chunk the title for better coverage of long/delimited titles.
+    return semantic_similarity_score_max(_title_chunk_texts(title_text or listing_text), search_text) >= effective_threshold

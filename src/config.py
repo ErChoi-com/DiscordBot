@@ -26,6 +26,7 @@ class AppConfig:
     gemini_model: str = "gemini-2.5-flash"
     gemini_resume_cache_ttl_seconds: int = 86400
     resume_normalize_json_latex: bool = True
+    resume_max_pages: int = 1
     resume_profiles_dir: Path = field(default_factory=Path)
     resume_cache_dir: Path = field(default_factory=Path)
 
@@ -49,6 +50,10 @@ class AppConfig:
     http_timeout_seconds: int = 20
     subprocess_scrape_timeout_seconds: int = 90
 
+    # ── Concurrency ──────────────────────────────────────────────────────────
+    site_concurrency_limit: int = 2
+    site_semaphore_timeout_seconds: int = 120
+
     # ── Watcher housekeeping ──────────────────────────────────────────────────
     watcher_dedupe_seconds: int = 120
     discord_history_check_limit: int = 5
@@ -58,12 +63,15 @@ class AppConfig:
     scrape_timeout_seconds: int = 20
     scrape_use_ai_cleanup: bool = True
 
+    # ── ATS scraper ───────────────────────────────────────────────────────────
+    ats_bamboohr_enabled: bool = False
+
     # ── Job-watcher defaults ──────────────────────────────────────────────────
     job_default_keywords: str = "python developer"
     job_default_location: str = "Canada"
     job_default_radius_miles: int = 25
     job_default_hours_old: int = 72
-    job_default_results_wanted: int = 10
+    job_default_results_wanted: int = 999
     job_default_refresh_seconds: int = 300
     job_default_country_indeed: str = "AUTO"
     job_default_allow_north_america: bool = False
@@ -135,6 +143,9 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
     root = (base_dir or Path(__file__).resolve().parents[1]).resolve()
     env_path = root / ".env"
     env_values = load_env(env_path)
+    # Push .env values into os.environ so service modules can reach them via os.getenv()
+    for k, v in env_values.items():
+        os.environ.setdefault(k, v)
     resumes_cache_root = root / "src" / "services" / "resumes" / "resumes_cache"
 
     # Secrets — from .env / OS environment only, never from settings.toml
@@ -180,6 +191,10 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
         )
     )
     resume_normalize_json_latex = _env_bool("RESUME_NORMALIZE_JSON_LATEX", env_values, True)
+    try:
+        resume_max_pages = max(1, int(os.getenv("RESUME_MAX_PAGES", env_values.get("RESUME_MAX_PAGES", "1"))))
+    except (TypeError, ValueError):
+        resume_max_pages = 1
 
     # Behavioral settings — from settings.toml
     s = _load_settings(root / "settings.toml")
@@ -187,6 +202,7 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
     jb = s.get("jobbank", {})
     dd = s.get("dedup", {})
     net = s.get("network", {})
+    ats = s.get("ats", {})
     wat = s.get("watcher", {})
     sc = s.get("scrape_defaults", {})
     jd = s.get("job_defaults", {})
@@ -208,6 +224,7 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
         gemini_model=gemini_model,
         gemini_resume_cache_ttl_seconds=gemini_resume_cache_ttl_seconds,
         resume_normalize_json_latex=resume_normalize_json_latex,
+        resume_max_pages=resume_max_pages,
         resume_profiles_dir=root / "resumes",
         resume_cache_dir=root / ".resume_cache",
         # semantic
@@ -226,9 +243,13 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
         # network
         http_timeout_seconds=int(net.get("http_timeout_seconds", 20)),
         subprocess_scrape_timeout_seconds=int(net.get("subprocess_scrape_timeout_seconds", 90)),
+        site_concurrency_limit=int(net.get("site_concurrency_limit", 2)),
+        site_semaphore_timeout_seconds=int(net.get("site_semaphore_timeout_seconds", 120)),
         # watcher housekeeping
         watcher_dedupe_seconds=int(wat.get("dedupe_seconds", 120)),
         discord_history_check_limit=int(wat.get("discord_history_check_limit", 5)),
+        # ats
+        ats_bamboohr_enabled=bool(ats.get("bamboohr_enabled", False)),
         # scrape defaults
         scrape_max_items=int(sc.get("max_items", 20)),
         scrape_timeout_seconds=int(sc.get("timeout_seconds", 20)),
