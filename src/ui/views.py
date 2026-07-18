@@ -169,6 +169,25 @@ def log_interaction_failure(context: str, exc: Exception) -> None:
         pass
 
 
+async def _send_view_error(
+    interaction: discord.Interaction,
+    error: Exception,
+    log_context: str,
+    retry_command: str | None = None,
+) -> None:
+    """Shared on_error body for settings views/modals: log, then tell the
+    user ephemerally (response if still open, followup otherwise). Was
+    copy-pasted per view class with only the log context and retry hint
+    varying."""
+    log_interaction_failure(log_context, error)
+    hint = f" Please run `{retry_command}` and try again." if retry_command else " Please try again."
+    message = "Interaction failed." + hint
+    if not interaction.response.is_done():
+        await interaction.response.send_message(message, ephemeral=True)
+    else:
+        await interaction.followup.send(message, ephemeral=True)
+
+
 def log_interaction_event(context: str, **fields: Any) -> None:
     try:
         log_path = Path(__file__).resolve().parents[2] / ".interaction_events.log"
@@ -247,11 +266,7 @@ class ModeDropdownView(discord.ui.View):
         self.add_item(ModeDropdown(store=store, channel_id=channel_id, owner_id=owner_id))
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[Any]) -> None:
-        log_interaction_failure("mode_dropdown_view.on_error", error)
-        if not interaction.response.is_done():
-            await interaction.response.send_message("Interaction failed. Please run `.cmd` and try again.", ephemeral=True)
-        else:
-            await interaction.followup.send("Interaction failed. Please run `.cmd` and try again.", ephemeral=True)
+        await _send_view_error(interaction, error, "mode_dropdown_view.on_error", ".cmd")
 
 
 class MaxItemsDropdown(discord.ui.Select):
@@ -324,11 +339,7 @@ class ScrapeSettingsView(discord.ui.View):
         self.add_item(AiCleanupDropdown(store=store, channel_id=channel_id, owner_id=owner_id))
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[Any]) -> None:
-        log_interaction_failure("scrape_settings_view.on_error", error)
-        if not interaction.response.is_done():
-            await interaction.response.send_message("Interaction failed. Please run `.scrapecfg` and try again.", ephemeral=True)
-        else:
-            await interaction.followup.send("Interaction failed. Please run `.scrapecfg` and try again.", ephemeral=True)
+        await _send_view_error(interaction, error, "scrape_settings_view.on_error", ".scrapecfg")
 
 
 class JobSourceDropdown(discord.ui.Select):
@@ -504,11 +515,7 @@ class JobTextModal(discord.ui.Modal, title="Edit Job Watcher"):
             await interaction.followup.send("Interaction failed while saving settings.", ephemeral=True)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
-        log_interaction_failure("job_text_modal.on_error", error)
-        if not interaction.response.is_done():
-            await interaction.response.send_message("Interaction failed. Please try again.", ephemeral=True)
-        else:
-            await interaction.followup.send("Interaction failed. Please try again.", ephemeral=True)
+        await _send_view_error(interaction, error, "job_text_modal.on_error")
 
 
 class JobExclusionTermsModal(discord.ui.Modal, title="Edit Filters"):
@@ -553,11 +560,7 @@ class JobExclusionTermsModal(discord.ui.Modal, title="Edit Filters"):
             await interaction.followup.send("Interaction failed while saving filters.", ephemeral=True)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
-        log_interaction_failure("job_exclusion_terms_modal.on_error", error)
-        if not interaction.response.is_done():
-            await interaction.response.send_message("Interaction failed. Please try again.", ephemeral=True)
-        else:
-            await interaction.followup.send("Interaction failed. Please try again.", ephemeral=True)
+        await _send_view_error(interaction, error, "job_exclusion_terms_modal.on_error")
 
 
 class JobThresholdModal(discord.ui.Modal, title="Edit Match Threshold"):
@@ -627,11 +630,7 @@ class JobThresholdModal(discord.ui.Modal, title="Edit Match Threshold"):
             await interaction.followup.send("Interaction failed while saving threshold.", ephemeral=True)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
-        log_interaction_failure("job_threshold_modal.on_error", error)
-        if not interaction.response.is_done():
-            await interaction.response.send_message("Interaction failed. Please try again.", ephemeral=True)
-        else:
-            await interaction.followup.send("Interaction failed. Please try again.", ephemeral=True)
+        await _send_view_error(interaction, error, "job_threshold_modal.on_error")
 
 
 class TemplateEditModal(discord.ui.Modal, title="Edit template.tex"):
@@ -768,11 +767,7 @@ class TemplateEditModal(discord.ui.Modal, title="Edit template.tex"):
         return ("Template updated successfully. Preview PDF attached.", preview_file)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
-        log_interaction_failure("template_edit_modal.on_error", error)
-        if not interaction.response.is_done():
-            await interaction.response.send_message("Interaction failed. Please try again.", ephemeral=True)
-        else:
-            await interaction.followup.send("Interaction failed. Please try again.", ephemeral=True)
+        await _send_view_error(interaction, error, "template_edit_modal.on_error")
 
 
 class ResumeInfoModal(discord.ui.Modal, title="Edit resume info"):
@@ -855,11 +850,7 @@ class ResumeInfoModal(discord.ui.Modal, title="Edit resume info"):
         await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
-        log_interaction_failure("resume_info_modal.on_error", error)
-        if not interaction.response.is_done():
-            await interaction.response.send_message("Interaction failed. Please try again.", ephemeral=True)
-        else:
-            await interaction.followup.send("Interaction failed. Please try again.", ephemeral=True)
+        await _send_view_error(interaction, error, "resume_info_modal.on_error")
 
 
 class JobSettingsView(discord.ui.View):
@@ -892,11 +883,7 @@ class JobSettingsView(discord.ui.View):
         self.add_item(JobRefreshDropdown(store=store, channel_id=channel_id, owner_id=owner_id))
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[Any]) -> None:
-        log_interaction_failure("job_settings_view.on_error", error)
-        if not interaction.response.is_done():
-            await interaction.response.send_message("Interaction failed. Please run `.job` and try again.", ephemeral=True)
-        else:
-            await interaction.followup.send("Interaction failed. Please run `.job` and try again.", ephemeral=True)
+        await _send_view_error(interaction, error, "job_settings_view.on_error", ".job")
 
     def _is_allowed(self, interaction: discord.Interaction) -> bool:
         user_id = interaction.user.id
@@ -1149,11 +1136,7 @@ class RedditSettingsView(discord.ui.View):
         self.add_item(RedditRefreshDropdown(store=store, channel_id=channel_id, owner_id=owner_id))
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[Any]) -> None:
-        log_interaction_failure("reddit_settings_view.on_error", error)
-        if not interaction.response.is_done():
-            await interaction.response.send_message("Interaction failed. Please run `.reddit` and try again.", ephemeral=True)
-        else:
-            await interaction.followup.send("Interaction failed. Please run `.reddit` and try again.", ephemeral=True)
+        await _send_view_error(interaction, error, "reddit_settings_view.on_error", ".reddit")
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:

@@ -168,6 +168,17 @@ _COMMAND_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
+def quiet_reply_kwargs(message: Any) -> dict[str, Any]:
+    """channel.send kwargs for a quiet threaded reply: references the invoking
+    message without pinging its author or resolving any mentions in the body.
+    One home for the literal previously copy-pasted at a dozen send sites."""
+    return {
+        "reference": message.to_reference(fail_if_not_exists=False),
+        "mention_author": False,
+        "allowed_mentions": discord.AllowedMentions.none(),
+    }
+
+
 def build_commands_cheatsheet_embed(sheet_kind: str = CHEATSHEET_KIND_GENERAL) -> discord.Embed:
     title, description = CHEATSHEET_METADATA.get(sheet_kind, CHEATSHEET_METADATA[CHEATSHEET_KIND_GENERAL])
     embed = discord.Embed(
@@ -889,9 +900,7 @@ class CommandRouter:
                 )
             except FileNotFoundError as exc:
                 await message.channel.send(f"Resume cache setup failed: {exc}",
-                                           reference=message.to_reference(fail_if_not_exists=False),
-                                           mention_author=False,
-                                           allowed_mentions=discord.AllowedMentions.none())
+                                           **quiet_reply_kwargs(message),)
                 return None
 
             try:
@@ -903,9 +912,7 @@ class CommandRouter:
             except FileNotFoundError as exc:
                 await message.channel.send(
                     f"Resume cache error: {exc}",
-                    reference=message.to_reference(fail_if_not_exists=False),
-                    mention_author=False,
-                    allowed_mentions=discord.AllowedMentions.none(),
+                    **quiet_reply_kwargs(message),
                 )
                 return None
             profile_dir = cache_root / profile_key
@@ -919,18 +926,11 @@ class CommandRouter:
             await message.channel.send(
                 f"Your resume cache folder `{profile_dir.name}` is missing required file(s): {', '.join(missing)}. "
                 "Please add them and try again.",
-                reference=message.to_reference(fail_if_not_exists=False),
-                mention_author=False,
-                allowed_mentions=discord.AllowedMentions.none(),
+                **quiet_reply_kwargs(message),
             )
             return None
 
-        reply_reference = message.to_reference(fail_if_not_exists=False)
-        reply_send_kwargs = {
-            "reference": reply_reference,
-            "mention_author": False,
-            "allowed_mentions": discord.AllowedMentions.none(),
-        }
+        reply_send_kwargs = quiet_reply_kwargs(message)
 
         if owner_profile_key_override is None:
             cache_scope = str(target_user_id)
@@ -1269,9 +1269,7 @@ class CommandRouter:
             except FileNotFoundError as exc:
                 await message.channel.send(
                     f"Resume cache error: {exc}",
-                    reference=message.to_reference(fail_if_not_exists=False),
-                    mention_author=False,
-                    allowed_mentions=discord.AllowedMentions.none(),
+                    **quiet_reply_kwargs(message),
                 )
                 return True
             profile_dir = cache_root / profile_key
@@ -1301,12 +1299,7 @@ class CommandRouter:
             label=scheduler_labels.RESUME_COMPILE_LATEX,
         )
 
-        reply_reference = message.to_reference(fail_if_not_exists=False)
-        reply_send_kwargs = {
-            "reference": reply_reference,
-            "mention_author": False,
-            "allowed_mentions": discord.AllowedMentions.none(),
-        }
+        reply_send_kwargs = quiet_reply_kwargs(message)
 
         if compile_result.status == "ok" and compile_result.pdf_bytes and compile_result.pdf_name:
             content = f"Resume check compile succeeded for profile `{profile_dir.name}`."
