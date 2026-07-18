@@ -15,6 +15,8 @@ from config import AppConfig
 from services import job_service, reddit_service
 from services.ats_service import ATS_PLATFORMS as _ATS_PLATFORMS, BAMBOOHR as _BAMBOOHR, scrape_ats_platform as _scrape_ats_platform
 from services.health import WatcherHealthTracker
+from services.priority_scheduler import BACKGROUND, PriorityWorkScheduler
+from services import scheduler_labels
 from state.store import RuntimeStore
 
 
@@ -27,11 +29,23 @@ def _safe_float(value: Any, default: float) -> float:
 
 
 class WatcherManager:
-    def __init__(self, client: discord.Client, config: AppConfig, store: RuntimeStore, health: WatcherHealthTracker) -> None:
+    def __init__(
+        self,
+        client: discord.Client,
+        config: AppConfig,
+        store: RuntimeStore,
+        health: WatcherHealthTracker,
+        scheduler: PriorityWorkScheduler | None = None,
+    ) -> None:
         self.client = client
         self.config = config
         self.store = store
         self.health = health
+        # Callers (app.py) should pass a shared scheduler so interactive
+        # commands and background watcher work actually arbitrate against
+        # each other; a private one here is only a safety net for callers
+        # (tests) that don't care about cross-domain prioritization.
+        self.scheduler = scheduler or PriorityWorkScheduler()
 
         self.channel_job_tasks: dict[int, asyncio.Task[Any]] = {}
         self.channel_reddit_tasks: dict[int, asyncio.Task[Any]] = {}
@@ -41,6 +55,7 @@ class WatcherManager:
         self.channel_send_locks: dict[tuple[int, str], asyncio.Lock] = {}
         self.cheatsheet_ensurer: Callable[[int, str], Awaitable[None]] | None = None
         self._ats_scrape_task: asyncio.Task[Any] | None = None
+        self._watchdog_task: asyncio.Task[Any] | None = None
 
         self._active_send_cycles: int = 0
         self._send_idle_event: asyncio.Event = asyncio.Event()
@@ -62,10 +77,21 @@ class WatcherManager:
             if self._active_work_cycles == 0:
                 self._work_idle_event.set()
 
-    async def _tracked_to_thread(self, fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
-        """Run fn in a thread pool and hold a work_guard for the duration."""
+    async def _tracked_to_thread(
+        self,
+        fn: Callable[..., _T],
+        *args: Any,
+        cost: float | None = None,
+        label: str | None = None,
+        **kwargs: Any,
+    ) -> _T:
+        """Run fn on the shared priority scheduler (background tier) and hold
+        a work_guard for the duration. Pass `label` so the scheduler can
+        derive `cost` from that label's actual measured median duration
+        (rolling two-day window) instead of a static guess; pass an explicit
+        `cost` only to override that."""
         async with self.work_guard():
-            return await asyncio.to_thread(fn, *args, **kwargs)
+            return await self.scheduler.run(fn, *args, tier=BACKGROUND, cost=cost, label=label, **kwargs)
 
     async def drain_active_work(self, timeout: float = 120.0) -> bool:
         """Block until all work_guard holders have released. Returns False on timeout or cancellation."""
@@ -415,6 +441,7 @@ class WatcherManager:
                     f"channel:{channel_id}",
                     bool(settings.get("allow_north_america", False)),
                     job_service.effective_jobbank_native_query(str(settings.get("jobbank_native_query") or "")),
+                    label=scheduler_labels.job_scrape_label(channel_id),
                 )
                 raw_count = len(items)
                 role_filters = list(settings.get("role_filters", []))
@@ -424,17 +451,27 @@ class WatcherManager:
                 _ats_set = set(_ATS_PLATFORMS)
                 _sem_th = _safe_float(settings.get("semantic_threshold"), 0.30)
                 _ats_th = _safe_float(settings.get("ats_semantic_threshold"), _sem_th)
-                items = [
-                    item
-                    for item in items
-                    if job_service.matches_search_parameters_semantic(
-                        item,
-                        str(settings.get("keywords") or ""),
-                        str(settings.get("location") or ""),
-                        role_filters,
-                        threshold=_ats_th if _ats_set.intersection(item.get("sites") or []) else _sem_th,
-                    )
-                ]
+
+                def _semantic_filter(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                    # SentenceTransformer inference is CPU-bound and, on first call, loads
+                    # a model from disk -- run off the event loop so it can't freeze Discord
+                    # gateway/interaction handling (this previously ran inline in the
+                    # coroutine and stalled the whole bot for tens of seconds per scrape).
+                    return [
+                        item
+                        for item in candidates
+                        if job_service.matches_search_parameters_semantic(
+                            item,
+                            str(settings.get("keywords") or ""),
+                            str(settings.get("location") or ""),
+                            role_filters,
+                            threshold=_ats_th if _ats_set.intersection(item.get("sites") or []) else _sem_th,
+                        )
+                    ]
+
+                items = await self._tracked_to_thread(
+                    _semantic_filter, items, label=scheduler_labels.semantic_filter_label(channel_id)
+                )
                 filtered_count = len(items)
                 seen = self.store.channel_job_seen.setdefault(channel_id, set())
                 batch_seen_links = {
@@ -539,6 +576,7 @@ class WatcherManager:
                 limit=int(settings["limit"]),
                 interval_seconds=max(60, int(settings.get("refresh_seconds", 300))),
                 state_file=state_file,
+                scheduler=self.scheduler,
             )
 
         if len(subreddits) == 1:
@@ -547,7 +585,6 @@ class WatcherManager:
             await asyncio.gather(*[poll_one(sub) for sub in subreddits])
 
     async def _run_ats_scrape_loop(self) -> None:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
         ATS_PLATFORMS, BAMBOOHR, scrape_ats_platform = _ATS_PLATFORMS, _BAMBOOHR, _scrape_ats_platform
         from services.jba.merge_data import log_jobs
 
@@ -607,22 +644,32 @@ class WatcherManager:
                     return []
 
             try:
-                def _scrape_all() -> list[dict[str, Any]]:
-                    results: list[dict[str, Any]] = []
-                    with ThreadPoolExecutor(max_workers=len(platforms)) as pool:
-                        futures = {pool.submit(_scrape_one, p): p for p in platforms}
-                        for future in as_completed(futures, timeout=1800):
-                            try:
-                                chunk = future.result(timeout=600)
-                            except Exception as exc:
-                                plat = futures[future]
-                                print(f"[ats-scrape] {plat} timed out or errored: {exc}")
-                                health_tracker.record_ats_platform_result(plat, 0, error=str(exc))
-                                continue
-                            results.extend(chunk)
-                    return results
+                async def _scrape_one_bounded(platform: str) -> list[dict[str, Any]]:
+                    try:
+                        return await asyncio.wait_for(
+                            self._tracked_to_thread(
+                                _scrape_one, platform, label=scheduler_labels.ats_scrape_label(platform)
+                            ),
+                            timeout=600,
+                        )
+                    except Exception as exc:
+                        print(f"[ats-scrape] {platform} timed out or errored: {exc}")
+                        health_tracker.record_ats_platform_result(platform, 0, error=str(exc))
+                        return []
 
-                all_results = await self._tracked_to_thread(_scrape_all)
+                # Each platform is its own scheduler submission (BACKGROUND tier,
+                # labeled per-platform) rather than a nested ThreadPoolExecutor --
+                # a nested pool's threads would do real concurrent CPU work fully
+                # invisible to (and uncounted by) the scheduler's own worker
+                # accounting, undermining the priority arbitration interactive
+                # commands rely on during this up-to-30-minute cycle. This also
+                # gives each platform its own measured cost instead of one
+                # blended "ats_scrape" bucket.
+                per_platform_results = await asyncio.wait_for(
+                    asyncio.gather(*[_scrape_one_bounded(p) for p in platforms]),
+                    timeout=1800,
+                )
+                all_results = [item for chunk in per_platform_results for item in chunk]
 
                 if all_results:
                     print(f"[ats-scrape] Logged {len(all_results)} jobs across {len(platforms)} platforms")
@@ -638,6 +685,66 @@ class WatcherManager:
             return
         self._ats_scrape_task = asyncio.create_task(self._run_ats_scrape_loop())
         print("[ats-scrape] Background ATS scrape loop started")
+
+    async def _run_watchdog(self, interval_seconds: int = 30) -> None:
+        """Periodically detect watchers/loops that are enabled in store but whose
+        task died (e.g. an exception escaping a loop's own try/except, such as a
+        corrupt settings read outside the guarded block) and restart them. Without
+        this, a single unexpected failure would silently kill that watcher until
+        the whole bot process restarts."""
+        while True:
+            await asyncio.sleep(interval_seconds)
+            try:
+                for channel_id, settings in list(self.store.channel_job_settings.items()):
+                    if not settings.get("enabled"):
+                        continue
+                    task = self.channel_job_tasks.get(channel_id)
+                    if task is None or task.done():
+                        print(f"[watchdog] Job watcher for channel {channel_id} is dead but enabled; restarting.")
+                        self.health.record_watchdog_restart(f"job watcher (channel {channel_id})")
+                        self.start_job_watcher(channel_id)
+
+                for channel_id, settings in list(self.store.channel_reddit_settings.items()):
+                    if not settings.get("enabled"):
+                        continue
+                    task = self.channel_reddit_tasks.get(channel_id)
+                    if task is None or task.done():
+                        print(f"[watchdog] Reddit watcher for channel {channel_id} is dead but enabled; restarting.")
+                        self.health.record_watchdog_restart(f"reddit watcher (channel {channel_id})")
+                        self.start_reddit_watcher(channel_id)
+
+                any_job_enabled = any(
+                    s.get("enabled") for s in self.store.channel_job_settings.values()
+                )
+                if any_job_enabled and (self._ats_scrape_task is None or self._ats_scrape_task.done()):
+                    print("[watchdog] ATS scrape loop is dead but job watchers are enabled; restarting.")
+                    self.health.record_watchdog_restart("ATS scrape loop")
+                    self._ensure_ats_scrape_loop()
+
+                stats = self.scheduler.stats()
+                print(
+                    "[watchdog] scheduler: "
+                    f"workers={stats['workers']} active={stats['active']} "
+                    f"queued={stats['queued']} (interactive={stats['queued_interactive']}, "
+                    f"background={stats['queued_background']}) "
+                    f"completed={stats['completed']} promoted={stats['promoted']}"
+                )
+                if stats["label_costs"]:
+                    label_summary = ", ".join(
+                        f"{label}={info['median_seconds']}s(n={info['samples']})"
+                        for label, info in sorted(stats["label_costs"].items())
+                    )
+                    print(f"[watchdog] scheduler learned costs: {label_summary}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[watchdog] cycle error: {exc}")
+
+    def ensure_watchdog(self) -> None:
+        if self._watchdog_task is not None and not self._watchdog_task.done():
+            return
+        self._watchdog_task = asyncio.create_task(self._run_watchdog())
+        print("[watchdog] Watcher supervisor started")
 
     def start_job_watcher(self, channel_id: int) -> bool:
         existing = self.channel_job_tasks.get(channel_id)

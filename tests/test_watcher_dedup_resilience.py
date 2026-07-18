@@ -11,8 +11,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from services import job_service
+from services.health import WatcherHealthTracker
 from state.store import RuntimeStore
 from watchers.manager import WatcherManager
+
+
+def _health() -> WatcherHealthTracker:
+    return WatcherHealthTracker()
 
 
 class _DummyClient:
@@ -82,7 +87,7 @@ def test_restore_enabled_watchers_purges_missing_job_channel(tmp_path: Path, mon
         222: {"https://example.invalid/b"},
     }
 
-    manager = WatcherManager(client=_DummyClient(), config=_make_config(tmp_path), store=store)
+    manager = WatcherManager(client=_DummyClient(), config=_make_config(tmp_path), store=store, health=_health())
 
     async def _fake_channel_exists(channel_id: int) -> bool:
         return channel_id != 111
@@ -110,7 +115,7 @@ def test_restore_keeps_missing_disabled_job_channel(tmp_path: Path, monkeypatch)
         222: {"https://example.invalid/live"},
     }
 
-    manager = WatcherManager(client=_DummyClient(), config=_make_config(tmp_path), store=store)
+    manager = WatcherManager(client=_DummyClient(), config=_make_config(tmp_path), store=store, health=_health())
 
     async def _fake_channel_exists(channel_id: int) -> bool:
         return channel_id != 111
@@ -131,6 +136,7 @@ def test_channel_probe_fails_open_on_unexpected_error(tmp_path: Path) -> None:
         client=_DummyClient(fetch_error=RuntimeError("temporary transport error")),
         config=_make_config(tmp_path),
         store=RuntimeStore(tmp_path / ".bot_state.json"),
+        health=_health(),
     )
 
     exists = asyncio.run(manager._channel_exists(999))
@@ -142,6 +148,7 @@ def test_channel_probe_uses_cached_channel_without_fetch(tmp_path: Path) -> None
         client=_CachedChannelClient(fetch_error=RuntimeError("should not fetch")),
         config=_make_config(tmp_path),
         store=RuntimeStore(tmp_path / ".bot_state.json"),
+        health=_health(),
     )
 
     exists = asyncio.run(manager._channel_exists(999))
@@ -153,6 +160,7 @@ def test_channel_probe_returns_false_when_fetch_returns_none(tmp_path: Path) -> 
         client=_DummyClient(fetch_result=None),
         config=_make_config(tmp_path),
         store=RuntimeStore(tmp_path / ".bot_state.json"),
+        health=_health(),
     )
 
     exists = asyncio.run(manager._channel_exists(999))
@@ -165,7 +173,7 @@ def test_purge_deleted_job_channel_removes_dedup_directory(tmp_path: Path) -> No
     store.channel_job_settings = {333: {"enabled": True}}
     store.channel_job_seen = {333: {"https://example.invalid/job"}}
 
-    manager = WatcherManager(client=_DummyClient(), config=_make_config(tmp_path), store=store)
+    manager = WatcherManager(client=_DummyClient(), config=_make_config(tmp_path), store=store, health=_health())
     listing_file = manager._dedup_listing_file(333, "job")
     dedup_dir = job_service.ensure_dedup_directory_for_listing_file(listing_file)
     (dedup_dir / "listing_0.json").write_text("123 1700000000\n", encoding="utf-8")
@@ -182,6 +190,7 @@ def test_watcher_attaches_channel_specific_listing_files(tmp_path: Path) -> None
         client=_DummyClient(),
         config=_make_config(tmp_path),
         store=RuntimeStore(tmp_path / ".bot_state.json"),
+        health=_health(),
     )
 
     a = manager._attached_listing_file(111, "job")
@@ -199,6 +208,7 @@ def test_manager_record_dedup_updates_only_target_channel_folder(tmp_path: Path)
         client=_DummyClient(),
         config=_make_config(tmp_path),
         store=RuntimeStore(tmp_path / ".bot_state.json"),
+        health=_health(),
     )
 
     listing_a = manager._attached_listing_file(111, "job")
@@ -226,6 +236,7 @@ def test_manager_job_write_does_not_touch_reddit_folder_same_channel(tmp_path: P
         client=_DummyClient(),
         config=_make_config(tmp_path),
         store=RuntimeStore(tmp_path / ".bot_state.json"),
+        health=_health(),
     )
 
     listing_job = manager._attached_listing_file(333, "job")
@@ -253,7 +264,7 @@ def test_concurrent_identical_send_is_emitted_once(tmp_path: Path) -> None:
     store = RuntimeStore(state_path)
     channel_id = 777001
     channel = _SlowSendableChannel(fail_send=False)
-    manager = WatcherManager(client=_ChannelClient(channel), config=_make_config(tmp_path), store=store)
+    manager = WatcherManager(client=_ChannelClient(channel), config=_make_config(tmp_path), store=store, health=_health())
 
     async def _run() -> tuple[bool, bool]:
         msg = "[LinkedIn] Full Stack Developer Intern - AI Solutions\nhttps://www.linkedin.com/jobs/view/4425828853"
@@ -509,7 +520,7 @@ def test_job_watcher_records_seen_and_dedup_only_after_successful_send(tmp_path:
     }
 
     channel = _SendableChannel(fail_send=False)
-    manager = WatcherManager(client=_ChannelClient(channel), config=_make_config(tmp_path), store=store)
+    manager = WatcherManager(client=_ChannelClient(channel), config=_make_config(tmp_path), store=store, health=_health())
 
     async def _noop_channel_exists(channel_id: int) -> bool:
         return True
@@ -570,7 +581,7 @@ def test_job_watcher_does_not_record_seen_or_dedup_when_send_fails(tmp_path: Pat
     }
 
     channel = _SendableChannel(fail_send=True)
-    manager = WatcherManager(client=_ChannelClient(channel), config=_make_config(tmp_path), store=store)
+    manager = WatcherManager(client=_ChannelClient(channel), config=_make_config(tmp_path), store=store, health=_health())
 
     async def _noop_channel_exists(channel_id: int) -> bool:
         return True
@@ -632,7 +643,7 @@ def test_job_watcher_dedupes_duplicate_links_within_single_scrape_batch(tmp_path
     }
 
     channel = _SendableChannel(fail_send=False)
-    manager = WatcherManager(client=_ChannelClient(channel), config=_make_config(tmp_path), store=store)
+    manager = WatcherManager(client=_ChannelClient(channel), config=_make_config(tmp_path), store=store, health=_health())
 
     async def _noop_channel_exists(channel_id: int) -> bool:
         return True
@@ -698,7 +709,7 @@ def test_job_watcher_dedupes_canonical_link_variants_within_batch(tmp_path: Path
     }
 
     channel = _SendableChannel(fail_send=False)
-    manager = WatcherManager(client=_ChannelClient(channel), config=_make_config(tmp_path), store=store)
+    manager = WatcherManager(client=_ChannelClient(channel), config=_make_config(tmp_path), store=store, health=_health())
 
     async def _noop_channel_exists(channel_id: int) -> bool:
         return True

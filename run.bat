@@ -7,9 +7,36 @@ set "LAST_START_FILE=%~dp0.last_start.txt"
 set "START_LOCK_DIR=%~dp0.start.lock"
 set "ARG_FORCERUN=0"
 set "ARG_SCHEDULER=0"
+set "ARG_REFUSE_ELEVATED=0"
 for %%A in (%*) do (
   if /i "%%~A"=="forcerun" set "ARG_FORCERUN=1"
   if /i "%%~A"=="scheduler" set "ARG_SCHEDULER=1"
+  if /i "%%~A"=="noelevated" set "ARG_REFUSE_ELEVATED=1"
+)
+
+rem Detect elevated / Session 0 execution context BEFORE any other work.
+rem Chrome profile locks created by an elevated or Session-0 owner (common with
+rem Task Scheduler "Run with highest privileges") are unkillable from a normal
+rem user session and cause recurring hidden py/chrome profile-lock churn.
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$sid = [System.Diagnostics.Process]::GetCurrentProcess().SessionId; $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); if ($sid -eq 0 -or $elevated) { Write-Output ('[run.bat] Detected session=' + $sid + ' elevated=' + $elevated); exit 30 }; exit 0"
+if errorlevel 30 (
+  if "%ARG_SCHEDULER%"=="1" (
+    echo [run.bat] Note: elevated/Session 0 context under scheduler mode - expected but profile locks made here belong to this context.
+  ) else (
+    echo [run.bat] WARNING: running elevated or in Session 0. Chrome profile locks created
+    echo [run.bat] in this context may be unkillable from a normal user session, causing
+    echo [run.bat] persistent profile-lock failures. Common cause: Task Scheduler task with
+    echo [run.bat] "Run with highest privileges". Prefer starting the bot from a normal shell.
+  )
+  if "%ARG_REFUSE_ELEVATED%"=="1" (
+    echo [run.bat] Refusing to start: noelevated flag set.
+    exit /b 1
+  )
+  if /i "%REDDIT_BOT_REFUSE_ELEVATED%"=="1" (
+    echo [run.bat] Refusing to start: REDDIT_BOT_REFUSE_ELEVATED=1.
+    exit /b 1
+  )
 )
 
 if "%ARG_FORCERUN%"=="1" if exist "%START_LOCK_DIR%" (
@@ -65,22 +92,32 @@ if not defined PYTHON_EXE (
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "Set-Content -Path $env:LAST_START_FILE -Value (Get-Date -Format o) -Encoding ascii"
 
+if not exist "%~dp0logs" mkdir "%~dp0logs"
+rem Keep one previous generation so the console log cannot grow unbounded
+rem across the daily scheduler restarts.
+if exist "%~dp0logs\bot_console.log" for %%F in ("%~dp0logs\bot_console.log") do if %%~zF GTR 5242880 (
+  copy /y "%~dp0logs\bot_console.log" "%~dp0logs\bot_console.log.1" >nul
+  type nul > "%~dp0logs\bot_console.log"
+)
+
 if defined PYTHON_EXE (
   echo [run.bat] Starting bot with: "%PYTHON_EXE%" src\app.py
   if "%ARG_SCHEDULER%"=="1" (
     echo [run.bat] Scheduler mode: running bot in foreground so Task Scheduler can enforce single instance.
-    "%PYTHON_EXE%" src\app.py
+    "%PYTHON_EXE%" src\app.py >> "%~dp0logs\bot_console.log" 2>&1
   ) else (
-    start "Discord Bot" "%PYTHON_EXE%" src\app.py
+    rem The detached window's stdout/stderr previously went nowhere, hiding
+    rem startup failures (Chrome launch, browser fallback errors, etc). Log it.
+    start "Discord Bot" cmd /c ""%PYTHON_EXE%" src\app.py >> "%~dp0logs\bot_console.log" 2>&1"
     timeout /t 1 /nobreak >nul
   )
 ) else (
   echo [run.bat] Starting bot with: py -3.11 src\app.py
   if "%ARG_SCHEDULER%"=="1" (
     echo [run.bat] Scheduler mode: running bot in foreground so Task Scheduler can enforce single instance.
-    py -3.11 src\app.py
+    py -3.11 src\app.py >> "%~dp0logs\bot_console.log" 2>&1
   ) else (
-    start "Discord Bot" py -3 src\app.py
+    start "Discord Bot" cmd /c "py -3 src\app.py >> "%~dp0logs\bot_console.log" 2>&1"
     timeout /t 1 /nobreak >nul
   )
 )

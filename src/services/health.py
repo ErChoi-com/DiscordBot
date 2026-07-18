@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import discord
@@ -89,12 +89,47 @@ class ATSScrapeHealth:
     task_alive: bool = False
 
 
+@dataclass
+class BrowserServiceHealth:
+    dispatch_saturated_count: int = 0
+    dispatch_timeout_count: int = 0
+    dispatch_yield_count: int = 0
+    session_probe_success_count: int = 0
+    session_probe_failure_count: int = 0
+    # Cumulative counts alone let one lucky early probe permanently mask a
+    # later, ongoing outage (success_count > 0 forever). Track the outcome of
+    # the most recent probe so the health indicator reflects current state.
+    last_probe_success: bool | None = None
+    resync_attempt_count: int = 0
+    resync_success_count: int = 0
+    active_profile_path: str = ""
+    last_event_at: float = 0.0
+
+
+@dataclass
+class WatchdogRestart:
+    timestamp: float
+    target: str
+
+
+@dataclass
+class WatchdogHealth:
+    total_restarts: int = 0
+    last_restart_at: float = 0.0
+    last_restart_target: str = ""
+    recent_restarts: list[WatchdogRestart] = field(default_factory=list)
+
+
 class WatcherHealthTracker:
     MAX_RECENT_EVENTS = 8
+
+    MAX_RECENT_RESTARTS = 8
 
     def __init__(self) -> None:
         self._job: dict[int, JobWatcherHealth] = {}
         self._ats: ATSScrapeHealth = ATSScrapeHealth()
+        self._browser: BrowserServiceHealth = BrowserServiceHealth()
+        self._watchdog: WatchdogHealth = WatchdogHealth()
         self._started_at: float = time.time()
 
     # ── Job watcher ──────────────────────────────────────────────────────────
@@ -185,6 +220,51 @@ class WatcherHealthTracker:
     def get_ats_health(self) -> ATSScrapeHealth:
         return self._ats
 
+    # ── Browser/Playwright ───────────────────────────────────────────────────
+
+    def record_browser_event(self, event: str, value: object = None) -> None:
+        """Telemetry sink registered with browser_service.set_health_hook().
+        Runs on the browser fetch path's calling thread -- must stay fast and
+        must never raise."""
+        b = self._browser
+        b.last_event_at = time.time()
+        if event == "dispatch_saturated":
+            b.dispatch_saturated_count += 1
+        elif event == "dispatch_timeout":
+            b.dispatch_timeout_count += 1
+        elif event == "dispatch_yield":
+            b.dispatch_yield_count += 1
+        elif event == "session_probe":
+            b.last_probe_success = bool(value)
+            if value:
+                b.session_probe_success_count += 1
+            else:
+                b.session_probe_failure_count += 1
+        elif event == "resync_attempt":
+            b.resync_attempt_count += 1
+            if value:
+                b.resync_success_count += 1
+        elif event == "active_profile":
+            b.active_profile_path = str(value or "")
+
+    def get_browser_health(self) -> BrowserServiceHealth:
+        return self._browser
+
+    # ── Watchdog ─────────────────────────────────────────────────────────────
+
+    def record_watchdog_restart(self, target: str) -> None:
+        """Called when the watchdog detects a dead-but-enabled watcher/loop and restarts it."""
+        w = self._watchdog
+        w.total_restarts += 1
+        w.last_restart_at = time.time()
+        w.last_restart_target = target
+        w.recent_restarts.append(WatchdogRestart(w.last_restart_at, target))
+        if len(w.recent_restarts) > self.MAX_RECENT_RESTARTS:
+            w.recent_restarts.pop(0)
+
+    def get_watchdog_health(self) -> WatchdogHealth:
+        return self._watchdog
+
     # ── Bot-level ────────────────────────────────────────────────────────────
 
     def bot_uptime_s(self) -> float:
@@ -192,6 +272,22 @@ class WatcherHealthTracker:
 
 
 # ── Discord embed builders ────────────────────────────────────────────────────
+
+
+def _format_queue_field(scheduler_stats: dict[str, Any]) -> str:
+    queued = scheduler_stats.get("queued", 0)
+    queued_interactive = scheduler_stats.get("queued_interactive", 0)
+    queued_background = scheduler_stats.get("queued_background", 0)
+    active = scheduler_stats.get("active", 0)
+    workers = scheduler_stats.get("workers", 0)
+    completed = scheduler_stats.get("completed", 0)
+    promoted = scheduler_stats.get("promoted", 0)
+    icon = "🟢" if queued == 0 else "🟡" if queued < workers else "🔴"
+    lines = [
+        f"{icon} Queued: **{queued}** ({queued_interactive} interactive / {queued_background} background)",
+        f"Active: **{active}**/{workers} workers · Completed: **{completed}** · Aged-up: **{promoted}**",
+    ]
+    return "\n".join(lines)
 
 
 def build_channel_health_embed(
@@ -202,6 +298,7 @@ def build_channel_health_embed(
     reddit_task_alive: bool,
     active_job_watchers: int,
     active_reddit_watchers: int,
+    scheduler_stats: dict[str, Any] | None = None,
 ) -> list[discord.Embed]:
     import discord as _discord
 
@@ -293,6 +390,9 @@ def build_channel_health_embed(
     reddit_status = "🟢 Running" if reddit_task_alive else "⭕ Not active"
     main.add_field(name="Reddit Watcher", value=reddit_status, inline=True)
 
+    if scheduler_stats is not None:
+        main.add_field(name="Work Queue", value=_format_queue_field(scheduler_stats), inline=False)
+
     # ATS embed
     ats_color = _discord.Color.blurple() if ats.task_alive else _discord.Color.dark_gray()
     ats_embed = _discord.Embed(title="ATS Scrape Loop", color=ats_color)
@@ -328,6 +428,7 @@ def build_all_health_embed(
     channel_names: dict[int, str],
     active_job_watchers: int,
     active_reddit_watchers: int,
+    scheduler_stats: dict[str, Any] | None = None,
 ) -> discord.Embed:
     import discord as _discord
 
@@ -345,7 +446,6 @@ def build_all_health_embed(
     all_health = tracker.all_job_health()
     if not all_health:
         embed.add_field(name="Job Watchers", value="No watchers tracked yet.", inline=False)
-        return embed
 
     lines = []
     for channel_id, health in sorted(all_health.items()):
@@ -366,11 +466,12 @@ def build_all_health_embed(
         err_str = f" · {err} err" if err > 0 else ""
         lines.append(f"{icon} **#{name}** — {sent} sent · last {ago}{err_str}")
 
-    embed.add_field(
-        name=f"Job Watchers ({len(lines)})",
-        value="\n".join(lines) or "None",
-        inline=False,
-    )
+    if lines:
+        embed.add_field(
+            name=f"Job Watchers ({len(lines)})",
+            value="\n".join(lines),
+            inline=False,
+        )
 
     ats = tracker.get_ats_health()
     ats_icon = "🟢" if ats.task_alive else "🔴"
@@ -384,5 +485,41 @@ def build_all_health_embed(
         ),
         inline=False,
     )
+
+    browser = tracker.get_browser_health()
+    # last_probe_success reflects current state; the old check (any success
+    # ever) let one early success permanently mask a later, ongoing outage.
+    if browser.last_probe_success is None:
+        browser_icon = "⚪"  # no probe yet
+    elif browser.last_probe_success:
+        browser_icon = "🟢"
+    else:
+        browser_icon = "🔴"
+    profile_name = browser.active_profile_path.rsplit("\\", 1)[-1] or "n/a"
+    embed.add_field(
+        name="Browser (Playwright)",
+        value=(
+            f"{browser_icon} profile: `{profile_name}` · "
+            f"saturated: {browser.dispatch_saturated_count} · "
+            f"timeouts: {browser.dispatch_timeout_count} · "
+            f"yielded to priority: {browser.dispatch_yield_count} · "
+            f"probes: {browser.session_probe_success_count}✓/{browser.session_probe_failure_count}✗ · "
+            f"resyncs: {browser.resync_success_count}/{browser.resync_attempt_count}"
+        ),
+        inline=False,
+    )
+
+    watchdog = tracker.get_watchdog_health()
+    watchdog_icon = "🟢" if watchdog.total_restarts == 0 else "🟡"
+    watchdog_lines = [
+        f"{watchdog_icon} Auto-restarts: **{watchdog.total_restarts}** · last {_fmt_ago(watchdog.last_restart_at)}"
+    ]
+    if watchdog.recent_restarts:
+        for entry in reversed(watchdog.recent_restarts[-5:]):
+            watchdog_lines.append(f"  • {_fmt_ago(entry.timestamp)} — {entry.target}")
+    embed.add_field(name="Watchdog", value="\n".join(watchdog_lines), inline=False)
+
+    if scheduler_stats is not None:
+        embed.add_field(name="Work Queue", value=_format_queue_field(scheduler_stats), inline=False)
 
     return embed

@@ -12,6 +12,7 @@ from commands.handlers import CommandRouter
 from config import load_config
 from services import job_service
 from services.health import WatcherHealthTracker
+from services.priority_scheduler import PriorityWorkScheduler
 from services.resumes.resume import migrate_legacy_profile_keys_with_usernames
 from services import browser_service
 from state.store import RuntimeStore, init_store_defaults
@@ -188,6 +189,11 @@ def bind_client_events(
     async def slash_resumebuild(interaction: discord.Interaction, message_id: int | None = None) -> None:
         await _run_slash_command(interaction, "/resumebuild", reference_message_id=message_id)
 
+    @client.tree.command(name="resumecoverbuild", description="Generate a cover letter covering what the tailored resume left out")
+    @discord.app_commands.describe(message_id="Job listing message ID from ErnestBot")
+    async def slash_resumecoverbuild(interaction: discord.Interaction, message_id: int | None = None) -> None:
+        await _run_slash_command(interaction, "/resumecoverbuild", reference_message_id=message_id)
+
     @client.tree.command(name="resumecheck", description="Compile your current cached template into a PDF")
     async def slash_resumecheck(interaction: discord.Interaction) -> None:
         await _run_slash_command(interaction, "/resumecheck")
@@ -251,6 +257,7 @@ def bind_client_events(
         nonlocal slash_synced
         restored = await watcher_manager.restore_enabled_watchers()
         print("Restored scraper processes: " f"jobs={restored['job']}, reddit={restored['reddit']}")
+        watcher_manager.ensure_watchdog()
         if not slash_synced:
             try:
                 if force_sync_once and sync_guild_id is not None:
@@ -342,6 +349,8 @@ def run_bot() -> None:
             print(f"Another runtime owner is active (pid={owner_pid}).")
         raise SystemExit(0)
 
+    health = WatcherHealthTracker()
+    browser_service.set_health_hook(health.record_browser_event)
     browser_service.start()
 
     # Push settings.toml values into service/store module globals
@@ -350,11 +359,14 @@ def run_bot() -> None:
 
     store = RuntimeStore(config.state_path)
     store.load()
-
-    health = WatcherHealthTracker()
     client = create_client()
-    watcher_manager = WatcherManager(client=client, config=config, store=store, health=health)
-    router = CommandRouter(client=client, config=config, store=store, watcher_manager=watcher_manager, health=health)
+    # Single shared scheduler: the priority arbitration between interactive
+    # commands (.resumebuild) and background watcher work (job/reddit/ATS
+    # scraping, semantic filtering) only works if both sides submit to the
+    # same queue. Sized to all usable CPU cores.
+    scheduler = PriorityWorkScheduler()
+    watcher_manager = WatcherManager(client=client, config=config, store=store, health=health, scheduler=scheduler)
+    router = CommandRouter(client=client, config=config, store=store, watcher_manager=watcher_manager, health=health, scheduler=scheduler)
     watcher_manager.set_cheatsheet_ensurer(router.ensure_commands_cheatsheet_pinned)
     sync_guild_id_raw = (
         os.getenv("DISCORD_SYNC_GUILD_ID")
@@ -407,6 +419,11 @@ def run_bot() -> None:
         client.run(config.discord_token)
     finally:
         browser_service.stop()
+        # By the time we get here, _graceful_close already drained work_guard
+        # holders (background watcher work and, now, interactive commands --
+        # see CommandRouter._run_interactive), so waiting here should return
+        # almost immediately; it's a bounded safety net, not the primary drain.
+        scheduler.shutdown(wait=True)
         unregister_current_process(config.pid_path)
         release_runtime_lock(config.lock_path)
 

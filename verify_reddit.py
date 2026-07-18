@@ -5,7 +5,7 @@ Run from the project root:
     python verify_reddit.py
 
 What it checks:
-  1. Which bypass layers are active (PRAW creds / SOCKS5 proxy / curl_cffi)
+  1. Which bypass layers are active (SOCKS5 proxy / curl_cffi)
   2. Whether Reddit actually responds with posts
   3. Proxy connectivity independently
 """
@@ -29,8 +29,6 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from services.reddit_service import (
     _CURL_CFFI_AVAILABLE,
-    _PRAW_AVAILABLE,
-    _build_praw_reddit,
     parse_proxy_pool,
     pick_proxy,
     scrape_subreddit_media,
@@ -44,12 +42,11 @@ def section(title: str) -> None:
     print(f"\n{DIVIDER}\n{title}\n{DIVIDER}")
 
 
-def check_layer_status() -> tuple[bool, bool, bool]:
-    """Returns (praw_ready, proxy_ready, cffi_ready)."""
-    praw_ready = _PRAW_AVAILABLE and _build_praw_reddit() is not None
+def check_layer_status() -> tuple[bool, bool]:
+    """Returns (proxy_ready, cffi_ready)."""
     proxy_pool = parse_proxy_pool(os.getenv("REDDIT_PROXIES", ""))
     proxy_ready = bool(proxy_pool)
-    return praw_ready, proxy_ready, _CURL_CFFI_AVAILABLE
+    return proxy_ready, _CURL_CFFI_AVAILABLE
 
 
 def test_proxy_connectivity(proxy_url: str) -> tuple[bool, int | None, str]:
@@ -87,20 +84,16 @@ def test_reddit(proxy_url: str | None = None) -> tuple[bool, str]:
 
 def main() -> None:
     section("Layer status")
-    praw_ready, proxy_ready, cffi_ready = check_layer_status()
+    proxy_ready, cffi_ready = check_layer_status()
 
-    praw_status = "READY" if praw_ready else ("installed, no credentials" if _PRAW_AVAILABLE else "not installed")
     proxy_pool = parse_proxy_pool(os.getenv("REDDIT_PROXIES", ""))
     proxy_status = f"READY — {len(proxy_pool)} server(s): {proxy_pool}" if proxy_ready else "not configured (REDDIT_PROXIES is empty)"
     cffi_status = "READY" if cffi_ready else "not installed"
 
-    print(f"  PRAW OAuth  : {praw_status}")
     print(f"  Proxy pool  : {proxy_status}")
     print(f"  curl_cffi   : {cffi_status}")
 
     active = []
-    if praw_ready:
-        active.append("PRAW OAuth")
     if proxy_ready and cffi_ready:
         active.append("curl_cffi + proxy")
     elif proxy_ready:
@@ -128,25 +121,21 @@ def main() -> None:
     section("Summary")
     if ok:
         print("  Reddit scraper is working.")
-        if praw_ready:
-            print("  Using PRAW OAuth (most reliable).")
-        elif proxy_ready:
+        if proxy_ready:
             print("  Using SOCKS5 proxy.")
         print("\n  No further action needed — start the bot normally.")
     else:
         print("  Reddit scraper is BLOCKED.")
         print()
-        if not praw_ready:
-            print("  To fix - Option A (recommended):")
-            print("    1. Register a Reddit 'script' app at reddit.com/prefs/apps")
-            print("    2. Add REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET to .env")
         if not proxy_ready:
-            print()
-            print("  To fix - Option B (SOCKS5 proxy):")
+            print("  To fix - SOCKS5 proxy:")
             print("    1. Get SOCKS5 proxy credentials from your provider")
             print("    2. In .env set:")
             print("       REDDIT_PROXIES=socks5://USER:PASS@HOST:PORT")
             print("    3. Re-run: python verify_reddit.py")
+        print()
+        print("  Also check the Playwright/Chrome session layer (browser_service):")
+        print("    Run: python setup_reddit_browser.py")
 
 
 if __name__ == "__main__":

@@ -3,6 +3,9 @@ One-time setup: log into Reddit using the bot's Chrome profile.
 Optionally copies an existing Chrome profile's session first (if you're already logged in there).
 Run once — the bot uses the saved session automatically on every start.
 
+Do NOT run this while the bot is running: validation launches the same runtime
+Chrome profile the bot uses, and two owners of that profile will conflict.
+
 Usage:
     python setup_reddit_browser.py
 """
@@ -13,6 +16,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 try:
     from playwright.sync_api import sync_playwright
@@ -101,6 +106,25 @@ def _has_reddit_session() -> bool:
         return len(rows) > 0
     except Exception:
         return False
+
+
+def _validate_with_browser_service() -> bool:
+    """Authoritative check: start browser_service exactly as the bot does
+    (harvest/sync into the runtime profile, launch it, probe an authenticated
+    Reddit endpoint). Success here means the bot's own session check passes."""
+    from services import browser_service
+
+    try:
+        if not browser_service.start(profile_path=str(BOT_PROFILE)):
+            print("[setup] browser_service failed to start for validation.")
+            return False
+        # start() already ran the authenticated probe; session_valid() holds its verdict.
+        return browser_service.session_valid()
+    finally:
+        try:
+            browser_service.stop()
+        except Exception:
+            pass
 
 
 def _launch_chrome_profile() -> subprocess.Popen | None:
@@ -195,18 +219,27 @@ def main() -> None:
             if choice == len(profiles) + 1:
                 break
 
-    # Always open for login — either the copy had a session (skips straight through)
-    # or user needs to log in manually
+    # Fast local pre-check decides whether the interactive login step is needed;
+    # the authoritative verdict is always the authenticated probe below, which
+    # runs the exact same code path the bot uses at startup.
     if _has_reddit_session():
-        print("\nReddit session already detected in bot profile — skipping login step.")
-        print("Done. Bot is ready.")
+        print("\nReddit session cookie detected in bot profile — validating with authenticated probe...")
+        if _validate_with_browser_service():
+            print("Setup complete: Reddit session verified via authenticated probe. Bot is ready.")
+            return
+        print("Cookie present but Reddit rejected the session (revoked/rotated). Opening login...")
+
+    if not _open_for_login():
+        print("\nNo session detected. Make sure you're fully logged in before pressing Enter.")
+        sys.exit(1)
+
+    print("\nValidating session with authenticated probe (launches the bot's runtime profile)...")
+    if _validate_with_browser_service():
+        print("Reddit session confirmed via authenticated probe. Bot is ready.")
     else:
-        logged_in = _open_for_login()
-        if logged_in:
-            print("\nReddit session confirmed. Bot is ready.")
-        else:
-            print("\nNo session detected. Make sure you're fully logged in before pressing Enter.")
-            sys.exit(1)
+        print("Session validation FAILED: Reddit did not recognize the saved session.")
+        print("Re-run setup and make sure you complete the login before pressing Enter.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
