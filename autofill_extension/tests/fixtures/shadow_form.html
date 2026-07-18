@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Shadow DOM form fixture</title>
+</head>
+<body>
+  <shadow-field-group></shadow-field-group>
+
+  <script>
+    class ShadowFieldGroup extends HTMLElement {
+      constructor() {
+        super();
+        const root = this.attachShadow({ mode: "open" });
+        root.innerHTML = `
+          <form id="application">
+            <label for="firstName">First Name</label>
+            <input id="firstName" name="first_name" type="text" />
+            <label for="email">Email</label>
+            <input id="email" name="email" type="email" />
+          </form>
+        `;
+      }
+    }
+    customElements.define("shadow-field-group", ShadowFieldGroup);
+  </script>
+</body>
+</html>

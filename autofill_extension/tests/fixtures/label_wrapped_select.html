@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<!-- Mirrors Lever's real apply-form markup (verified live on
+     jobs.lever.co 2026-07): a <label> wraps BOTH the question text and
+     the control, so label.textContent includes the select's entire
+     option list. The country list contains "United States" and
+     "Georgia" - /state/i then matches inside the option text and a
+     profile whose region is "Georgia" (a US state AND a country) gets
+     written into a country dropdown. Regression fixture for
+     scanner.js textOfLabelElement. -->
+<head>
+  <meta charset="utf-8" />
+  <title>Label-wrapped select fixture</title>
+</head>
+<body>
+  <form>
+    <ul>
+      <li class="application-question">
+        <label>
+          <div class="application-label">Full name</div>
+          <div class="application-field"><input type="text" name="name" /></div>
+        </label>
+      </li>
+      <li class="application-question">
+        <label>
+          <div class="application-label">What is your location?</div>
+          <div class="application-field">
+            <div class="application-dropdown">
+              <select name="candidate-location" data-qa="candidate-location-select">
+                <option value="">Select...</option>
+                <option value="CA">Canada</option>
+                <option value="GE">Georgia</option>
+                <option value="US">United States</option>
+              </select>
+            </div>
+          </div>
+        </label>
+      </li>
+      <li class="application-question">
+        <label>
+          <div class="application-label">Country</div>
+          <div class="application-field">
+            <div class="application-dropdown">
+              <select name="country-select">
+                <option value="">Select...</option>
+                <option value="CA">Canada</option>
+                <option value="US">United States</option>
+              </select>
+            </div>
+          </div>
+        </label>
+      </li>
+    </ul>
+  </form>
+</body>
+</html>

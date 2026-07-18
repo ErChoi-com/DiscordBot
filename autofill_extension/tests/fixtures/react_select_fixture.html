@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<!-- REAL react-select (v5, via esm.sh CDN), not a homemade imitation:
+     the whole point is exercising the actual library's semantics -
+     opens on mousedown, filters via input events on a role="combobox"
+     input, renders [role="option"] divs, selects on option click.
+     Hidden #*-value mirrors exist purely so the test can assert what
+     the React state actually holds (hidden inputs are invisible to the
+     scanner, so they never interfere with the fill under test). -->
+<head>
+  <meta charset="utf-8" />
+  <title>react-select fixture</title>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module">
+    import React from "https://esm.sh/react@18";
+    import { createRoot } from "https://esm.sh/react-dom@18/client";
+    import Select from "https://esm.sh/react-select@5?deps=react@18,react-dom@18";
+
+    const h = React.createElement;
+
+    const FIELDS = [
+      {
+        id: "country",
+        label: "Country",
+        options: [
+          { value: "us", label: "United States" },
+          { value: "ca", label: "Canada" },
+          { value: "uk", label: "United Kingdom" },
+          { value: "ge", label: "Georgia" },
+        ],
+      },
+      {
+        id: "years",
+        label: "How many years of professional experience do you have?",
+        options: [
+          { value: "lt1", label: "Less than 1 year" },
+          { value: "b24", label: "2-4 years" },
+          { value: "gt5", label: "5+ years" },
+        ],
+      },
+      {
+        id: "gender",
+        label: "Gender",
+        options: [
+          { value: "m", label: "Male" },
+          { value: "f", label: "Female" },
+          { value: "nb", label: "Non-binary" },
+          { value: "pnts", label: "Prefer not to say" },
+        ],
+      },
+      {
+        // Precision control: nothing in an applicant profile maps here.
+        id: "tshirt",
+        label: "T-shirt size",
+        options: [
+          { value: "s", label: "Small" },
+          { value: "m", label: "Medium" },
+          { value: "l", label: "Large" },
+        ],
+      },
+    ];
+
+    function App() {
+      const [picked, setPicked] = React.useState({});
+      return h(
+        "div",
+        null,
+        FIELDS.map((f) =>
+          h(
+            "div",
+            { key: f.id, style: { margin: "12px", maxWidth: "400px" } },
+            h("label", { htmlFor: `${f.id}-input` }, f.label),
+            h(Select, {
+              inputId: `${f.id}-input`,
+              instanceId: f.id,
+              options: f.options,
+              classNamePrefix: "rs",
+              onChange: (opt) => setPicked((prev) => ({ ...prev, [f.id]: opt ? opt.value : "" })),
+            }),
+            h("input", { type: "hidden", id: `${f.id}-value`, value: picked[f.id] || "", readOnly: true })
+          )
+        )
+      );
+    }
+
+    createRoot(document.getElementById("root")).render(h(App));
+  </script>
+</body>
+</html>

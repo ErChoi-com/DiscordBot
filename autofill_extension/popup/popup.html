@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Application Autofill</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <span class="app-header__mark" aria-hidden="true">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+          <path d="M2 4.5A2.5 2.5 0 0 1 4.5 2h7A2.5 2.5 0 0 1 14 4.5v7a2.5 2.5 0 0 1-2.5 2.5h-7A2.5 2.5 0 0 1 2 11.5v-7Z" stroke="currentColor" stroke-width="1.3"/>
+          <path d="M5 8.2 7 10.2 11 5.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </span>
+      <h1 class="app-header__title">Autofill</h1>
+      <button id="openOptions" class="icon-button" type="button" title="Manage profiles" aria-label="Manage profiles">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+          <path d="M8 10.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4Z" stroke="currentColor" stroke-width="1.2"/>
+          <path d="M12.9 8.6c.03-.2.05-.4.05-.6s-.02-.4-.05-.6l1.2-1a.4.4 0 0 0 .1-.5l-1.1-1.9a.4.4 0 0 0-.48-.18l-1.4.56a4.4 4.4 0 0 0-1.03-.6l-.2-1.5a.4.4 0 0 0-.4-.34H7.46a.4.4 0 0 0-.4.34l-.2 1.5c-.38.14-.72.34-1.03.6l-1.4-.56a.4.4 0 0 0-.48.18L2.85 5.9a.4.4 0 0 0 .1.5l1.2 1a4.6 4.6 0 0 0 0 1.2l-1.2 1a.4.4 0 0 0-.1.5l1.1 1.9c.1.17.3.24.48.18l1.4-.56c.31.26.65.46 1.03.6l.2 1.5c.03.2.2.34.4.34h2.18c.2 0 .37-.14.4-.34l.2-1.5c.38-.14.72-.34 1.03-.6l1.4.56c.18.06.38 0 .48-.18l1.1-1.9a.4.4 0 0 0-.1-.5l-1.2-1Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </header>
+
+    <main class="app-body">
+      <div id="emptyState" class="empty-state" hidden>
+        <p class="empty-state__text">No profile set up yet.</p>
+        <button id="emptyStateSetup" class="button button--primary" type="button">Set up a profile</button>
+      </div>
+
+      <div id="mainState" class="main-state" hidden>
+        <label class="field-label" for="profileSelect">Profile</label>
+        <select id="profileSelect" class="select"></select>
+
+        <button id="fillButton" class="button button--primary button--block" type="button">
+          Fill this page
+        </button>
+
+        <div id="resultPanel" class="result-panel" hidden>
+          <div class="result-panel__row">
+            <span class="stat stat--filled"><span id="filledCount">0</span> filled</span>
+            <span class="stat stat--skipped"><span id="skippedCount">0</span> skipped</span>
+          </div>
+          <ul id="skippedList" class="skipped-list"></ul>
+        </div>
+
+        <p id="statusMessage" class="status-message" hidden></p>
+      </div>
+    </main>
+  </div>
+
+  <script src="../shared/schema.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

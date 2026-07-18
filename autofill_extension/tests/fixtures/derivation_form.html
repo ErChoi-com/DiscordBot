@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<!-- Derivation-layer fixture: every fillable answer here must be
+     EXTRAPOLATED from profile facts (experience dates, education
+     entries, work-authorization booleans), none is stored literally.
+     Includes the polarity trap pair copied from a real Lever posting:
+     "authorized ... without sponsorship" (answer: Yes) next to
+     "require sponsorship" (answer: No) - a /sponsor/-first keyword
+     table answers the first one backwards. Also includes deliberate
+     REFUSALS (salary) that must stay blank. -->
+<head>
+  <meta charset="utf-8" />
+  <title>Derivation form fixture</title>
+</head>
+<body>
+  <form id="application">
+    <label for="currentCompany">Current company</label>
+    <input id="currentCompany" name="current_company" type="text" />
+
+    <label for="currentTitle">Current job title</label>
+    <input id="currentTitle" name="current_title" type="text" />
+
+    <label for="yearsExperience">How many years of professional experience do you have?</label>
+    <input id="yearsExperience" name="years_experience" type="number" />
+
+    <label for="educationLevel">Highest level of education</label>
+    <select id="educationLevel" name="education_level">
+      <option value="">Select...</option>
+      <option value="hs">High School or equivalent</option>
+      <option value="assoc">Associate Degree</option>
+      <option value="bach">Bachelor's Degree</option>
+      <option value="mast">Master's Degree</option>
+      <option value="phd">Doctorate</option>
+    </select>
+
+    <label for="gradYear">Graduation year</label>
+    <input id="gradYear" name="graduation_year" type="text" />
+
+    <!-- REFUSAL: salary is never derivable; wrong-confident < blank. -->
+    <label for="salary">Desired salary</label>
+    <input id="salary" name="desired_salary" type="text" />
+
+    <label for="race">Race/Ethnicity</label>
+    <select id="race" name="race">
+      <option value="">Select...</option>
+      <option value="his">Hispanic or Latino</option>
+      <option value="wh">White</option>
+      <option value="bl">Black or African American</option>
+      <option value="decline">Decline to self-identify</option>
+    </select>
+
+    <!-- preferences.*: answered ONLY when the user stated the fact
+         (typed into the profile or extracted from their description
+         text) - all of these stay untouched for a profile without
+         preferences. -->
+    <label for="referralSource">How did you hear about us?</label>
+    <select id="referralSource" name="referral_source">
+      <option value="">Select...</option>
+      <option value="li">LinkedIn</option>
+      <option value="indeed">Indeed</option>
+      <option value="ref">Referral</option>
+      <option value="other">Other</option>
+    </select>
+
+    <label for="workMode">Work arrangement preference</label>
+    <select id="workMode" name="work_mode">
+      <option value="">Select...</option>
+      <option value="remote">Remote</option>
+      <option value="hybrid">Hybrid</option>
+      <option value="onsite">On-site</option>
+    </select>
+
+    <fieldset>
+      <legend>Are you willing to relocate?</legend>
+      <label><input type="radio" name="willing_relocate" value="Yes" /> Yes</label>
+      <label><input type="radio" name="willing_relocate" value="No" /> No</label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Are you authorized to work in the United States without sponsorship?</legend>
+      <label><input type="radio" name="auth_without_sponsor" value="Yes" /> Yes</label>
+      <label><input type="radio" name="auth_without_sponsor" value="No" /> No</label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Will you now or in the future require sponsorship for employment visa status?</legend>
+      <label><input type="radio" name="needs_sponsorship" value="Yes" /> Yes</label>
+      <label><input type="radio" name="needs_sponsorship" value="No" /> No</label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Are you legally authorized to work in Canada?</legend>
+      <label><input type="radio" name="work_auth_ca" value="Yes" /> Yes</label>
+      <label><input type="radio" name="work_auth_ca" value="No" /> No</label>
+    </fieldset>
+  </form>
+</body>
+</html>

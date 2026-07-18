@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>LLM tier fixture</title>
+</head>
+<body>
+  <form id="application">
+    <label for="firstName">First Name</label>
+    <input id="firstName" name="first_name" type="text" />
+
+    <!-- Nothing in Tier 1's regex table maps to this - a real free-text
+         prompt an ATS form asks that only the LLM tier (or a human) can
+         answer from context, not a fixed field-name pattern. -->
+    <label for="pyYears">Years of Python experience</label>
+    <input id="pyYears" name="py_years" type="text" />
+
+    <label for="howHeard">How did you hear about us?</label>
+    <select id="howHeard" name="how_heard">
+      <option value="">Select...</option>
+      <option value="linkedin">LinkedIn</option>
+      <option value="referral">Referral</option>
+      <option value="other">Other</option>
+    </select>
+  </form>
+</body>
+</html>

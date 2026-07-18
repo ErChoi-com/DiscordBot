@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Masked input fixture</title>
+</head>
+<body>
+  <form id="application">
+    <label for="phone">Phone</label>
+    <input id="phone" name="phone" type="text" />
+  </form>
+
+  <script>
+    // Simulates a strict masked-input library (react-input-mask / imask
+    // style): validates per keystroke and REJECTS a bulk value change
+    // (more than one digit arriving in a single input event resets the
+    // field) - this is the exact failure mode filler.js's keystroke
+    // fallback exists to survive.
+    const phone = document.getElementById("phone");
+    let lastDigits = "";
+
+    function formatPhone(digits) {
+      if (digits.length <= 3) return digits;
+      if (digits.length <= 6) return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
+      return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6, 10)}`;
+    }
+
+    phone.addEventListener("input", () => {
+      const rawDigits = phone.value.replace(/\D/g, "").slice(0, 10);
+      const addedCount = rawDigits.length - lastDigits.length;
+      if (addedCount > 1) {
+        phone.value = formatPhone(lastDigits);
+        return;
+      }
+      lastDigits = rawDigits;
+      phone.value = formatPhone(lastDigits);
+    });
+  </script>
+</body>
+</html>

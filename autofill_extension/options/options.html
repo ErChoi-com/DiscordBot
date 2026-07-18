@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Application Autofill — Profiles</title>
+  <link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <h1 class="app-header__title">Application Autofill</h1>
+      <p class="app-header__subtitle">Profiles are stored only in this browser. Nothing leaves this device.</p>
+    </header>
+
+    <div class="layout">
+      <aside class="profile-list">
+        <ul id="profileList" class="profile-list__items"></ul>
+        <button id="newProfileButton" class="button button--ghost button--block" type="button">+ New profile</button>
+      </aside>
+
+      <main class="editor">
+        <div class="editor__row">
+          <label class="field-label" for="profileIdInput">Profile ID</label>
+          <input id="profileIdInput" class="text-input" type="text" placeholder="e.g. jane-doe" />
+        </div>
+
+        <div class="editor__row editor__row--grow">
+          <div class="editor__row-header">
+            <label class="field-label" for="profileJson">Profile JSON</label>
+            <button id="loadTemplateButton" class="link-button" type="button">Insert blank template</button>
+          </div>
+          <textarea id="profileJson" class="json-textarea" spellcheck="false"></textarea>
+        </div>
+
+        <p id="validationMessage" class="validation-message" hidden></p>
+
+        <div class="editor__actions">
+          <button id="saveButton" class="button button--primary" type="button">Save profile</button>
+          <button id="deleteButton" class="button button--danger" type="button">Delete</button>
+          <span id="savedNotice" class="saved-notice" hidden>Saved</span>
+        </div>
+      </main>
+    </div>
+
+    <details class="llm-section" id="importSection">
+      <summary class="llm-section__summary">Import from resume + description</summary>
+      <p class="llm-section__hint">
+        Paste your resume as plain text, plus (optionally) a freeform description of facts a resume
+        doesn't carry — work authorization, salary expectations, notice period, relocation, how you
+        hear about roles. Everything is parsed locally with rules, no AI involved, and nothing is
+        saved until you review the result in the Profile JSON editor above and hit Save.
+      </p>
+
+      <div class="editor__row">
+        <label class="field-label" for="importResumeText">Resume text</label>
+        <textarea id="importResumeText" class="json-textarea" rows="10" spellcheck="false"
+          placeholder="Ada Lovelace&#10;ada@example.com | 555-123-4567 | linkedin.com/in/ada&#10;&#10;EXPERIENCE&#10;Software Engineer, Analytical Engines Inc    May 2023 - Present&#10;..."></textarea>
+      </div>
+
+      <div class="editor__row">
+        <label class="field-label" for="importDescriptionText">Description / extra facts (optional)</label>
+        <textarea id="importDescriptionText" class="json-textarea" rows="5" spellcheck="false"
+          placeholder="Canadian citizen, authorized to work in Canada and the US, no sponsorship needed. Two weeks notice. Open to hybrid in Toronto..."></textarea>
+      </div>
+
+      <div class="editor__actions">
+        <button id="importParseButton" class="button button--primary" type="button">Parse into profile editor</button>
+      </div>
+
+      <pre id="importReport" class="validation-message" hidden></pre>
+    </details>
+
+    <details class="llm-section">
+      <summary class="llm-section__summary">LLM fallback (optional)</summary>
+      <p class="llm-section__hint">
+        For fields the built-in matching can't figure out (dropdowns, free-text prompts). Paste your own
+        API keys — they're stored only in this browser and sent only to the provider itself, never anywhere
+        else. Leave all of these blank to skip this tier entirely.
+      </p>
+
+      <div class="llm-grid">
+        <div class="editor__row">
+          <label class="field-label" for="geminiKey">Gemini API key</label>
+          <input id="geminiKey" class="text-input" type="password" autocomplete="off" />
+        </div>
+        <div class="editor__row">
+          <label class="field-label" for="geminiModel">Gemini model</label>
+          <input id="geminiModel" class="text-input" type="text" placeholder="gemini-3.5-flash" />
+        </div>
+
+        <div class="editor__row">
+          <label class="field-label" for="openrouterKey">OpenRouter API key</label>
+          <input id="openrouterKey" class="text-input" type="password" autocomplete="off" />
+        </div>
+        <div class="editor__row">
+          <label class="field-label" for="openrouterModel">OpenRouter model</label>
+          <input id="openrouterModel" class="text-input" type="text" placeholder="nvidia/nemotron-3-super-120b-a12b:free" />
+        </div>
+
+        <div class="editor__row">
+          <label class="field-label" for="groqKey">Groq API key</label>
+          <input id="groqKey" class="text-input" type="password" autocomplete="off" />
+        </div>
+        <div class="editor__row">
+          <label class="field-label" for="groqModel">Groq model</label>
+          <input id="groqModel" class="text-input" type="text" placeholder="openai/gpt-oss-120b" />
+        </div>
+      </div>
+
+      <div class="editor__actions">
+        <button id="saveLlmConfigButton" class="button button--primary" type="button">Save LLM settings</button>
+        <span id="llmSavedNotice" class="saved-notice" hidden>Saved</span>
+      </div>
+    </details>
+  </div>
+
+  <script src="../shared/schema.js"></script>
+  <script src="../shared/derivation.js"></script>
+  <script src="../shared/profile_import.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Plain form fixture</title>
+</head>
+<body>
+  <form id="application">
+    <label for="firstName">First Name</label>
+    <input id="firstName" name="first_name" type="text" />
+
+    <label for="lastName">Last Name</label>
+    <input id="lastName" name="last_name" type="text" />
+
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" />
+
+    <label for="phone">Phone</label>
+    <input id="phone" name="phone" type="tel" />
+
+    <label for="linkedin">LinkedIn URL</label>
+    <input id="linkedin" name="linkedin" type="text" />
+
+    <label for="country">Country</label>
+    <select id="country" name="country">
+      <option value="">Select...</option>
+      <option value="us">United States</option>
+      <option value="ca">Canada</option>
+      <option value="uk">United Kingdom</option>
+    </select>
+
+    <fieldset>
+      <legend>Are you legally authorized to work in the US?</legend>
+      <label><input type="radio" name="work_auth" value="yes" /> Yes</label>
+      <label><input type="radio" name="work_auth" value="no" /> No</label>
+    </fieldset>
+
+    <label for="coverLetter">Cover Letter</label>
+    <textarea id="coverLetter" name="cover_letter"></textarea>
+
+    <label><input id="subscribe" type="checkbox" name="subscribe" /> Subscribe to newsletter</label>
+
+    <!-- Honeypot: real applicants never see or reach this field. Any
+         autofill tool that fills it has failed the visibility gate. -->
+    <label for="website2" style="position:absolute; left:-9999px;">
+      Website
+      <input id="website2" name="website2" type="text" tabindex="-1" autocomplete="off" style="position:absolute; left:-9999px;" />
+    </label>
+  </form>
+</body>
+</html>

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>React controlled form fixture</title>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+    const { useState } = React;
+    const h = React.createElement;
+
+    // A genuinely controlled input: value only ever comes from React state,
+    // set via onChange. A plain `el.value = x` write (without going through
+    // the native setter + a real input event) gets silently wiped out on
+    // the next render because React's virtual DOM diff sees no state change
+    // and restores `value` from `firstName`.
+    function App() {
+      const [firstName, setFirstName] = useState("");
+      const [email, setEmail] = useState("");
+      const [country, setCountry] = useState("");
+
+      return h(
+        "form",
+        { id: "application" },
+        h("label", { htmlFor: "firstName" }, "First Name"),
+        h("input", {
+          id: "firstName",
+          type: "text",
+          value: firstName,
+          onChange: (e) => setFirstName(e.target.value),
+        }),
+        h("label", { htmlFor: "email" }, "Email"),
+        h("input", {
+          id: "email",
+          type: "email",
+          value: email,
+          onChange: (e) => setEmail(e.target.value),
+        }),
+        h("label", { htmlFor: "country" }, "Country"),
+        h(
+          "select",
+          { id: "country", value: country, onChange: (e) => setCountry(e.target.value) },
+          h("option", { value: "" }, "Select..."),
+          h("option", { value: "us" }, "United States"),
+          h("option", { value: "ca" }, "Canada")
+        )
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(h(App));
+  </script>
+</body>
+</html>

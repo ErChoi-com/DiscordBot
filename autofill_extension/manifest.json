@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Application Autofill",
+  "version": "0.1.0",
+  "description": "Fills job application forms from a profile stored only on this device. No account, no server.",
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "Autofill this application"
+  },
+  "options_page": "options/options.html",
+  "background": {
+    "service_worker": "background/service_worker.js",
+    "type": "module"
+  },
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": [
+    "*://*.greenhouse.io/*",
+    "*://*.lever.co/*",
+    "*://*.myworkdayjobs.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://generativelanguage.googleapis.com/*",
+    "https://openrouter.ai/*",
+    "https://api.groq.com/*"
+  ]
+}
