@@ -9,22 +9,10 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from services.net_util import parse_proxy_pool, pick_proxy
 from services.priority_scheduler import BACKGROUND, PriorityWorkScheduler
 from services.rss_service import extract_link_from_html, fetch_and_parse_atom
 from services import scheduler_labels
-
-
-def parse_proxy_pool(raw: str | None) -> list[str]:
-    """Split a newline/comma-separated proxy string into a clean list."""
-    if not raw:
-        return []
-    return [p.strip() for p in raw.replace(",", "\n").splitlines() if p.strip()]
-
-
-def pick_proxy(proxy_pool: list[str], cursor: int) -> str | None:
-    if not proxy_pool:
-        return None
-    return proxy_pool[cursor % len(proxy_pool)]
 
 try:
     from curl_cffi import requests as cffi_requests

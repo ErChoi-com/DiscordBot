@@ -17,6 +17,8 @@ from urllib.parse import unquote
 
 import requests
 
+from services.net_util import retry_backoff_delay
+
 GREENHOUSE = "greenhouse"
 LEVER = "lever"
 ASHBY = "ashby"
@@ -481,7 +483,7 @@ def _scrape_greenhouse(slug: str, keywords: str, location: str, max_jobs: int) -
             _mark_dead(GREENHOUSE, slug)
             return []
         if resp.status_code in (429, 503, 502) and attempt < 2:
-            time.sleep((2 ** attempt) + random.uniform(0.5, 1.5))
+            time.sleep(retry_backoff_delay(attempt))
             headers["User-Agent"] = random.choice(USER_AGENTS)
             continue
         return []
@@ -538,7 +540,7 @@ def _scrape_lever(slug: str, keywords: str, location: str, max_jobs: int) -> lis
             _mark_dead(LEVER, slug)
             return []
         if resp.status_code in (429, 503, 502) and attempt < 2:
-            time.sleep((2 ** attempt) + random.uniform(0.5, 1.5))
+            time.sleep(retry_backoff_delay(attempt))
             headers["User-Agent"] = random.choice(USER_AGENTS)
             continue
         return []
@@ -630,7 +632,7 @@ def _scrape_ashby(slug: str, keywords: str, location: str, max_jobs: int) -> lis
             _mark_dead(ASHBY, slug)
             return []
         if resp.status_code in (429, 503, 502) and attempt < 2:
-            backoff = (2 ** attempt) + random.uniform(0.5, 1.5)
+            backoff = retry_backoff_delay(attempt)
             time.sleep(backoff)
             headers["User-Agent"] = random.choice(USER_AGENTS)
             continue
@@ -799,6 +801,8 @@ def _scrape_workday(slug: str, keywords: str, location: str, max_jobs: int) -> l
         return []
 
     url_to_date: dict[str, str] = {}
+    # Nested pool: bounded (accepted exception to scheduler-visible concurrency;
+    # the caller holds one PriorityWorkScheduler slot for this whole fan-out).
     with ThreadPoolExecutor(max_workers=5) as pool:
         futures = {pool.submit(_fetch_workday_date, row["detail_url"], headers): row["detail_url"] for row in candidates}
         for future in as_completed(futures):
@@ -874,7 +878,7 @@ def _scrape_icims(slug: str, keywords: str, location: str, max_jobs: int) -> lis
             _mark_dead(ICIMS, slug)
             return []
         if resp.status_code in (429, 503, 502) and attempt < 2:
-            time.sleep((2 ** attempt) + random.uniform(0.5, 1.5))
+            time.sleep(retry_backoff_delay(attempt))
             headers["User-Agent"] = random.choice(USER_AGENTS)
             continue
         return []
@@ -920,6 +924,8 @@ def _scrape_icims(slug: str, keywords: str, location: str, max_jobs: int) -> lis
         return []
 
     url_to_meta: dict[str, dict[str, str]] = {}
+    # Nested pool: bounded (accepted exception to scheduler-visible concurrency;
+    # the caller holds one PriorityWorkScheduler slot for this whole fan-out).
     with ThreadPoolExecutor(max_workers=5) as pool:
         futures = {pool.submit(_fetch_icims_metadata, row["job_url"]): row["job_url"] for row in candidates}
         for future in as_completed(futures):
@@ -957,7 +963,7 @@ def _scrape_bamboohr(slug: str, keywords: str, location: str, max_jobs: int) -> 
             resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
         except requests.exceptions.SSLError:
             if attempt < 2:
-                time.sleep((2 ** attempt) + random.uniform(0.5, 1.5))
+                time.sleep(retry_backoff_delay(attempt))
                 continue
             return []
         except Exception:
@@ -968,7 +974,7 @@ def _scrape_bamboohr(slug: str, keywords: str, location: str, max_jobs: int) -> 
             _mark_dead(BAMBOOHR, slug)
             return []
         if resp.status_code in (429, 503, 502) and attempt < 2:
-            backoff = (2 ** attempt) + random.uniform(0.5, 1.5)
+            backoff = retry_backoff_delay(attempt)
             time.sleep(backoff)
             headers["User-Agent"] = random.choice(USER_AGENTS)
             continue
@@ -1050,6 +1056,8 @@ def scrape_ats_platform(
     workers = min(PLATFORM_WORKERS.get(platform, 10), len(company_slugs))
     all_rows: list[dict[str, Any]] = []
 
+    # Nested pool: bounded (accepted exception to scheduler-visible concurrency;
+    # the caller holds one PriorityWorkScheduler slot for this whole fan-out).
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(scraper, slug, keywords, location, max_per_company): slug

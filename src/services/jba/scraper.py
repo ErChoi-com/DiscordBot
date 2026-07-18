@@ -12,6 +12,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import unquote
 from geolocation import build_lookup, lookup_location
 
+try:
+    from services.net_util import retry_backoff_delay
+except ImportError:  # standalone script run with jba/ on sys.path, not src/
+    def retry_backoff_delay(attempt: int) -> float:
+        return (2 ** attempt) + random.uniform(0.5, 1.5)
+
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -313,7 +319,7 @@ def fetch_company_jobs_bamboohr(slug):
 
             if response.status_code in (429, 503, 502):
                 if attempt < max_retries:
-                    backoff = (2 ** attempt) + random.uniform(0.5, 1.5)
+                    backoff = retry_backoff_delay(attempt)
                     time.sleep(backoff)
                     continue
 
@@ -321,7 +327,7 @@ def fetch_company_jobs_bamboohr(slug):
 
         except requests.exceptions.SSLError:
             if attempt < max_retries:
-                time.sleep((2 ** attempt) + random.uniform(0.5, 1.5))
+                time.sleep(retry_backoff_delay(attempt))
                 continue
             return slug, [], None
         except Exception as e:

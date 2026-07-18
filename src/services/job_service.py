@@ -7,6 +7,7 @@ import subprocess
 import sys
 import hashlib
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -16,6 +17,8 @@ from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
+
+from services.net_util import parse_proxy_pool, pick_proxy
 
 DEFAULT_JOBSPY_EXE = Path(sys.executable)
 JOBBANK_CANADA_SITE = "jobbank_canada"
@@ -1043,24 +1046,6 @@ def build_google_search_term(keywords: str, location: str, hours_old: int) -> st
     return base
 
 
-def parse_proxy_pool(raw: str | None) -> list[str]:
-    if not raw:
-        return []
-    normalized = raw.replace("\n", ",").replace(";", ",")
-    proxies: list[str] = []
-    for part in normalized.split(","):
-        candidate = part.strip()
-        if candidate and candidate not in proxies:
-            proxies.append(candidate)
-    return proxies
-
-
-def pick_proxy(proxy_pool: list[str], cursor: int) -> str | None:
-    if not proxy_pool:
-        return None
-    return proxy_pool[cursor % len(proxy_pool)]
-
-
 def build_keyword_variants(keywords: str) -> list[str]:
     import re
     normalized = SPACE_PATTERN.sub(" ", str(keywords or "").strip())
@@ -1885,13 +1870,36 @@ def scrape_ziprecruiter_postings(
 ) -> list[dict[str, Any]]:
     """Scrape ZipRecruiter using Playwright to bypass JS/Cloudflare protections.
 
-    Falls back to returning [] if Playwright is not available.
+    Falls back to returning [] if Playwright is not available, or if the
+    app-wide browser dispatch slot (browser_service) can't be acquired in
+    time — this launch used to be invisible to that gate, so a second
+    Chromium process could spin up while a priority resume scrape waited.
     """
     try:
         from playwright.sync_api import sync_playwright
     except Exception:
         return []
 
+    from services import browser_service
+
+    if not browser_service.acquire_browser_work_slot(
+        "ziprecruiter", 20.0, f"search {keywords!r}"
+    ):
+        return []
+    try:
+        return _scrape_ziprecruiter_with_playwright(
+            sync_playwright, keywords, location, results_wanted
+        )
+    finally:
+        browser_service.release_browser_work_slot()
+
+
+def _scrape_ziprecruiter_with_playwright(
+    sync_playwright: Any,
+    keywords: str,
+    location: str,
+    results_wanted: int,
+) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     try:
         search_url = (
@@ -1991,6 +1999,25 @@ def scrape_ziprecruiter_postings(
     return results
 
 
+# Cross-channel scrape dedup: two channels watching the SAME criteria used to
+# run the identical external scrape independently every cycle (per-channel
+# watcher tasks have no coordination). Results are cached by the full scrape
+# criteria — deliberately EXCLUDING source_url, which is per-channel labeling
+# applied after the cache — for just under the 60s minimum refresh interval.
+# A per-key in-flight lock makes a simultaneous second caller wait for the
+# first scrape's result instead of duplicating it.
+JOB_SCRAPE_CACHE_TTL_SECONDS = 55.0
+_scrape_cache: dict[tuple, tuple[float, list[dict[str, Any]]]] = {}
+_scrape_cache_lock = threading.Lock()
+_scrape_key_locks: dict[tuple, threading.Lock] = {}
+
+
+def clear_job_scrape_cache() -> None:
+    with _scrape_cache_lock:
+        _scrape_cache.clear()
+        _scrape_key_locks.clear()
+
+
 def scrape_job_postings(
     site_names: list[str],
     keywords: str,
@@ -2011,6 +2038,73 @@ def scrape_job_postings(
 
     if not normalized_sites:
         return []
+
+    cache_key = (
+        tuple(normalized_sites),
+        keywords,
+        location,
+        hours_old,
+        results_wanted,
+        radius_miles,
+        country_indeed,
+        allow_north_america,
+        json.dumps(jobbank_search_query, sort_keys=True) if jobbank_search_query else None,
+    )
+    with _scrape_cache_lock:
+        key_lock = _scrape_key_locks.setdefault(cache_key, threading.Lock())
+    with key_lock:
+        now = time.monotonic()
+        with _scrape_cache_lock:
+            hit = _scrape_cache.get(cache_key)
+        if hit is not None and now - hit[0] <= JOB_SCRAPE_CACHE_TTL_SECONDS:
+            filtered_rows = [dict(row) for row in hit[1]]
+        else:
+            filtered_rows = _scrape_filtered_rows_uncached(
+                normalized_sites,
+                keywords,
+                location,
+                configured_python_exe,
+                hours_old,
+                results_wanted,
+                radius_miles,
+                country_indeed,
+                allow_north_america,
+                jobbank_search_query,
+            )
+            with _scrape_cache_lock:
+                _scrape_cache[cache_key] = (time.monotonic(), [dict(row) for row in filtered_rows])
+                # Opportunistic purge keeps the dict bounded to live criteria.
+                expired = [
+                    k for k, (ts, _) in _scrape_cache.items()
+                    if time.monotonic() - ts > JOB_SCRAPE_CACHE_TTL_SECONDS
+                ]
+                for k in expired:
+                    _scrape_cache.pop(k, None)
+                    _scrape_key_locks.pop(k, None)
+
+    if not filtered_rows:
+        return []
+    from services.ats_service import ATS_PLATFORMS as _ats_platforms
+
+    _ats_names = set(_ats_platforms)
+    source = source_url or f"jobspy:{','.join(normalized_sites)}"
+    ats_rows = [r for r in filtered_rows if r.get("_source_site") in _ats_names]
+    non_ats_rows = [r for r in filtered_rows if r.get("_source_site") not in _ats_names]
+    return [shape_job_item(row, source) for row in non_ats_rows + ats_rows]
+
+
+def _scrape_filtered_rows_uncached(
+    normalized_sites: list[str],
+    keywords: str,
+    location: str,
+    configured_python_exe: str | None,
+    hours_old: int,
+    results_wanted: int,
+    radius_miles: int,
+    country_indeed: str,
+    allow_north_america: bool,
+    jobbank_search_query: dict[str, list[str]] | None,
+) -> list[dict[str, Any]]:
 
     raw: list[dict[str, Any]] = []
     target_count = max(1, results_wanted)
@@ -2120,7 +2214,12 @@ def scrape_job_postings(
                 scrape_tasks.append(_make_jobspy_task())
 
     if scrape_tasks:
-        with ThreadPoolExecutor(max_workers=len(scrape_tasks)) as executor:
+        # Capped, not len(scrape_tasks): sites x keyword-variants used to size
+        # this pool unbounded (dozens of threads, each possibly a JobSpy
+        # subprocess). This nested pool is invisible to PriorityWorkScheduler's
+        # worker accounting (the caller occupies ONE scheduler slot), so the
+        # cap is what keeps the hidden concurrency honest.
+        with ThreadPoolExecutor(max_workers=min(6, len(scrape_tasks))) as executor:
             futures = [executor.submit(t) for t in scrape_tasks]
             for future in _as_completed(futures):
                 try:
@@ -2132,11 +2231,7 @@ def scrape_job_postings(
         return []
 
     deduped_rows = dedupe_job_rows(raw)
-    filtered_rows = filter_rows_by_region(deduped_rows, allow_north_america=allow_north_america)
-    source = source_url or f"jobspy:{','.join(normalized_sites)}"
-    ats_rows = [r for r in filtered_rows if r.get("_source_site") in _ats_names]
-    non_ats_rows = [r for r in filtered_rows if r.get("_source_site") not in _ats_names]
-    return [shape_job_item(row, source) for row in non_ats_rows + ats_rows]
+    return filter_rows_by_region(deduped_rows, allow_north_america=allow_north_america)
 
 
 def scrape_job_descriptions_from_all_sites(

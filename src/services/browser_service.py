@@ -206,6 +206,20 @@ def _acquire_fetch_slot(op_name: str, timeout_s: float, url: str, priority: bool
     return False
 
 
+def acquire_browser_work_slot(op_name: str, timeout_s: float, detail: str = "", priority: bool = False) -> bool:
+    """Public gate entry for EXTERNAL Playwright users (e.g. the ZipRecruiter
+    scraper's own headless launch in job_service). All headless-browser work
+    app-wide counts against this one dispatch slot, so a second Chromium
+    process can't spin up invisibly while a priority resume scrape is waiting
+    — bulk callers yield exactly like fetch_html/fetch_json bulk callers do.
+    Pair every True return with release_browser_work_slot() in a finally."""
+    return _acquire_fetch_slot(op_name, timeout_s, detail, priority=priority)
+
+
+def release_browser_work_slot() -> None:
+    _fetch_dispatch_semaphore.release()
+
+
 def _clear_profile_locks(profile_path: str) -> None:
     """Remove stale Chromium singleton lock artifacts for this profile."""
     lock_candidates = [
