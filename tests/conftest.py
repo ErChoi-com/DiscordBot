@@ -108,3 +108,17 @@ def _no_dotenv_provider_keys(monkeypatch):
     monkeypatch.setattr(listing, "_openrouter_api_key", lambda: None)
     monkeypatch.setattr(listing, "_groq_api_key", lambda: None)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _clear_profile_catalog_cache():
+    """load_structured_profile memoizes by file mtimes; tests that rewrite
+    profile files in tmp_path must never see another test's parse."""
+    try:
+        from services.resumes import structured
+    except ImportError:
+        yield
+        return
+    structured._PROFILE_CATALOG_CACHE.clear()
+    yield
+    structured._PROFILE_CATALOG_CACHE.clear()

@@ -3457,3 +3457,133 @@ def test_extract_listing_keywords_skips_url_plumbing() -> None:
     assert "kubernetes" in terms
     assert not any("indeed" in t or "/" in t for t in terms)
     assert "af3732d8e7f6a952" not in terms
+
+
+# ---------------------------------------------------------------------------
+# Profile catalog memoization (load_structured_profile cache)
+# ---------------------------------------------------------------------------
+
+
+def _write_profile(dir_path: Path) -> tuple[Path, Path]:
+    dir_path.mkdir(parents=True, exist_ok=True)
+    template = dir_path / "template.tex"
+    baseinfo = dir_path / "baseinfo.txt"
+    template.write_text(TEMPLATE_TEXT, encoding="utf-8")
+    baseinfo.write_text((PROFILE_DIR / "baseinfo.txt").read_text(encoding="utf-8"), encoding="utf-8")
+    return template, baseinfo
+
+
+def test_profile_cache_skips_reparse_for_unchanged_files(tmp_path, monkeypatch) -> None:
+    import services.resumes.structured as structured_module
+
+    template, baseinfo = _write_profile(tmp_path / "prof")
+    calls = {"n": 0}
+    real = structured_module._load_structured_profile_uncached
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(structured_module, "_load_structured_profile_uncached", counting)
+    first = load_structured_profile(template, baseinfo)
+    second = load_structured_profile(template, baseinfo)
+    assert first is not None and second is not None
+    assert calls["n"] == 1
+
+
+def test_profile_cache_returns_isolated_copies(tmp_path) -> None:
+    """Callers set catalog.render_config.aggressive in place; a shared cached
+    instance would leak one build's mode into the next build."""
+    template, baseinfo = _write_profile(tmp_path / "prof")
+    first = load_structured_profile(template, baseinfo)
+    assert first is not None
+    first.render_config.aggressive = True
+    first.render_config.strong_aggressive = True
+
+    second = load_structured_profile(template, baseinfo)
+    assert second is not None
+    assert second.render_config.aggressive is False
+    assert second.render_config.strong_aggressive is False
+    assert second is not first
+
+
+def test_profile_cache_invalidates_when_a_profile_file_changes(tmp_path) -> None:
+    template, baseinfo = _write_profile(tmp_path / "prof")
+    first = load_structured_profile(template, baseinfo)
+    assert first is not None
+
+    # structured_config.json is part of the stamp even when it appears later.
+    (tmp_path / "prof" / "structured_config.json").write_text(
+        json.dumps({"max_bold_per_bullet": 9}), encoding="utf-8"
+    )
+    second = load_structured_profile(template, baseinfo)
+    assert second is not None
+    assert second.render_config.max_bold_per_bullet == 9
+
+
+# ---------------------------------------------------------------------------
+# _effective_render_config mode matrix — one row per shipped mode combination,
+# asserting the RESOLVED config so a future scaling-rule change that breaks an
+# interaction fails loudly here instead of in a live build.
+# ---------------------------------------------------------------------------
+
+
+def test_effective_render_config_mode_matrix() -> None:
+    from dataclasses import replace as dc_replace
+
+    from services.resumes.structured import RenderConfig, _effective_render_config
+
+    base = RenderConfig()
+
+    # Normal mode: pass-through, identical object semantics.
+    assert _effective_render_config(base) == base
+
+    # Profile-level adjacent_tool_leeway survives normal mode untouched.
+    leeway = dc_replace(base, adjacent_tool_leeway=True)
+    assert _effective_render_config(leeway) == leeway
+
+    # Aggressive: leeway + audit off + bold cap +2; budgets untouched.
+    ag = _effective_render_config(dc_replace(base, aggressive=True))
+    assert ag.adjacent_tool_leeway is True
+    assert ag.grounding_audit is False
+    assert ag.max_bold_per_bullet == base.max_bold_per_bullet + 2
+    assert ag.max_bullet_chars == base.max_bullet_chars
+    assert ag.min_visible_bullets == base.min_visible_bullets
+    assert ag.max_total_bullet_chars == base.max_total_bullet_chars
+    assert ag.rewrite_scope == base.rewrite_scope
+    assert ag.strong_aggressive is False
+
+    # Strong-aggressive: superset — forces aggressive, full scope, bold cap +4,
+    # depth-over-breadth budgets (+120 chars, min bullets floor-capped at 6).
+    sa = _effective_render_config(dc_replace(base, strong_aggressive=True))
+    assert sa.aggressive is True and sa.strong_aggressive is True
+    assert sa.adjacent_tool_leeway is True
+    assert sa.grounding_audit is False
+    assert sa.rewrite_scope == "full"
+    assert sa.max_bold_per_bullet == base.max_bold_per_bullet + 4
+    assert sa.max_bullet_chars == base.max_bullet_chars + 120
+    assert sa.min_visible_bullets == max(6, base.min_visible_bullets - 5)
+
+    # Strong-aggressive wins over aggressive when both are set (superset, not
+    # additive: bold cap is +4, not +6).
+    both = _effective_render_config(dc_replace(base, aggressive=True, strong_aggressive=True))
+    assert both == sa
+
+    # A profile grounding_audit=False stays off in every mode.
+    no_audit = dc_replace(base, grounding_audit=False)
+    assert _effective_render_config(no_audit).grounding_audit is False
+    assert _effective_render_config(dc_replace(no_audit, aggressive=True)).grounding_audit is False
+
+    # The shipped xboxsignout._ shape: profile overrides survive aggressive
+    # scaling relative to THEIR values, not the defaults.
+    profile = dc_replace(
+        base,
+        max_visible_bullets=15,
+        max_total_bullet_chars=2650,
+        max_bold_per_bullet=6,
+        adjacent_tool_leeway=True,
+    )
+    profile_sa = _effective_render_config(dc_replace(profile, strong_aggressive=True))
+    assert profile_sa.max_visible_bullets == 15
+    assert profile_sa.max_total_bullet_chars == 2650
+    assert profile_sa.max_bold_per_bullet == 10

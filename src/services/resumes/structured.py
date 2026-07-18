@@ -27,6 +27,7 @@ path (see listing.generate_resume_rewrite).
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from dataclasses import dataclass, field, replace
@@ -3758,6 +3759,32 @@ def sync_template_baseinfo(
     return new_template, new_baseinfo, messages
 
 
+# (template, baseinfo) paths -> (file-mtime stamp, parsed catalog). A single
+# command resolves the same profile 2-3 times (structured-or-legacy check in
+# handlers, then the rewrite, then cover/bootstrap), each of which used to
+# re-read and re-parse from disk. Keyed by the mtimes of all four profile
+# files, so any edit — including load's own on-disk auto-sync — invalidates.
+_PROFILE_CATALOG_CACHE: dict[tuple[str, str], tuple[tuple, TemplateCatalog | None]] = {}
+
+
+def _profile_cache_stamp(template_path: Path, baseinfo_path: Path) -> tuple:
+    # mtime_ns + size, not float mtime: rapid successive writes (tests, the
+    # auto-sync) can land inside float-mtime granularity and go stale.
+    def _stat(path: Path) -> tuple[int, int]:
+        try:
+            st = path.stat()
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return (-1, -1)
+
+    return (
+        _stat(template_path),
+        _stat(baseinfo_path),
+        _stat(template_path.parent / STRUCTURED_CONFIG_FILENAME),
+        _stat(template_path.parent / STRUCTURED_GUIDANCE_FILENAME),
+    )
+
+
 def load_structured_profile(
     template_path: Path,
     baseinfo_path: Path,
@@ -3772,7 +3799,30 @@ def load_structured_profile(
       (non-structured) profiles also read this file, but for a full step-by-step
       LaTeX-authoring prompt instead — the two uses are mutually exclusive per
       profile since a profile is either structured or legacy, never both.
+
+    Results are cached by file mtimes. Returns a DEEP COPY of the cached
+    catalog: callers mutate render_config in place (the aggressive flags), and
+    a shared instance would leak one build's mode into the next.
     """
+    cache_key = (str(template_path), str(baseinfo_path))
+    stamp = _profile_cache_stamp(template_path, baseinfo_path)
+    cached = _PROFILE_CATALOG_CACHE.get(cache_key)
+    if cached is not None and cached[0] == stamp:
+        return copy.deepcopy(cached[1])
+
+    catalog = _load_structured_profile_uncached(template_path, baseinfo_path)
+    # Re-stamp after loading: the auto-sync inside may have rewritten files.
+    _PROFILE_CATALOG_CACHE[cache_key] = (
+        _profile_cache_stamp(template_path, baseinfo_path),
+        catalog,
+    )
+    return copy.deepcopy(catalog)
+
+
+def _load_structured_profile_uncached(
+    template_path: Path,
+    baseinfo_path: Path,
+) -> TemplateCatalog | None:
     try:
         template_text = template_path.read_text(encoding="utf-8")
         baseinfo_text = baseinfo_path.read_text(encoding="utf-8")
