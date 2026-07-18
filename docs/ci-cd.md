@@ -6,7 +6,9 @@ This repository now includes GitHub Actions workflows in `.github/workflows/`.
 
 - `ci.yml`
   - Runs on pushes to `main` or `master`, and on all pull requests.
-  - Uses Python `3.11` and `3.12`.
+  - Uses Python `3.14` — the interpreter the bot actually runs under
+    (`run.bat`'s `py -3` / `PYTHON_EXE`) and the one the suite is verified
+    against locally.
   - Installs dependencies and runs `pytest -q`.
 
 - `cd-release.yml`
@@ -35,5 +37,10 @@ git push origin v1.0.0
 
 ## Notes
 
-- Current local test status in this workspace includes pre-existing failing tests, so CI will fail until those are resolved.
+- The full suite passes locally on Python 3.14 (`589 passed` as of 2026-07-18);
+  CI is pinned to the same version so a red run means a real regression, not
+  an environment mismatch.
+- Semantic job matching needs `requirements-semantic.txt` (torch is heavy);
+  the suite does not require it — the feature degrades to keyword matching
+  when absent, so CI installs only `requirements.txt`.
 - The workflows intentionally run tests before publishing release artifacts to prevent shipping broken commits.

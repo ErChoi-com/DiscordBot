@@ -21,14 +21,35 @@ Modular rebuild of the original Discord scraper bot.
    - `python src/app.py`
 
 ## User Commands
-- `$hello2`
-- `/scrape <url>`
-- `/scrape <url> | <css selector>`
-- `$continue`
-- `/resume` when replying to a watcher job post
-- `$settings`
-- `/jobsettings` (alias `/jobsinit`)
-- `/redditsettings`
+
+Text commands use the `.` prefix; every command also has `/`-style aliases
+(source of truth: `_COMMAND_ALIASES` in `src/commands/handlers.py` — run
+`.cmd` in Discord for the live cheatsheet).
+
+General:
+- `.cmd` (`/commands`) — command cheatsheet
+- `.hi` (`/hello`), `.more` (`/continue`) — hello / continue paginated output
+- `.scrape <url>` or `.scrape <url> | <css selector>`
+- `.cfg` / `.scrapecfg` (`/settings`) — scrape settings panel
+- `.st` / `.watch` (`/status`) — watcher status
+- `.health` (`.health all` for every channel) — scrape health dashboard
+
+Job watching:
+- `.job` / `.jobs` (`/jobsettings`, `/jobsinit`) — job watcher settings
+- `.jtest` (`/jobbanktest`) — Job Bank listing test
+- `.jobtest` (`/jobpipelinetest`) — full pipeline test with metrics
+- `.jfilters [query|clear]` (`/jobbankfilters`) — extra native filters
+
+Reddit watching:
+- `.reddit` / `.rset` (`/redditsettings`) — reddit watcher settings
+- `.rclear` (`/clearredditseen`), `.rreset` (`/resetredditseen`)
+
+Resume (owner-only, reply to a watcher job post):
+- `.resumebuild` (`/resumebuild`, `/res`) — tailored resume PDF; flags:
+  `--aggressive`, `--strongaggressive`
+- `.resumecoverbuild` (`/coverbuild`, `/cover`) — cover letter built from what
+  the resume left out
+- `.resumecheck` — compile the current template as a baseline check
 
 ## Notes
 - Job watching uses JobSpy and now defaults to `All supported sites` for the installed JobSpy version.

@@ -20,7 +20,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        # 3.14 is the interpreter the bot actually runs under (run.bat's
+        # `py -3` / PYTHON_EXE) and the one the suite is verified against.
+        python-version: ["3.14"]
 
     steps:
       - name: Checkout

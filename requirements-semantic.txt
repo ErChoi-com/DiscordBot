@@ -1,0 +1,7 @@
+# Optional: semantic job matching (job_service.semantic_plugin_available).
+# Without these the bot runs fine but silently falls back to keyword-only
+# matching — install into the SAME interpreter the bot runs under
+# (run.bat resolves `py -3` / PYTHON_EXE, not necessarily .venv):
+#   python -m pip install -r requirements-semantic.txt
+# Pulls in torch (~2GB); that's why it is not in requirements.txt.
+sentence-transformers

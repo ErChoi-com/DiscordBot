@@ -1,7 +1,6 @@
 discord.py
 requests
 curl_cffi
-praw
 pysocks
 playwright
 beautifulsoup4
@@ -10,3 +9,4 @@ ftfy
 google-genai
 pycountry
 pdflatex
+# Semantic job matching is optional and heavy (torch); see requirements-semantic.txt.
