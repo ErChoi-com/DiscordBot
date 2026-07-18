@@ -16,14 +16,14 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from services.resumes.configkey import load_gemini_settings
 from services.resumes.listing import JobContext, ScrapedJobPosting, generate_resume_rewrite
 from services.resumes.resume import RESUMES_CACHE_ROOT, compile_latex_to_pdf
 
 PROFILE_KEY = "xboxsignout._"
-OUTPUT_PATH = Path(__file__).resolve().parent / "test_resume_output.pdf"
+OUTPUT_PATH = Path(__file__).resolve().parents[1] / "test_resume_output.pdf"
 
 SAMPLE_LISTINGS: list[ScrapedJobPosting] = [
     ScrapedJobPosting(

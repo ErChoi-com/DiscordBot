@@ -24,15 +24,15 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from services.resumes.configkey import load_gemini_settings
 from services.resumes.listing import JobContext, scrape_job_posting, generate_resume_rewrite
 from services.resumes.resume import RESUMES_CACHE_ROOT, compile_latex_to_pdf
 
 PROFILE_KEY = "xboxsignout._"
-OUT_PDF = Path(__file__).resolve().parent / "resume_output.pdf"
-OUT_TEX = Path(__file__).resolve().parent / "resume_output.tex"
+OUT_PDF = Path(__file__).resolve().parents[1] / "resume_output.pdf"
+OUT_TEX = Path(__file__).resolve().parents[1] / "resume_output.tex"
 
 # Nord Quantique: appeared in bot history, direct company site, no job bank
 DEFAULT_URL = "https://nordquantique.ca/en/career/"

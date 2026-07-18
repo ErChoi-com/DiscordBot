@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 
 # Add src to path
-SRC = Path(__file__).resolve().parent / "src"
+SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC))
 
 from services import job_service

@@ -4,7 +4,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from services.jba.merge_data import _get_conn, _dedup_key, _JOBS_DIR
 
