@@ -9,7 +9,8 @@ from typing import Any
 
 import discord
 
-from services import job_service
+from services import job_service, scheduler_labels
+from services.priority_scheduler import INTERACTIVE, PriorityWorkScheduler
 from services.resumes.resume import compile_latex_to_pdf
 from state.store import MODE_DESCRIPTIONS, RuntimeStore
 from watchers.manager import WatcherManager
@@ -639,10 +640,12 @@ class TemplateEditModal(discord.ui.Modal, title="Edit template.tex"):
         profile_dir: Path,
         panel_message: discord.Message | None = None,
         parent_view: discord.ui.View | None = None,
+        scheduler: PriorityWorkScheduler | None = None,
     ):
         super().__init__()
         self.profile_dir = profile_dir
         self.panel_message = panel_message
+        self.scheduler = scheduler
         self.parent_view = parent_view
 
         self.template_part1 = discord.ui.TextInput(
@@ -740,7 +743,7 @@ class TemplateEditModal(discord.ui.Modal, title="Edit template.tex"):
         except OSError as exc:
             return f"Template updated successfully, but preview could not be read: {exc}"
 
-        compile_result = await asyncio.to_thread(
+        compile_args = (
             compile_latex_to_pdf,
             template_text,
             f"{self.profile_dir.name}-template-preview",
@@ -748,6 +751,12 @@ class TemplateEditModal(discord.ui.Modal, title="Edit template.tex"):
             preview_log_path,
             True,
         )
+        if self.scheduler is not None:
+            compile_result = await self.scheduler.run(
+                *compile_args, tier=INTERACTIVE, label=scheduler_labels.RESUME_TEMPLATE_PREVIEW_COMPILE
+            )
+        else:
+            compile_result = await asyncio.to_thread(*compile_args)
         if compile_result.status != "ok" or not compile_result.pdf_bytes:
             return (
                 "Template updated successfully, but preview generation failed: "
@@ -992,6 +1001,7 @@ class JobSettingsView(discord.ui.View):
             profile_dir=profile_dir,
             panel_message=interaction.message,
             parent_view=self,
+            scheduler=self.manager.scheduler,
         )
         _sanitize_modal_text_input_labels(modal)
         await interaction.response.send_modal(

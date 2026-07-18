@@ -31,12 +31,17 @@ class _FakePerms:
 
 class _FakeSentMessage:
     def __init__(self, embed):
+        self.id = 12345
         self.embeds = [embed]
         self.author = SimpleNamespace(id=999)
         self.pin_calls = 0
+        self.edit_calls = 0
 
     async def pin(self, reason: str | None = None):
         self.pin_calls += 1
+
+    async def edit(self, embed=None, **_kwargs):
+        self.edit_calls += 1
 
 
 class _FakeChannel:
@@ -79,9 +84,21 @@ class _FakeClient:
         return self._channel
 
 
+class _FakeStore:
+    def get_cheatsheet_message_id(self, channel_id, kind):
+        return None
+
+    def set_cheatsheet_message_id(self, channel_id, kind, message_id):
+        pass
+
+    def clear_cheatsheet_message_id(self, channel_id, kind):
+        pass
+
+
 def _make_router(channel):
     router = object.__new__(CommandRouter)
     router.client = _FakeClient(channel)
+    router.store = _FakeStore()
     return router
 
 
@@ -97,7 +114,7 @@ def test_build_commands_cheatsheet_embed_by_kind() -> None:
 
 def test_ensure_commands_cheatsheet_pinned_reuses_existing_pinned() -> None:
     existing_embed = build_commands_cheatsheet_embed(CHEATSHEET_KIND_JOB)
-    existing = SimpleNamespace(embeds=[existing_embed], author=SimpleNamespace(id=999))
+    existing = _FakeSentMessage(existing_embed)
     channel = _FakeChannel(pinned=[existing])
     router = _make_router(channel)
 

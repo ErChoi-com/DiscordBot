@@ -15,7 +15,9 @@ from commands.handlers import (
     CMD_RESUME_CHECK,
     CMD_SCRAPE,
     _command_matches,
+    _ContentOverrideMessage,
     _expand_command_aliases,
+    _extract_aggressiveness_flags,
     _extract_command_payload,
 )
 
@@ -62,6 +64,97 @@ def test_extract_command_payload_supports_resumebuild_aliases() -> None:
     assert _extract_command_payload("/ernestresume", CMD_RESUME) == ""
 
 
+def test_extract_aggressive_flag_detects_and_strips_trailing_flag() -> None:
+    content, aggressive, strong = _extract_aggressiveness_flags(".resumebuild --aggressive")
+    assert aggressive is True
+    assert strong is False
+    assert content == ".resumebuild"
+
+
+def test_extract_aggressive_flag_preserves_target_before_flag() -> None:
+    content, aggressive, strong = _extract_aggressiveness_flags(".resumebuild ricky disappoints --aggressive")
+    assert aggressive is True
+    assert strong is False
+    assert content == ".resumebuild ricky disappoints"
+
+
+def test_extract_aggressive_flag_preserves_target_after_flag() -> None:
+    content, aggressive, strong = _extract_aggressiveness_flags(".resumebuild --aggressive ricky disappoints")
+    assert aggressive is True
+    assert strong is False
+    assert content == ".resumebuild ricky disappoints"
+
+
+def test_extract_aggressive_flag_case_insensitive() -> None:
+    content, aggressive, strong = _extract_aggressiveness_flags(".resumebuild --AGGRESSIVE")
+    assert aggressive is True
+    assert strong is False
+    assert content == ".resumebuild"
+
+
+def test_extract_aggressive_flag_absent_leaves_content_untouched() -> None:
+    content, aggressive, strong = _extract_aggressiveness_flags(".resumebuild ricky disappoints")
+    assert aggressive is False
+    assert strong is False
+    assert content == ".resumebuild ricky disappoints"
+
+
+def test_extract_aggressive_flag_does_not_match_as_substring_of_a_name() -> None:
+    content, aggressive, strong = _extract_aggressiveness_flags(".resumebuild --aggressiveperson")
+    assert aggressive is False
+    assert strong is False
+    assert content == ".resumebuild --aggressiveperson"
+
+
+def test_aggressive_flag_strip_composes_with_target_payload_extraction() -> None:
+    content, aggressive, strong = _extract_aggressiveness_flags(".resumebuild ricky disappoints --aggressive")
+    assert aggressive is True
+    assert strong is False
+    assert _extract_command_payload(content, CMD_RESUME) == "ricky disappoints"
+
+
+def test_strong_aggressive_flag_detected_and_stripped() -> None:
+    content, aggressive, strong = _extract_aggressiveness_flags(".resumebuild --strongaggressive")
+    assert aggressive is True
+    assert strong is True
+    assert content == ".resumebuild"
+
+
+def test_strong_aggressive_does_not_collide_with_aggressive() -> None:
+    content, aggressive, strong = _extract_aggressiveness_flags(".resumebuild --strongaggressive")
+    assert strong is True
+    content2, aggressive2, strong2 = _extract_aggressiveness_flags(".resumebuild --aggressive")
+    assert strong2 is False
+    assert aggressive2 is True
+
+
+def test_strong_aggressive_preserves_target() -> None:
+    content, aggressive, strong = _extract_aggressiveness_flags(".resumebuild ricky --strongaggressive")
+    assert strong is True
+    assert aggressive is True
+    assert content == ".resumebuild ricky"
+
+
+def test_content_override_message_reports_new_content_and_delegates_rest() -> None:
+    class _FakeMessage:
+        def __init__(self) -> None:
+            self.content = ".resumebuild ricky --aggressive"
+            self.channel = "channel-sentinel"
+            self.author = "author-sentinel"
+
+        def to_reference(self, fail_if_not_exists: bool = False):
+            return ("ref", fail_if_not_exists)
+
+    real = _FakeMessage()
+    wrapped = _ContentOverrideMessage(real, ".resumebuild ricky")
+
+    assert wrapped.content == ".resumebuild ricky"
+    assert real.content == ".resumebuild ricky --aggressive"  # original untouched
+    assert wrapped.channel == "channel-sentinel"
+    assert wrapped.author == "author-sentinel"
+    assert wrapped.to_reference(fail_if_not_exists=True) == ("ref", True)
+
+
 def test_every_command_constant_has_slash_alias() -> None:
     command_constants = {
         name: value
@@ -101,6 +194,26 @@ def test_command_router_init_does_not_seed_profile_cache(monkeypatch, tmp_path: 
     class _WatcherManager:
         pass
 
-    CommandRouter(client=object(), config=_Config(), store=_Store(), watcher_manager=_WatcherManager())
+    from services.health import WatcherHealthTracker
+    CommandRouter(client=object(), config=_Config(), store=_Store(), watcher_manager=_WatcherManager(), health=WatcherHealthTracker())
 
     assert calls == []
+
+
+def test_extract_command_payload_supports_resumecoverbuild_aliases() -> None:
+    from commands.handlers import CMD_RESUME_COVER
+
+    assert _extract_command_payload("/resumecoverbuild", CMD_RESUME_COVER) == ""
+    assert _extract_command_payload(".resumecoverbuild ricky", CMD_RESUME_COVER) == "ricky"
+    assert _command_matches("/cover", "/cover", normalize=True)
+    assert _command_matches("/coverbuild", "/coverbuild", normalize=True)
+
+
+def test_resumecoverbuild_does_not_shadow_resumebuild() -> None:
+    from commands.handlers import CMD_RESUME_COVER
+
+    # Token-boundary matching: the longer command must never match the
+    # shorter command's prefix and vice versa.
+    assert not _command_matches(".resumecoverbuild", CMD_RESUME, normalize=True)
+    assert not _command_matches(".resumebuild", CMD_RESUME_COVER, normalize=True)
+    assert _extract_command_payload(".resumecoverbuild", CMD_RESUME) == ""

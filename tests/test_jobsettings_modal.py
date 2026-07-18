@@ -91,3 +91,64 @@ def test_template_edit_modal_submit_uses_thinking_defer_and_followup(tmp_path: P
 
     assert interaction.response.defer_calls == [{"thinking": True, "ephemeral": True}]
     assert interaction.followup.messages == [("preview ok", True)]
+
+
+def test_template_edit_modal_routes_compile_through_scheduler_when_provided(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression guard: this compile call used to be a raw asyncio.to_thread,
+    bypassing the priority scheduler entirely for a live, user-waited-on
+    interactive flow (clicking 'Edit template' in the job settings panel)."""
+    from types import SimpleNamespace
+
+    from services.priority_scheduler import PriorityWorkScheduler
+    from services import scheduler_labels
+    import ui.views as views_module
+
+    def _fake_compile(*args, **kwargs):
+        return SimpleNamespace(status="ok", pdf_bytes=b"%PDF-fake", message="")
+
+    monkeypatch.setattr(views_module, "compile_latex_to_pdf", _fake_compile)
+
+    profile_dir = tmp_path / "999"
+    profile_dir.mkdir(parents=True)
+    template_path = profile_dir / "template.tex"
+    template_path.write_text("\\documentclass{article}", encoding="utf-8")
+
+    scheduler = PriorityWorkScheduler(max_workers=1)
+    try:
+        modal = TemplateEditModal(profile_dir=profile_dir, scheduler=scheduler)
+        result = asyncio.run(modal._build_preview_message(template_path))
+        assert isinstance(result, tuple)
+
+        stats = scheduler.stats()
+        entry = stats["label_costs"].get(scheduler_labels.RESUME_TEMPLATE_PREVIEW_COMPILE)
+        assert entry is not None, "compile must have gone through the scheduler, not asyncio.to_thread"
+        assert entry["samples"] >= 1
+    finally:
+        scheduler.shutdown()
+
+
+def test_template_edit_modal_falls_back_to_asyncio_to_thread_without_scheduler(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No scheduler passed (e.g. TemplateEditModal constructed directly, as in
+    the other test above) must still work via the plain asyncio.to_thread path."""
+    from types import SimpleNamespace
+
+    import ui.views as views_module
+
+    def _fake_compile(*args, **kwargs):
+        return SimpleNamespace(status="ok", pdf_bytes=b"%PDF-fake", message="")
+
+    monkeypatch.setattr(views_module, "compile_latex_to_pdf", _fake_compile)
+
+    profile_dir = tmp_path / "998"
+    profile_dir.mkdir(parents=True)
+    template_path = profile_dir / "template.tex"
+    template_path.write_text("\\documentclass{article}", encoding="utf-8")
+
+    modal = TemplateEditModal(profile_dir=profile_dir)
+    assert modal.scheduler is None
+    result = asyncio.run(modal._build_preview_message(template_path))
+    assert isinstance(result, tuple)

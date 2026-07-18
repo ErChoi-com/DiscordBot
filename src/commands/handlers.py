@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -14,8 +15,11 @@ import discord
 from config import AppConfig
 from services import job_service, scrape_service
 from services.health import WatcherHealthTracker, build_channel_health_embed, build_all_health_embed
+from services.priority_scheduler import INTERACTIVE, PriorityWorkScheduler
+from services import scheduler_labels
 from services.resumes.configkey import GeminiSettings, load_gemini_settings
 from services.resumes.cache import ResumeExplicitCacheManager, ResumeExplicitCacheStatus
+from services.resumes.cover import generate_cover_letter
 from services.resumes.listing import (
     JobContext,
     condense_latex_if_overflowing,
@@ -73,6 +77,38 @@ class _InteractionMessageAdapter:
         _ = fail_if_not_exists
         return None
 
+
+class _ContentOverrideMessage:
+    """Wraps a real discord.Message but reports a different `.content`.
+
+    Used to strip a parsed "--aggressive" flag before the message reaches
+    target-user resolution, so the flag token is never mistaken for part of a
+    mention/username/profile name. Every other attribute (channel, author,
+    guild, reference, to_reference(), ...) delegates straight through to the
+    wrapped message.
+    """
+
+    def __init__(self, message: discord.Message, content: str) -> None:
+        self._message = message
+        self.content = content
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._message, name)
+
+
+@dataclass(slots=True)
+class _ResumeRequest:
+    """Everything the resume-family commands need after shared validation."""
+
+    settings: GeminiSettings
+    job: JobContext
+    profile_key: str
+    profile_dir: Path
+    template_path: Path
+    cache_scope: str
+    reply_send_kwargs: dict[str, Any]
+
+
 CHEATSHEET_KIND_GENERAL = "general"
 CHEATSHEET_KIND_JOB = "job"
 CHEATSHEET_KIND_REDDIT = "reddit"
@@ -87,6 +123,7 @@ CMD_COMMANDS = ".cmd"
 CMD_STATUS = ".st"
 CMD_STATUS_ALIAS = ".watch"
 CMD_RESUME = ".resumebuild"
+CMD_RESUME_COVER = ".resumecoverbuild"
 CMD_RESUME_CHECK = ".resumecheck"
 CMD_CONTINUE = ".more"
 CMD_HELLO = ".hi"
@@ -111,6 +148,7 @@ _COMMAND_ALIASES: dict[str, tuple[str, ...]] = {
     CMD_STATUS: ("/st", "/status"),
     CMD_STATUS_ALIAS: ("/watch", "/watcherstatus"),
     CMD_RESUME: (PRIMARY_RESUME_SLASH_COMMAND, "/resume", "/ernestresume", "/res"),
+    CMD_RESUME_COVER: ("/resumecoverbuild", "/coverbuild", "/cover"),
     CMD_RESUME_CHECK: ("/resumecheck",),
     CMD_CONTINUE: ("/more", "/continue"),
     CMD_HELLO: ("/hi", "/hello", "/hello2"),
@@ -155,7 +193,8 @@ def build_commands_cheatsheet_embed(sheet_kind: str = CHEATSHEET_KIND_GENERAL) -
             name="Utility",
             value=(
                 f"`{CMD_COMMANDS}` - Show general command sheet\n"
-                f"`{CMD_RESUME}` - Reply to a job post for tailored resume\n"
+                f"`{CMD_RESUME}` - Reply to a job post for tailored resume (add `--aggressive` or `--strongaggressive`)\n"
+                f"`{CMD_RESUME_COVER}` - Reply to a job post for a cover letter covering what the resume left out\n"
                 f"`{CMD_RESUME_CHECK}` - Compile your current template cache\n"
                 f"`{CMD_CONTINUE}` - Continue paginated output"
             ),
@@ -188,7 +227,8 @@ def build_commands_cheatsheet_embed(sheet_kind: str = CHEATSHEET_KIND_GENERAL) -
         value=(
             f"`{CMD_COMMANDS}` - Show this list\n"
             f"`{CMD_STATUS}` / `{CMD_STATUS_ALIAS}` - Watcher status\n"
-            f"`{CMD_RESUME}` - Reply to a job post and generate a tailored resume draft\n"
+            f"`{CMD_RESUME}` - Reply to a job post and generate a tailored resume draft (add `--aggressive` or `--strongaggressive`)\n"
+            f"`{CMD_RESUME_COVER}` - Reply to a job post and generate a complementary cover letter\n"
             f"`{CMD_RESUME_CHECK}` - Compile your current template cache\n"
             f"`{CMD_CONTINUE}` - Continue paginated output\n"
             f"`{CMD_HELLO}` - Quick hello test"
@@ -252,6 +292,24 @@ def _extract_command_payload(content: str, command: str) -> str:
     return ""
 
 
+# --strongaggressive checked first (contains the substring --aggressive).
+_STRONG_AGGRESSIVE_FLAG_PATTERN = re.compile(r"\s*--strongaggressive\b", re.IGNORECASE)
+_AGGRESSIVE_FLAG_PATTERN = re.compile(r"\s*--aggressive\b", re.IGNORECASE)
+
+
+def _extract_aggressiveness_flags(content: str) -> tuple[str, bool, bool]:
+    """Strip ``--strongaggressive`` or ``--aggressive`` from command text.
+
+    Returns ``(cleaned_content, aggressive, strong_aggressive)``.
+    strong_aggressive implies aggressive.
+    """
+    if _STRONG_AGGRESSIVE_FLAG_PATTERN.search(content):
+        return _STRONG_AGGRESSIVE_FLAG_PATTERN.sub("", content), True, True
+    if _AGGRESSIVE_FLAG_PATTERN.search(content):
+        return _AGGRESSIVE_FLAG_PATTERN.sub("", content), True, False
+    return content, False, False
+
+
 def _command_matches(content: str, prefix: str, normalize: bool) -> bool:
     if normalize:
         content_cmp = content.lower()
@@ -300,12 +358,24 @@ def command_handler(*prefixes: str, normalize: bool = False) -> Callable[[Messag
 
 
 class CommandRouter:
-    def __init__(self, client: discord.Client, config: AppConfig, store: RuntimeStore, watcher_manager: WatcherManager, health: WatcherHealthTracker) -> None:
+    def __init__(
+        self,
+        client: discord.Client,
+        config: AppConfig,
+        store: RuntimeStore,
+        watcher_manager: WatcherManager,
+        health: WatcherHealthTracker,
+        scheduler: PriorityWorkScheduler | None = None,
+    ) -> None:
         self.client = client
         self.config = config
         self.store = store
         self.watcher_manager = watcher_manager
         self.health = health
+        # Default to the watcher manager's scheduler so interactive commands
+        # and background watcher work share one queue unless a caller
+        # explicitly wants them isolated (e.g. tests).
+        self.scheduler = scheduler or getattr(watcher_manager, "scheduler", None) or PriorityWorkScheduler()
         self.resume_cache_manager = ResumeExplicitCacheManager(
             profiles_dir=config.resume_profiles_dir,
             cache_dir=config.resume_cache_dir,
@@ -316,6 +386,7 @@ class CommandRouter:
         self.handlers: tuple[MessageHandler, ...] = (
             self.handle_commands,
             self.handle_resume,
+            self.handle_resume_cover,
             self.handle_resume_check,
             self.handle_status,
             self.handle_health,
@@ -330,6 +401,26 @@ class CommandRouter:
             self.handle_continue,
             self.handle_scrape,
         )
+
+    async def _run_interactive(
+        self,
+        fn: Callable[..., Any],
+        *args: Any,
+        cost: float | None = None,
+        label: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Run blocking work on the shared priority scheduler at interactive
+        tier -- these are Discord commands the user is actively waiting on,
+        so they preempt queued background watcher/scrape work of the same or
+        lower cost. Pass `label` so cost is derived from that label's real
+        measured median duration (rolling two-day window) instead of a guess.
+
+        Held under work_guard() so graceful shutdown's drain_active_work()
+        waits for in-flight interactive commands (e.g. .resumebuild) instead
+        of abandoning them mid-execution."""
+        async with self.watcher_manager.work_guard():
+            return await self.scheduler.run(fn, *args, tier=INTERACTIVE, cost=cost, label=label, **kwargs)
 
     @command_handler(CMD_COMMANDS, normalize=True)
     async def handle_commands(self, message: discord.Message) -> bool:
@@ -479,6 +570,7 @@ class CommandRouter:
                 channel_names,
                 active_job,
                 active_reddit,
+                scheduler_stats=self.scheduler.stats(),
             )
             await message.channel.send(embed=embed)
             return True
@@ -495,6 +587,7 @@ class CommandRouter:
             reddit_task_alive=bool(reddit_task and not reddit_task.done()),
             active_job_watchers=active_job,
             active_reddit_watchers=active_reddit,
+            scheduler_stats=self.scheduler.stats(),
         )
         await message.channel.send(embeds=embeds)
         return True
@@ -694,16 +787,21 @@ class CommandRouter:
             lines.append(f"Apply URL: {job.apply_url}")
         return lines
 
-    async def resolve_resume_context(self, message: discord.Message) -> JobContext | None:
+    async def resolve_resume_context(
+        self,
+        message: discord.Message,
+        command: str = CMD_RESUME,
+        slash_command: str = PRIMARY_RESUME_SLASH_COMMAND,
+    ) -> JobContext | None:
         referenced = await self.resolve_referenced_message(message)
         if referenced is None:
-            await message.channel.send(f"Reply to a job post message with `{CMD_RESUME}` or `{PRIMARY_RESUME_SLASH_COMMAND}`.")
+            await message.channel.send(f"Reply to a job post message with `{command}` or `{slash_command}`.")
             return None
 
         referenced_author = getattr(referenced, "author", None)
         if not bool(getattr(referenced_author, "bot", False)):
             await message.channel.send(
-                f"Reply to an ErnestBot job listing message with `{CMD_RESUME}` or `{PRIMARY_RESUME_SLASH_COMMAND}`."
+                f"Reply to an ErnestBot job listing message with `{command}` or `{slash_command}`."
             )
             return None
 
@@ -718,7 +816,7 @@ class CommandRouter:
         has_url = "http://" in content or "https://" in content
         if not (has_listing_header and has_url):
             await message.channel.send(
-                f"Reply to an ErnestBot job listing message with `{CMD_RESUME}` or `{PRIMARY_RESUME_SLASH_COMMAND}`."
+                f"Reply to an ErnestBot job listing message with `{command}` or `{slash_command}`."
             )
             return None
 
@@ -729,63 +827,72 @@ class CommandRouter:
 
         return job
 
-    @command_handler(CMD_RESUME, normalize=True)
-    async def handle_resume(self, message: discord.Message) -> bool:
+    async def _prepare_resume_request(
+        self,
+        message: discord.Message,
+        command: str,
+        slash_command: str,
+    ) -> _ResumeRequest | None:
+        """Shared validation scaffold for the resume-family commands: guild
+        check, target/profile resolution, provider-key check, job context, and
+        required-file checks. Sends the user-facing error and returns None on
+        any failure."""
         guild_owner_id = getattr(getattr(message, "guild", None), "owner_id", None)
         if guild_owner_id is None:
             await message.channel.send(self.build_resume_guild_only_message())
-            return True
+            return None
 
         cache_root = Path(__file__).resolve().parents[1] / "services" / "resumes" / "resumes_cache"
-        target_user, target_error = await self._resolve_resume_target_member(message, CMD_RESUME)
+        target_user, target_error = await self._resolve_resume_target_member(message, command)
         owner_profile_key_override: str | None = None
         if target_error:
             owner_profile_key_override, owner_override_error = self._resolve_owner_profile_key_from_payload(
                 message,
-                CMD_RESUME,
+                command,
                 cache_root,
             )
             if owner_override_error is not None:
                 await message.channel.send(target_error)
-                return True
+                return None
             target_user_id = self._normalized_discord_id(getattr(getattr(message, "author", None), "id", None))
             target_profile_name = None
         else:
             target_user_id = self._normalized_discord_id(getattr(target_user, "id", None))
             if not self._can_access_resume_target(message, target_user_id):
                 await message.channel.send(self.build_resume_unauthorized_message())
-                return True
+                return None
 
             target_profile_name = self._author_profile_name(target_user)
             if target_user_id is None:
                 await message.channel.send("Could not resolve a valid target profile for this command.")
-                return True
+                return None
 
         settings = load_gemini_settings(self.config)
         if not (settings.api_key or settings.openrouter_api_key or settings.groq_api_key):
             await message.channel.send(self.build_resume_missing_key_message())
-            return True
+            return None
 
-        job = await self.resolve_resume_context(message)
+        job = await self.resolve_resume_context(message, command, slash_command)
         if job is None:
-            return True
+            return None
 
         profile_key = owner_profile_key_override or discord_profile_key(target_user_id, target_profile_name)
 
         # Explicitly check for user resume cache folder and required files
         if owner_profile_key_override is None:
             try:
-                profile_dir = await asyncio.to_thread(
+                profile_dir = await self._run_interactive(
                     ensure_profile_cache,
                     profile_key,
                     cache_root,
+                    label=scheduler_labels.RESUME_ENSURE_PROFILE_CACHE,
                 )
             except FileNotFoundError as exc:
                 await message.channel.send(f"Resume cache setup failed: {exc}",
                                            reference=message.to_reference(fail_if_not_exists=False),
                                            mention_author=False,
                                            allowed_mentions=discord.AllowedMentions.none())
-                return True
+                return None
 
             try:
                 profile_key = resolve_discord_profile_key(
@@ -800,7 +907,7 @@ class CommandRouter:
                     mention_author=False,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
-                return True
+                return None
             profile_dir = cache_root / profile_key
         else:
             profile_dir = cache_root / profile_key
@@ -816,11 +923,8 @@ class CommandRouter:
                 mention_author=False,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-            return True
+            return None
 
-        template_path = profile_dir / "template.tex"
-        compile_log_dir = self.config.resume_cache_dir / "compile_logs"
-        template_log_path = compile_log_dir / f"{profile_dir.name}.log"
         reply_reference = message.to_reference(fail_if_not_exists=False)
         reply_send_kwargs = {
             "reference": reply_reference,
@@ -828,22 +932,51 @@ class CommandRouter:
             "allowed_mentions": discord.AllowedMentions.none(),
         }
 
-
-        # Use a user-specific ResumeExplicitCacheManager for this request
         if owner_profile_key_override is None:
             cache_scope = str(target_user_id)
         else:
             cache_scope = f"profile_{re.sub(r'[^A-Za-z0-9._-]+', '-', profile_key)}"
+
+        return _ResumeRequest(
+            settings=settings,
+            job=job,
+            profile_key=profile_key,
+            profile_dir=profile_dir,
+            template_path=profile_dir / "template.tex",
+            cache_scope=cache_scope,
+            reply_send_kwargs=reply_send_kwargs,
+        )
+
+    @command_handler(CMD_RESUME, normalize=True)
+    async def handle_resume(self, message: discord.Message) -> bool:
+        stripped_content, aggressive, strong_aggressive = _extract_aggressiveness_flags(str(getattr(message, "content", "")))
+        if aggressive or strong_aggressive:
+            message = _ContentOverrideMessage(message, stripped_content)
+
+        request = await self._prepare_resume_request(message, CMD_RESUME, PRIMARY_RESUME_SLASH_COMMAND)
+        if request is None:
+            return True
+
+        settings = request.settings
+        job = request.job
+        profile_dir = request.profile_dir
+        template_path = request.template_path
+        reply_send_kwargs = request.reply_send_kwargs
+        compile_log_dir = self.config.resume_cache_dir / "compile_logs"
+        template_log_path = compile_log_dir / f"{profile_dir.name}.log"
+
+        # Use a user-specific ResumeExplicitCacheManager for this request
         user_resume_cache_manager = ResumeExplicitCacheManager(
             profiles_dir=profile_dir,
-            cache_dir=self.config.resume_cache_dir / f".cache_{cache_scope}",
+            cache_dir=self.config.resume_cache_dir / f".cache_{request.cache_scope}",
         )
 
         # Structured-mode profiles never use the Gemini context cache (the
         # cached legacy instructions conflict with the JSON-only prompt), so
         # skip the cache round-trip entirely for them.
-        is_structured_profile = await asyncio.to_thread(
-            lambda: load_structured_profile(template_path, profile_dir / "baseinfo.txt") is not None
+        is_structured_profile = await self._run_interactive(
+            lambda: load_structured_profile(template_path, profile_dir / "baseinfo.txt") is not None,
+            label=scheduler_labels.RESUME_LOAD_STRUCTURED_PROFILE,
         )
         if is_structured_profile:
             cache_status = ResumeExplicitCacheStatus(
@@ -851,14 +984,16 @@ class CommandRouter:
                 message="Gemini cache skipped: structured profile mode.",
             )
         elif settings.api_key:
-            cache_status = await asyncio.to_thread(user_resume_cache_manager.ensure_cache, settings)
+            cache_status = await self._run_interactive(
+                user_resume_cache_manager.ensure_cache, settings, label=scheduler_labels.RESUME_ENSURE_GEMINI_CACHE
+            )
         else:
             cache_status = ResumeExplicitCacheStatus(
                 status="skipped",
                 message="Gemini cache skipped: no Gemini API key configured.",
             )
 
-        rewrite_result = await asyncio.to_thread(
+        rewrite_result = await self._run_interactive(
             generate_resume_rewrite,
             settings,
             job,
@@ -866,6 +1001,9 @@ class CommandRouter:
             [profile_dir / "baseinfo.txt"],
             [profile_dir / "instructions.txt"],
             template_path,
+            label=scheduler_labels.RESUME_REWRITE,
+            aggressive=aggressive,
+            strong_aggressive=strong_aggressive,
         )
 
         if rewrite_result.status != "ok" or not rewrite_result.rewritten_resume:
@@ -876,13 +1014,14 @@ class CommandRouter:
             await message.channel.send("Resume generation did not return a LaTeX document.", **reply_send_kwargs)
             return True
 
-        compile_result = await asyncio.to_thread(
+        compile_result = await self._run_interactive(
             compile_latex_to_pdf,
             rewrite_result.latex_document,
             job.title,
             template_path,
             template_log_path,
             self.config.resume_normalize_json_latex,
+            label=scheduler_labels.RESUME_COMPILE_LATEX,
         )
 
         def _recompile(latex_document: str):
@@ -902,12 +1041,13 @@ class CommandRouter:
         llm_repair_attempted = False
         if compile_result.status == "error" and compile_result.log_excerpt:
             llm_repair_attempted = True
-            repaired_latex, compile_result, llm_repair_provider, _repair_rounds = await asyncio.to_thread(
+            repaired_latex, compile_result, llm_repair_provider, _repair_rounds = await self._run_interactive(
                 repair_latex_until_compiles,
                 rewrite_result.latex_document,
                 compile_result,
                 settings,
                 _recompile,
+                label=scheduler_labels.RESUME_REPAIR_LATEX,
             )
             if llm_repair_provider:
                 rewrite_result.latex_document = repaired_latex
@@ -918,13 +1058,14 @@ class CommandRouter:
         # condensed one compiles with fewer pages.
         llm_condense_provider: str | None = None
         if compile_result.status == "ok":
-            condensed_latex, compile_result, llm_condense_provider = await asyncio.to_thread(
+            condensed_latex, compile_result, llm_condense_provider = await self._run_interactive(
                 condense_latex_if_overflowing,
                 rewrite_result.latex_document,
                 compile_result,
                 self.config.resume_max_pages,
                 settings,
                 _recompile,
+                label=scheduler_labels.RESUME_CONDENSE_LATEX,
             )
             if llm_condense_provider:
                 rewrite_result.latex_document = condensed_latex
@@ -941,7 +1082,7 @@ class CommandRouter:
             if structured_summary is not None and rewrite_result.used_provider is None:
                 content = (
                     "Compiled PDF from canonical content (all LLM providers failed; "
-                    f"role family `{structured_summary.get('role_family', '?')}` detected by keywords)."
+                    "rendered deterministically with extracted listing keywords)."
                 )
             else:
                 used_provider = rewrite_result.used_provider or "gemini"
@@ -955,10 +1096,13 @@ class CommandRouter:
                 if structured_summary is not None:
                     tailored = structured_summary.get("tailored_bullets_used", 0)
                     total_bullets = structured_summary.get("visible_bullet_count", 0)
-                    family = structured_summary.get("role_family", "?")
                     content = (
-                        f"{content} Tailored {tailored}/{total_bullets} bullets for `{family}` role."
+                        f"{content} Tailored {tailored}/{total_bullets} bullets for this listing."
                     )
+                    if structured_summary.get("strong_aggressive"):
+                        content = f"{content} (strong-aggressive mode)"
+                    elif structured_summary.get("aggressive"):
+                        content = f"{content} (aggressive mode)"
             if compile_result.repairs_applied:
                 shown_repairs = compile_result.repairs_applied[:3]
                 extra_repairs = len(compile_result.repairs_applied) - len(shown_repairs)
@@ -1008,6 +1152,75 @@ class CommandRouter:
             await message.channel.send(error_msg, **reply_send_kwargs)
         return True
 
+    @command_handler(CMD_RESUME_COVER, normalize=True)
+    async def handle_resume_cover(self, message: discord.Message) -> bool:
+        request = await self._prepare_resume_request(message, CMD_RESUME_COVER, "/resumecoverbuild")
+        if request is None:
+            return True
+
+        job = request.job
+        profile_dir = request.profile_dir
+        reply_send_kwargs = request.reply_send_kwargs
+        compile_log_dir = self.config.resume_cache_dir / "compile_logs"
+        cover_log_path = compile_log_dir / f"{profile_dir.name}.coverbuild.log"
+
+        cover_result = await self._run_interactive(
+            generate_cover_letter,
+            request.settings,
+            job,
+            request.template_path,
+            profile_dir / "baseinfo.txt",
+            label=scheduler_labels.RESUME_COVER_REWRITE,
+        )
+
+        if cover_result.status != "ok" or not cover_result.latex_document:
+            await message.channel.send(
+                f"Cover letter generation failed: {cover_result.message}", **reply_send_kwargs
+            )
+            return True
+
+        compile_result = await self._run_interactive(
+            compile_latex_to_pdf,
+            cover_result.latex_document,
+            f"Cover Letter - {job.title}",
+            request.template_path,
+            cover_log_path,
+            self.config.resume_normalize_json_latex,
+            label=scheduler_labels.RESUME_COVER_COMPILE_LATEX,
+        )
+
+        if compile_result.status == "ok" and compile_result.pdf_bytes and compile_result.pdf_name:
+            content = cover_result.message
+            if compile_result.repairs_applied:
+                content = f"{content} Auto-fixed LaTeX: {', '.join(compile_result.repairs_applied[:3])}."
+            await message.channel.send(
+                content=content,
+                file=discord.File(io.BytesIO(compile_result.pdf_bytes), filename=compile_result.pdf_name),
+                **reply_send_kwargs,
+            )
+        else:
+            failure_dump_name = None
+            try:
+                failed_latex_dir = self.config.resume_cache_dir / "failed_latex"
+                failed_latex_dir.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                title_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", job.title).strip("-") or "cover"
+                failure_dump_name = f"{timestamp}-{profile_dir.name}-cover-{title_slug}.tex"
+                (failed_latex_dir / failure_dump_name).write_text(
+                    cover_result.latex_document,
+                    encoding="utf-8",
+                )
+            except OSError:
+                failure_dump_name = None
+
+            error_msg = f"Cover letter PDF compile failed: {compile_result.message}"
+            if failure_dump_name:
+                error_msg += f"\nSaved failed LaTeX: `{failure_dump_name}`"
+            if compile_result.log_excerpt:
+                error_msg += f"\n```\n{compile_result.log_excerpt[-500:]}\n```"
+            await message.channel.send(error_msg, **reply_send_kwargs)
+        return True
+
     @command_handler(CMD_RESUME_CHECK, normalize=True)
     async def handle_resume_check(self, message: discord.Message) -> bool:
         guild_owner_id = getattr(getattr(message, "guild", None), "owner_id", None)
@@ -1041,10 +1254,11 @@ class CommandRouter:
                 return True
 
             profile_key = discord_profile_key(target_user_id, target_profile_name)
-            profile_dir = await asyncio.to_thread(
+            profile_dir = await self._run_interactive(
                 ensure_profile_cache,
                 profile_key,
                 cache_root,
+                label=scheduler_labels.RESUME_ENSURE_PROFILE_CACHE,
             )
             try:
                 profile_key = resolve_discord_profile_key(
@@ -1066,7 +1280,9 @@ class CommandRouter:
         template_log_path = compile_log_dir / f"{profile_dir.name}.resumecheck.log"
 
         try:
-            template_text = await asyncio.to_thread(template_path.read_text, encoding="utf-8")
+            template_text = await self._run_interactive(
+                template_path.read_text, encoding="utf-8", label=scheduler_labels.RESUME_READ_TEMPLATE
+            )
         except OSError as exc:
             await message.channel.send(f"Could not read current template for `{profile_dir.name}`: {exc}")
             return True
@@ -1075,13 +1291,14 @@ class CommandRouter:
             await message.channel.send("Current template is empty. Update `template.tex` first, then run `/resumecheck`.")
             return True
 
-        compile_result = await asyncio.to_thread(
+        compile_result = await self._run_interactive(
             compile_latex_to_pdf,
             template_text,
             f"{profile_dir.name}-resume-check",
             template_path,
             template_log_path,
             self.config.resume_normalize_json_latex,
+            label=scheduler_labels.RESUME_COMPILE_LATEX,
         )
 
         reply_reference = message.to_reference(fail_if_not_exists=False)
@@ -1139,7 +1356,7 @@ class CommandRouter:
         native_query = job_service.effective_jobbank_native_query(str(settings.get("jobbank_native_query") or ""))
 
         requested = max(1, min(int(settings.get("results_wanted") or 10), 10))
-        items = await asyncio.to_thread(
+        items = await self._run_interactive(
             job_service.scrape_job_postings,
             [job_service.JOBBANK_CANADA_SITE],
             keywords,
@@ -1152,6 +1369,7 @@ class CommandRouter:
             "command:jobbanktest",
             bool(settings.get("allow_north_america", False)),
             native_query,
+            label=scheduler_labels.JOBBANK_TEST_SCRAPE,
         )
 
         source_label = "sample params" if used_sample_fallback else "watcher params"
@@ -1217,21 +1435,22 @@ class CommandRouter:
         )
 
         t_start = _time.perf_counter()
-        async with self.watcher_manager.work_guard():
-            raw_items = await asyncio.to_thread(
-                job_service.scrape_job_postings,
-                sites,
-                keywords,
-                location,
-                self.config.jobspy_python_exe,
-                hours_old,
-                results_wanted,
-                radius_miles,
-                country_indeed,
-                "command:jobtest",
-                allow_na,
-                native_query,
-            )
+        # _run_interactive already holds work_guard() for the duration.
+        raw_items = await self._run_interactive(
+            job_service.scrape_job_postings,
+            sites,
+            keywords,
+            location,
+            self.config.jobspy_python_exe,
+            hours_old,
+            results_wanted,
+            radius_miles,
+            country_indeed,
+            "command:jobtest",
+            allow_na,
+            native_query,
+            label=scheduler_labels.JOB_PIPELINE_TEST_SCRAPE,
+        )
         t_scrape = _time.perf_counter()
 
         count_raw = len(raw_items)
@@ -1242,12 +1461,17 @@ class CommandRouter:
         after_excl = [i for i in after_role if not job_service.matches_exclusion_terms(i, exclusion_terms)]
         count_excl_removed = len(after_role) - len(after_excl)
 
-        after_semantic = [
-            i for i in after_excl
-            if job_service.matches_search_parameters_semantic(
-                i, keywords, location, role_filters, threshold=sem_threshold,
-            )
-        ]
+        def _semantic_filter(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [
+                i for i in candidates
+                if job_service.matches_search_parameters_semantic(
+                    i, keywords, location, role_filters, threshold=sem_threshold,
+                )
+            ]
+
+        after_semantic = await self._run_interactive(
+            _semantic_filter, after_excl, label=scheduler_labels.JOB_PIPELINE_TEST_SEMANTIC_FILTER
+        )
         t_filter = _time.perf_counter()
         count_sem_removed = len(after_excl) - len(after_semantic)
 
@@ -1506,14 +1730,15 @@ class CommandRouter:
         try:
             settings = self.store.get_scrape_settings(message.channel.id)
             if job_service.job_site_from_url(url):
-                items = await asyncio.to_thread(
+                items = await self._run_interactive(
                     job_service.scrape_jobs_from_board_url,
                     url,
                     self.config.jobspy_python_exe,
                     int(settings["max_items"]),
+                    label=scheduler_labels.SCRAPE_COMMAND_JOBSITE,
                 )
             else:
-                items = await asyncio.to_thread(
+                items = await self._run_interactive(
                     scrape_service.scrape_url,
                     url,
                     selector,
@@ -1522,15 +1747,17 @@ class CommandRouter:
                     3,
                     int(settings["max_items"]),
                     False,
+                    label=scheduler_labels.SCRAPE_COMMAND_GENERIC,
                 )
 
             if settings["use_ai_cleanup"] and self.config.openrouter_key:
                 try:
-                    result = await asyncio.to_thread(
+                    result = await self._run_interactive(
                         scrape_service.clean_with_openrouter,
                         url,
                         items,
                         self.config.openrouter_key,
+                        label=scheduler_labels.SCRAPE_COMMAND_AI_CLEANUP,
                     )
                     output = f"[{result['source_url']} via {result['model']}]\n{result['text']}"
                 except Exception:
@@ -1579,10 +1806,11 @@ class CommandRouter:
             guild_owner_id = getattr(getattr(message, "guild", None), "owner_id", None)
             cache_root = Path(__file__).resolve().parents[1] / "services" / "resumes" / "resumes_cache"
             profile_key = discord_profile_key(message.author.id, self._author_profile_name(message.author))
-            resume_profile_dir = await asyncio.to_thread(
+            resume_profile_dir = await self._run_interactive(
                 ensure_profile_cache,
                 profile_key,
                 cache_root,
+                label=scheduler_labels.RESUME_ENSURE_PROFILE_CACHE,
             )
             profile_key = resolve_discord_profile_key(
                 message.author.id,
