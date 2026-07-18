@@ -18,7 +18,7 @@ TEMPLATE_PATH = RESUMES_CACHE_ROOT / "template.tex"
 PROFILE_ALLOWED_FILE_NAMES = ("baseinfo.txt", "instructions.txt", "template.tex")
 # Optional per-profile files (structured pipeline). Never required, never
 # seeded from the example profile, and never purged.
-PROFILE_OPTIONAL_FILE_NAMES = ("structured_config.json", "structured_guidance.txt")
+PROFILE_OPTIONAL_FILE_NAMES = ("structured_config.json",)
 EXAMPLE_PROFILE_KEY = "example"
 LLM_PROVIDER_SWITCH_ORDER = ("gemini", "gemini-flash", "openrouter", "groq")
 MAX_PROFILE_NAME_PART_LEN = 80
@@ -115,6 +115,35 @@ PROVIDER_CAPABILITIES: dict[str, LLMProviderCapabilities] = {
 		request_timeout_seconds=30,
 	),
 }
+
+# Per-MODEL overrides, keyed by model-id prefix (so ":free" suffixes match).
+# A provider slot's defaults are tuned for the model that historically ran
+# there; swapping the slot's model must re-tune its limits without touching
+# the other providers' behavior.
+MODEL_CAPABILITY_OVERRIDES: tuple[tuple[str, LLMProviderCapabilities], ...] = (
+	(
+		"nvidia/nemotron-3-super",
+		LLMProviderCapabilities(
+			supports_context_cache=False,
+			max_prompt_chars=120_000,
+			# Observed live generations: 75-250s (mean ~150s). The 45s
+			# openrouter default was tuned for gpt-oss-120b and would time
+			# out nearly every nemotron call before it finished.
+			request_timeout_seconds=300,
+		),
+	),
+)
+
+
+def resolve_provider_capabilities(
+	provider_name: str, model: str | None = None
+) -> LLMProviderCapabilities | None:
+	"""Capabilities for a provider slot, honoring per-model overrides first."""
+	if model:
+		for prefix, capabilities in MODEL_CAPABILITY_OVERRIDES:
+			if model.startswith(prefix):
+				return capabilities
+	return PROVIDER_CAPABILITIES.get(provider_name)
 
 
 DOCUMENTCLASS_PATTERN = re.compile(r"\\documentclass(?:\[[^\]]*\])?\{([^}]+)\}")
@@ -1890,7 +1919,13 @@ def compile_latex_to_pdf(
 						break
 
 					page_count: int | None = None
-					page_match = LATEX_PAGE_COUNT_PATTERN.search(final_stdout or "")
+					# pdflatex hard-wraps its own stdout at a fixed column width
+					# regardless of word boundaries, so a long output filename can
+					# split "(1 page, ...)" across a line break (e.g. "...(1 p\nage,
+					# ...)"), silently defeating the pattern below. Strip newlines
+					# before matching since none are semantically meaningful here.
+					flattened_stdout = re.sub(r"\r?\n", "", final_stdout or "")
+					page_match = LATEX_PAGE_COUNT_PATTERN.search(flattened_stdout)
 					if page_match:
 						page_count = int(page_match.group(1))
 

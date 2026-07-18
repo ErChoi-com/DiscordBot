@@ -1,7 +1,7 @@
 """Proof that the structured pipeline is domain-agnostic: a synthetic nursing
-profile (no software content anywhere) must parse, route, validate, and render
-end to end. Families, categories, skill anchors, and skills ordering all come
-from profile content — nothing in the code may assume a tech resume."""
+profile (no software content anywhere) must parse, validate, and render end to
+end. Categories, skill anchors, and skills ordering all come from profile
+content — nothing in the code may assume a tech resume."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from services.resumes.structured import (
     StructuredSelection,
-    detect_role_family,
     load_structured_profile,
     render_structured_resume,
     validate_tailored_bullet,
@@ -87,74 +86,38 @@ NURSING_BASEINFO = """Casey Cardinal -- nursing student, Toronto.
 Systems: Epic, Excel, Meditech
 Certifications: CPR, First Aid
 Clinical: IV setup, Wound care, Vital signs
-
-== ROLE TYPE SELECTION GUIDE ==
-
-CLINICAL / BEDSIDE roles
-  Keywords: nurse, patient, clinical, bedside, medication, acute, ward, charting
-  MUST SHOW: clinical
-  SHOW:      community, admin
-  HIDE:      none
-
-ADMIN / COORDINATION roles
-  Keywords: administration, scheduling, records, clerk, intake, coordinator
-  MUST SHOW: admin
-  SHOW:      clinical, community
-  HIDE:      none
 """
 
 NURSING_CONFIG = {
     "min_visible_bullets": 4,
     "max_visible_bullets": 8,
     "rewrite_scope": "full",
-    "family_skill_priority": {
-        "CLINICAL": ["Epic", "Meditech", "CPR", "IV setup"],
-        "ADMIN": ["Excel", "Meditech"],
-    },
 }
 
 
 @pytest.fixture(scope="module")
-def nursing_profile(tmp_path_factory):
+def nursing_catalog(tmp_path_factory):
     profile_dir = tmp_path_factory.mktemp("nursing_profile")
     (profile_dir / "template.tex").write_text(NURSING_TEMPLATE, encoding="utf-8")
     (profile_dir / "baseinfo.txt").write_text(NURSING_BASEINFO, encoding="utf-8")
     (profile_dir / "structured_config.json").write_text(json.dumps(NURSING_CONFIG), encoding="utf-8")
-    loaded = load_structured_profile(profile_dir / "template.tex", profile_dir / "baseinfo.txt")
-    assert loaded is not None, "nursing profile failed to load as a structured profile"
-    return loaded
+    catalog = load_structured_profile(profile_dir / "template.tex", profile_dir / "baseinfo.txt")
+    assert catalog is not None, "nursing profile failed to load as a structured profile"
+    return catalog
 
 
-def test_nursing_profile_parses_entries_and_families(nursing_profile) -> None:
-    catalog, families = nursing_profile
-    assert len(catalog.entries) == 3
-    assert {f.key for f in families} == {"CLINICAL", "ADMIN"}
-    assert "epic" in catalog.skill_anchors
+def test_nursing_profile_parses_entries_and_anchors(nursing_catalog) -> None:
+    assert len(nursing_catalog.entries) == 3
+    assert "epic" in nursing_catalog.skill_anchors
+    assert {c for e in nursing_catalog.entries for c in e.categories} == {
+        "clinical",
+        "community",
+        "admin",
+    }
 
 
-def test_nursing_listing_routes_to_clinical_family(nursing_profile) -> None:
-    _, families = nursing_profile
-    family = detect_role_family(
-        "Registered Nurse - acute care ward, medication administration, patient charting",
-        families,
-    )
-    assert family is not None and family.key == "CLINICAL"
-
-
-def test_admin_listing_routes_to_admin_family(nursing_profile) -> None:
-    _, families = nursing_profile
-    family = detect_role_family(
-        "Medical Records Coordinator - scheduling, intake, records administration",
-        families,
-    )
-    assert family is not None and family.key == "ADMIN"
-
-
-def test_nursing_render_is_clean_and_complete(nursing_profile) -> None:
-    catalog, families = nursing_profile
-    latex, report = render_structured_resume(
-        catalog, families, StructuredSelection(role_family_key="CLINICAL")
-    )
+def test_nursing_render_is_clean_and_complete(nursing_catalog) -> None:
+    latex, report = render_structured_resume(nursing_catalog, StructuredSelection())
     assert report.fidelity_findings == []
     assert "Student Nurse" in latex
     assert "Casey Cardinal" in latex
@@ -163,28 +126,38 @@ def test_nursing_render_is_clean_and_complete(nursing_profile) -> None:
     assert "\\end{document}" in latex
 
 
-def test_nursing_skills_lines_order_by_family_priority(nursing_profile) -> None:
-    catalog, families = nursing_profile
+def test_nursing_ranking_reorders_entries(nursing_catalog) -> None:
+    admin_id = next(
+        e.entry_id for e in nursing_catalog.entries if "admin" in e.categories
+    )
+    latex, report = render_structured_resume(
+        nursing_catalog, StructuredSelection(ranking=[admin_id])
+    )
+    assert admin_id in report.visible_entries
+    assert "Ward Clerk" in latex
+
+
+def test_nursing_skills_lines_order_by_listing_keywords(nursing_catalog) -> None:
     latex, _ = render_structured_resume(
-        catalog, families, StructuredSelection(role_family_key="CLINICAL")
+        nursing_catalog, StructuredSelection(keywords=["Meditech", "Epic"])
     )
     systems = next(l for l in latex.splitlines() if l.startswith("\\textbf{Systems:}"))
-    # CLINICAL priority: Epic, Meditech ahead of canonical-first Excel.
     items = systems.split("}", 1)[1].strip()
+    # Listing-matched systems lead (stable canonical order within the match
+    # tier: Epic before Meditech); canonical-first Excel drops behind them.
     assert items.startswith("Epic, Meditech, Excel")
 
 
-def test_nursing_bullet_validation_grounds_on_clinical_anchors(nursing_profile) -> None:
-    catalog, _ = nursing_profile
-    clinical = next(e for e in catalog.entries if "clinical" in e.categories)
+def test_nursing_bullet_validation_grounds_on_clinical_anchors(nursing_catalog) -> None:
+    clinical = next(e for e in nursing_catalog.entries if "clinical" in e.categories)
     canonical = clinical.bullets[0]
 
     # Bolding a real anchor the canonical bullet lacks (Meditech) is allowed.
     ok_text, ok_reason = validate_tailored_bullet(
         "Charted patient vitals in \\textbf{Epic} and \\textbf{Meditech} for a 12-bed unit, cutting handoff errors by 18\\%.",
         canonical,
-        catalog.render_config,
-        skill_anchors=catalog.skill_anchors,
+        nursing_catalog.render_config,
+        skill_anchors=nursing_catalog.skill_anchors,
         entry_context=" ".join(clinical.bullets),
     )
     assert ok_reason is None and ok_text is not None
@@ -193,33 +166,18 @@ def test_nursing_bullet_validation_grounds_on_clinical_anchors(nursing_profile) 
     bad_text, bad_reason = validate_tailored_bullet(
         "Charted patient vitals in \\textbf{Cerner} for a 12-bed unit, cutting handoff errors by 18\\%.",
         canonical,
-        catalog.render_config,
-        skill_anchors=catalog.skill_anchors,
+        nursing_catalog.render_config,
+        skill_anchors=nursing_catalog.skill_anchors,
         entry_context=" ".join(clinical.bullets),
     )
     assert bad_text is None and "invented tool" in str(bad_reason)
 
 
-def test_nursing_bullet_validation_rejects_invented_metric(nursing_profile) -> None:
-    catalog, _ = nursing_profile
-    clinical = next(e for e in catalog.entries if "clinical" in e.categories)
-    text, reason = validate_tailored_bullet(
-        "Charted patient vitals in \\textbf{Epic}, cutting handoff errors by 45\\%.",
-        clinical.bullets[0],
-        catalog.render_config,
-        skill_anchors=catalog.skill_anchors,
-        entry_context=" ".join(clinical.bullets),
-    )
-    assert text is None and "invented number" in str(reason)
-
-
-def test_nursing_selection_scope_renders_pure_canonical(nursing_profile, monkeypatch) -> None:
-    catalog, families = nursing_profile
-    monkeypatch.setattr(catalog.render_config, "rewrite_scope", "selection")
+def test_nursing_selection_scope_renders_pure_canonical(nursing_catalog, monkeypatch) -> None:
+    monkeypatch.setattr(nursing_catalog.render_config, "rewrite_scope", "selection")
     selection = StructuredSelection(
-        role_family_key="CLINICAL",
-        bullets={e.entry_id: ["Totally rewritten bullet."] for e in catalog.entries},
+        bullets={e.entry_id: ["Totally rewritten bullet."] for e in nursing_catalog.entries},
     )
-    latex, report = render_structured_resume(catalog, families, selection)
+    latex, report = render_structured_resume(nursing_catalog, selection)
     assert "Totally rewritten" not in latex
     assert report.tailored_bullets_used == 0

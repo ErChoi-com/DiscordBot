@@ -6,7 +6,10 @@ from typing import Any
 
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 DEFAULT_RESUME_CACHE_TTL_SECONDS = 86400
-DEFAULT_OPENROUTER_RESUME_MODEL = "openai/gpt-oss-120b"
+# Best currently-free model on OpenRouter for instruction-following/structured
+# JSON output (verified against OpenRouter's live /models catalog).
+DEFAULT_OPENROUTER_RESUME_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+# Groq's own flagship model — second-best fallback behind the OpenRouter rung.
 DEFAULT_GROQ_RESUME_MODEL = "openai/gpt-oss-120b"
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -22,15 +23,38 @@ from .. import (
 from .. import browser_service
 from .cache import normalize_gemini_model_name
 from .configkey import GeminiSettings
-from .resume import LLM_PROVIDER_SWITCH_ORDER, PROVIDER_CAPABILITIES, TEMPLATE_PATH, extract_latex_document, read_resume_template
+from .resume import LLM_PROVIDER_SWITCH_ORDER, PROVIDER_CAPABILITIES, TEMPLATE_PATH, extract_latex_document, read_resume_template, resolve_provider_capabilities
 from .structured import (
     StructuredSelection,
+    _effective_render_config,
+    _extract_jd_tools,
+    apply_grounding_verdicts,
+    build_grounding_audit_items,
     build_structured_prompt,
-    detect_role_family,
+    excerpt_job_description,
+    extract_json_object,
+    extract_listing_keywords,
+    grounding_audit_prompt,
     load_structured_profile,
     parse_structured_response,
     render_structured_resume,
 )
+
+# rebuilt_app/.resume_cache — same root the compile logs and failed-latex
+# artifacts use (via config.resume_cache_dir; this module has no config).
+STRUCTURED_CACHE_ROOT = Path(__file__).resolve().parents[3] / ".resume_cache"
+STRUCTURED_SELECTION_CACHE_DIR = STRUCTURED_CACHE_ROOT / "structured_selections"
+STRUCTURED_TELEMETRY_PATH = STRUCTURED_CACHE_ROOT / "structured_builds.jsonl"
+# One JSON line per scrape attempt recording which fallback rung rescued it
+# (or that all rungs failed) — watch this for silent endpoint rot the way
+# structured_builds.jsonl is watched for provider degradation.
+SCRAPE_TELEMETRY_PATH = STRUCTURED_CACHE_ROOT / "scrape_events.jsonl"
+SELECTION_CACHE_TTL_SECONDS = 86400.0
+
+# A provider that just rate-limited us will rate-limit the next request too;
+# skip it for a cooldown window instead of paying its timeout every build.
+PROVIDER_COOLDOWN_SECONDS = 120.0
+_PROVIDER_COOLDOWN_UNTIL: dict[str, float] = {}
 
 SPACE_PATTERN = re.compile(r"\s+")
 TITLE_PREFIX_PATTERN = re.compile(r"^\[[^\]]+\]\s*")
@@ -931,6 +955,7 @@ def _scrape_icims_job_posting_with_ld_json(
 # job-board search fallback further below only does generic keyword search).
 _DIRECT_API_SCRAPERS: dict[str, Callable[[str, int, str], "ScrapedJobPosting | None"]] = {
     "linkedin": _scrape_linkedin_job_posting_with_guest_api,
+    "indeed": _scrape_indeed_job_posting_with_graphql,
     "greenhouse": _scrape_greenhouse_job_posting_with_api,
     "lever": _scrape_lever_job_posting_with_api,
     "ashby": _scrape_ashby_job_posting_with_api,
@@ -1013,7 +1038,36 @@ def _scrape_job_posting_with_browser(
     """
     if not browser_service.ensure_ready():
         return None
-    return browser_service.fetch_html(posting_url, timeout_ms=max(5000, int(timeout_seconds) * 1000))
+    # priority=True: an interactive .resumebuild/.resumecoverbuild scrape must
+    # not be starved out of the single Playwright slot by reddit watcher polls.
+    return browser_service.fetch_html(
+        posting_url,
+        timeout_ms=max(5000, int(timeout_seconds) * 1000),
+        priority=True,
+    )
+
+
+def _append_scrape_telemetry(record: dict) -> None:
+    try:
+        SCRAPE_TELEMETRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with SCRAPE_TELEMETRY_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+    except OSError:
+        pass
+
+
+def _record_scrape_outcome(posting_url: str, rung: str, started: float, error: str = "") -> None:
+    _append_scrape_telemetry(
+        {
+            "ts": round(time.time(), 1),
+            "url": posting_url[:300],
+            "site": job_site_from_url(posting_url),
+            "rung": rung,
+            "ok": not error,
+            "elapsed": round(time.monotonic() - started, 2),
+            **({"error": error[:300]} if error else {}),
+        }
+    )
 
 
 def scrape_job_posting(
@@ -1021,6 +1075,7 @@ def scrape_job_posting(
     timeout_seconds: int = 20,
     user_agent: str = "Mozilla/5.0 (compatible; RebuiltResumeBot/1.0)",
 ) -> ScrapedJobPosting:
+    started = time.monotonic()
     # Some job sites (LinkedIn especially) block plain `requests` clients via
     # TLS/JA3 fingerprinting (surfaces as SSLError/EOF). For sites with a
     # public, non-fingerprint-gated API for a specific posting, try that
@@ -1029,10 +1084,17 @@ def scrape_job_posting(
     # not fetch the exact posting).
     direct_api_scraper = _DIRECT_API_SCRAPERS.get(job_site_from_url(posting_url) or "")
     if direct_api_scraper is not None:
-        direct_result = direct_api_scraper(posting_url, timeout_seconds, user_agent)
+        try:
+            direct_result = direct_api_scraper(posting_url, timeout_seconds, user_agent)
+        except Exception:
+            # A direct-API scraper bug (schema drift, parse edge) must degrade
+            # to the next rung, never kill the whole chain.
+            direct_result = None
         if direct_result is not None:
+            _record_scrape_outcome(posting_url, "direct_api", started)
             return direct_result
 
+    html_rung = "page"
     html_text: str | None = None
     try:
         response = _get_with_retry(
@@ -1042,21 +1104,21 @@ def scrape_job_posting(
         )
         response.raise_for_status()
         html_text = response.text
-    except requests.RequestException:
+    except requests.RequestException as page_exc:
+        html_rung = "browser"
         html_text = _scrape_job_posting_with_browser(posting_url, timeout_seconds)
         if html_text is None:
-            if job_site_from_url(posting_url) == "indeed":
-                graphql_fallback = _scrape_indeed_job_posting_with_graphql(
-                    posting_url=posting_url,
-                    timeout_seconds=timeout_seconds,
-                    user_agent=user_agent,
-                )
-                if graphql_fallback is not None:
-                    return graphql_fallback
-
-            fallback = _fallback_scrape_job_posting_with_job_service(posting_url)
+            try:
+                fallback = _fallback_scrape_job_posting_with_job_service(posting_url)
+            except Exception:
+                fallback = None
             if fallback is not None:
+                _record_scrape_outcome(posting_url, "job_service", started)
                 return fallback
+            _record_scrape_outcome(
+                posting_url, "exhausted", started,
+                error=f"{type(page_exc).__name__}: {page_exc}",
+            )
             raise
 
     soup = BeautifulSoup(html_text, "html.parser")
@@ -1076,6 +1138,7 @@ def scrape_job_posting(
     )
     highlights = _extract_highlights(visible_text or description_raw)
 
+    _record_scrape_outcome(posting_url, html_rung, started)
     return ScrapedJobPosting(
         title=page_title or "Job Posting",
         company=company,
@@ -1150,7 +1213,7 @@ def build_resume_rewrite_prompt(job: JobContext, scraped_job: ScrapedJobPosting,
         "Job highlights:\n"
         f"{highlights}\n\n"
         "Job description excerpt:\n"
-        f"{scraped_job.description[:4500]}\n"
+        f"{excerpt_job_description(scraped_job.description)}\n"
         "</input>\n\n"
         f"{baseinfo or '<context>No baseinfo content available.</context>'}\n\n"
         f"{supporting_context or '<instructions>No additional instructions provided.</instructions>'}\n\n"
@@ -1158,14 +1221,21 @@ def build_resume_rewrite_prompt(job: JobContext, scraped_job: ScrapedJobPosting,
         "1. rewritten_tex: a complete compilable standalone LaTeX document that follows template.tex.\n"
         "2. Append exactly one <latex>...</latex> block containing the same rewritten_tex document.\n"
         "3. Write concisely — do not pad bullets, summaries, or descriptions. Every line must earn its place or the PDF will overflow.\n"
-        "4. LaTeX comment environments use \\begin{comment}...\\end{comment} to close — NEVER </comment> (that is an HTML closing tag and will cause a fatal pdflatex error).\n"
-        "5. STRICTLY FORBIDDEN IN OUTPUT (examples):\\n"
-        "   - Adding non-template sections such as 'Summary', 'Objective', or standalone 'Contact Information'.\\n"
-        "   - Placeholder identity/contact text such as '[Insert Address]', '[Insert Phone Number]', 'example.com', or dummy numbers.\\n"
-        "   - Replacing real candidate details with fake identities (for example 'John Doe').\\n"
-        "   - HTML tags in LaTeX output (for example </comment>, </ul>, </li>).\\n"
-        "   - Unsupported domain claims/terms not grounded in baseinfo (for example power systems hardware, SCADA, HVAC, substation work).\\n"
-        "6. If any forbidden pattern appears, regenerate before returning.\n"
+        "4. PROSE QUALITY — every bullet must read as one coherent sentence a human editor would sign off on:\n"
+        "   - Lead with a strong past-tense verb and keep one idea per bullet; tie each named tool to the specific thing it did rather than chaining names ('pipeline using Kafka using Python' and 'to serve as X, serving as Y' are forbidden shapes).\n"
+        "   - Use 'using' at most once per bullet, and vary sentence structure across bullets so consecutive bullets never share the same shape or opening verb.\n"
+        "   - Keep each metric attached to work that could plausibly have produced it, and never end a bullet with a vague gerund tail (', ensuring reliability and performance') — state a concrete outcome or stop at the fact.\n"
+        "   - Calibrate credit to <context>: solo-ownership verbs (Owned, Led, Spearheaded, Directed) only where the background states individual ownership or leadership; otherwise open with an active collaborative verb (Built, Developed, Engineered, Co-led). Where the background states a scope fact (team size, user base, live operation), state it early in the bullet — scope before tool names.\n"
+        "   - ADOPT THE LISTING'S LANGUAGE wherever it truthfully describes the work: mirror the posting's exact terminology and functional vocabulary, aiming for every bullet to carry at least one listing term. Spread DIFFERENT terms across bullets rather than repeating one, and never claim a named tool, system, or certification absent from <context>.\n"
+        "   - Read each rewritten bullet back to itself: if any clause would make a domain expert wince or a recruiter stumble, restructure the sentence around its strongest fact before returning.\n"
+        "5. LaTeX comment environments use \\begin{comment}...\\end{comment} to close — NEVER </comment> (that is an HTML closing tag and will cause a fatal pdflatex error).\n"
+        "6. STRICTLY FORBIDDEN IN OUTPUT (examples):\n"
+        "   - Adding non-template sections such as 'Summary', 'Objective', or standalone 'Contact Information'.\n"
+        "   - Placeholder identity/contact text such as '[Insert Address]', '[Insert Phone Number]', 'example.com', or dummy numbers.\n"
+        "   - Replacing real candidate details with fake identities (for example 'John Doe').\n"
+        "   - HTML tags in LaTeX output (for example </comment>, </ul>, </li>).\n"
+        "   - Unsupported domain claims/terms not grounded in baseinfo (for example power systems hardware, SCADA, HVAC, substation work).\n"
+        "7. If any forbidden pattern appears, regenerate before returning.\n"
         "</output_format>"
     )
 
@@ -1227,7 +1297,9 @@ def _groq_api_key() -> str | None:
     return value or None
 
 
-def _provider_switch_candidates(settings: GeminiSettings) -> list[ResumeProviderCandidate]:
+def _provider_switch_candidates(
+    settings: GeminiSettings,
+) -> list[ResumeProviderCandidate]:
     gemini_api_key = normalize_space(str(settings.api_key or "")) or None
     providers: dict[str, ResumeProviderCandidate] = {
         "gemini": ResumeProviderCandidate(
@@ -1366,59 +1438,60 @@ def _generate_with_openai_compatible_provider(
     return _extract_openai_compatible_content(payload)
 
 
-def _generate_structured_rewrite(
+def _iter_provider_responses(
     settings: GeminiSettings,
-    job: JobContext,
-    scraped_job: ScrapedJobPosting,
-    catalog: Any,
-    families: list[Any],
-    client_factory: Callable[[str], Any] | None,
-) -> ResumeRewriteResult:
-    """Structured pipeline: LLM returns JSON decisions, Python renders LaTeX.
+    prompt: str,
+    client_factory: Callable[[str], Any] | None = None,
+    *,
+    json_response: bool = False,
+    cache_name: str | None = None,
+    candidates: list[ResumeProviderCandidate] | None = None,
+    errors: list[str] | None = None,
+):
+    """Yield (provider_name, response_text) for each provider in the fallback
+    chain that produces a non-empty response.
 
-    Falls back to a fully deterministic render (canonical bullets, keyword-based
-    role detection) when every provider fails, so a resume is always produced.
+    The single home for per-provider plumbing that every LLM call site shares:
+    API-key and rate-limit-cooldown gating, capability-based prompt truncation
+    and timeouts, Gemini context-cache suppression for providers without
+    cachedContents, transport dispatch, and 429/RESOURCE_EXHAUSTED cooldown
+    marking. Callers keep their own response validation and stop iterating
+    (break/return) once a response is accepted; iterating past a yield means
+    "rejected, try the next provider".
+
+    `candidates` overrides the default fallback order (e.g. the grounding
+    audit puts gemini-flash first). `errors` collects per-provider skip and
+    failure reasons when the caller wants to report them.
     """
-    job_text = f"{job.title}\n{scraped_job.title}\n{scraped_job.description}"
-    prompt = build_structured_prompt(
-        job_title=job.title,
-        job_description=scraped_job.description,
-        job_highlights=scraped_job.highlights,
-        catalog=catalog,
-        families=families,
-        extra_guidance=catalog.guidance,
-    )
-
-    provider_errors: list[str] = []
-    selection: StructuredSelection | None = None
-    used_provider: str | None = None
-    raw_response = ""
-
-    for provider in _provider_switch_candidates(settings):
+    sink = errors if errors is not None else []
+    for provider in (candidates if candidates is not None else _provider_switch_candidates(settings)):
         if not provider.api_key:
-            provider_errors.append(f"{provider.name}: missing API key")
+            sink.append(f"{provider.name}: missing API key")
+            continue
+        if time.monotonic() < _PROVIDER_COOLDOWN_UNTIL.get(provider.name, 0.0):
+            sink.append(f"{provider.name}: cooling down after rate limit")
             continue
 
-        capabilities = PROVIDER_CAPABILITIES.get(provider.name)
+        capabilities = resolve_provider_capabilities(provider.name, provider.model)
         effective_prompt = (
             _truncate_prompt_for_provider(prompt, capabilities.max_prompt_chars)
             if capabilities and len(prompt) > capabilities.max_prompt_chars
             else prompt
         )
+        effective_cache_name = (
+            cache_name if capabilities and capabilities.supports_context_cache else None
+        )
         timeout = capabilities.request_timeout_seconds if capabilities else 45
 
         try:
             if provider.name in ("gemini", "gemini-flash"):
-                # No context cache here: the cached profile files instruct the
-                # legacy full-LaTeX output format, which conflicts with the
-                # JSON-only contract of the structured prompt.
                 text = _generate_with_gemini(
                     settings,
                     effective_prompt,
-                    None,
+                    effective_cache_name,
                     client_factory,
                     model_override=provider.model if provider.name == "gemini-flash" else None,
-                    json_response=True,
+                    json_response=json_response,
                 )
             elif provider.name == "openrouter":
                 text = _generate_with_openai_compatible_provider(
@@ -1428,7 +1501,7 @@ def _generate_structured_rewrite(
                     prompt=effective_prompt,
                     include_openrouter_headers=True,
                     timeout_seconds=timeout,
-                    json_response=True,
+                    json_response=json_response,
                 )
             elif provider.name == "groq":
                 text = _generate_with_openai_compatible_provider(
@@ -1437,75 +1510,292 @@ def _generate_structured_rewrite(
                     model=provider.model,
                     prompt=effective_prompt,
                     timeout_seconds=timeout,
-                    json_response=True,
+                    json_response=json_response,
                 )
             else:
-                provider_errors.append(f"{provider.name}: unsupported provider")
+                sink.append(f"{provider.name}: unsupported provider")
                 continue
         except Exception as exc:
-            provider_errors.append(f"{provider.name}: {exc}")
+            message = str(exc)
+            if "429" in message or "RESOURCE_EXHAUSTED" in message or "rate limit" in message.lower():
+                _PROVIDER_COOLDOWN_UNTIL[provider.name] = time.monotonic() + PROVIDER_COOLDOWN_SECONDS
+            sink.append(f"{provider.name}: {exc}")
             continue
 
         if not text.strip():
-            provider_errors.append(f"{provider.name}: empty response")
+            sink.append(f"{provider.name}: empty response")
             continue
 
-        candidate = parse_structured_response(text, catalog, families, job_text)
+        yield provider.name, text
+
+
+def _selection_cache_path(
+    job_url: str, template_path_text: str, job_content: str = "", mode: str = "",
+) -> Path:
+    # job_content ties the key to what was actually scraped; mode isolates
+    # aggressive/strong-aggressive selections from each other.
+    key = hashlib.sha256(
+        f"{job_url}|{template_path_text}|{job_content}|{mode}".encode("utf-8")
+    ).hexdigest()[:24]
+    return STRUCTURED_SELECTION_CACHE_DIR / f"{key}.json"
+
+
+def _store_cached_selection(path: Path, raw_response: str, provider: str) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"ts": time.time(), "provider": provider, "raw": raw_response}),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def _load_cached_selection(path: Path) -> str | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if time.time() - float(payload.get("ts") or 0) > SELECTION_CACHE_TTL_SECONDS:
+        return None
+    raw = payload.get("raw")
+    return raw if isinstance(raw, str) and raw.strip() else None
+
+
+def _append_structured_telemetry(record: dict) -> None:
+    try:
+        STRUCTURED_TELEMETRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with STRUCTURED_TELEMETRY_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+    except OSError:
+        pass
+
+
+def _audit_selection_grounding(
+    settings: GeminiSettings,
+    catalog: Any,
+    selection: StructuredSelection,
+    client_factory: Callable[[str], Any] | None,
+) -> tuple[str, list[str]]:
+    """One batched judge call over every tailored bullet; strips bullets that
+    claim a domain/industry/equipment the entry's verified background never
+    mentions (they render canonical instead).
+
+    Fail-open by design: if every provider fails or the response is
+    malformed, the selection is left untouched and the status string records
+    why — a judge outage must never block a build. Returns
+    (status, flagged_reasons).
+    """
+    items, id_map = build_grounding_audit_items(catalog, selection)
+    if not items:
+        return "skipped", []
+
+    prompt = grounding_audit_prompt(items, tuple(catalog.skill_anchors))
+    errors: list[str] = []
+    # Cheapest capable model first: the audit is a small classification task.
+    candidates = sorted(
+        _provider_switch_candidates(settings),
+        key=lambda c: 0 if c.name == "gemini-flash" else 1,
+    )
+    for provider_name, text in _iter_provider_responses(
+        settings,
+        prompt,
+        client_factory,
+        json_response=True,
+        candidates=candidates,
+        errors=errors,
+    ):
+        payload = extract_json_object(text)
+        verdicts = payload.get("verdicts") if isinstance(payload, dict) else None
+        if not isinstance(verdicts, list):
+            errors.append(f"{provider_name}: no verdicts in response")
+            continue
+        flagged = apply_grounding_verdicts(selection, id_map, verdicts)
+        return f"ok:{provider_name}", flagged
+
+    return "failed: " + ("; ".join(errors) if errors else "no providers available"), []
+
+
+def _generate_structured_rewrite(
+    settings: GeminiSettings,
+    job: JobContext,
+    scraped_job: ScrapedJobPosting,
+    catalog: Any,
+    client_factory: Callable[[str], Any] | None,
+    aggressive: bool = False,
+    strong_aggressive: bool = False,
+) -> ResumeRewriteResult:
+    """Structured pipeline: LLM returns JSON decisions, Python renders LaTeX.
+
+    Degrades in stages when providers fail: a fresh cached selection for the
+    same listing is reused first; otherwise a deterministic render with
+    keyword-extracted listing terms still gets skills ordering and tool
+    emphasis right, so a useful resume is always produced.
+
+    `aggressive` sets catalog.render_config.aggressive before the prompt is
+    built and before rendering, so both stay in sync (see
+    structured._effective_render_config): it never touches number/employer/
+    title/date/certification grounding, only the style/conservatism guards.
+    `strong_aggressive` is a superset that fabricates all content from the JD.
+    """
+    if strong_aggressive:
+        catalog.render_config.strong_aggressive = True
+        catalog.render_config.aggressive = True
+    elif aggressive:
+        catalog.render_config.aggressive = True
+    job_text = f"{job.title}\n{scraped_job.title}\n{scraped_job.description}"
+    prompt = build_structured_prompt(
+        job_title=job.title,
+        job_description=scraped_job.description,
+        job_highlights=scraped_job.highlights,
+        catalog=catalog,
+        extra_guidance=catalog.guidance,
+    )
+
+    provider_errors: list[str] = []
+    selection: StructuredSelection | None = None
+    used_provider: str | None = None
+    raw_response = ""
+
+    # No context cache here: the cached profile files instruct the legacy
+    # full-LaTeX output format, which conflicts with the JSON-only contract
+    # of the structured prompt.
+    for provider_name, text in _iter_provider_responses(
+        settings,
+        prompt,
+        client_factory,
+        json_response=True,
+        errors=provider_errors,
+    ):
+        candidate = parse_structured_response(text, catalog)
         if candidate is None:
-            provider_errors.append(f"{provider.name}: response contained no valid JSON decisions")
+            provider_errors.append(f"{provider_name}: response contained no valid JSON decisions")
             continue
 
         selection = candidate
-        used_provider = provider.name
+        used_provider = provider_name
         raw_response = text
         break
 
+    # Keyed by listing URL + the profile's name/contact block (profile-unique)
+    # + the scraped description, so a reposted/edited listing never reuses a
+    # selection made against the old text.
+    _cache_mode = "sa" if strong_aggressive else ("ag" if aggressive else "")
+    cache_path = _selection_cache_path(job.posting_url, catalog.header_block, scraped_job.description, mode=_cache_mode)
+    if selection is not None and raw_response:
+        _store_cached_selection(cache_path, raw_response, used_provider or "")
+
+    # Stage 2: every provider failed — reuse a fresh cached selection from a
+    # previous successful build of the same listing before going deterministic.
+    if selection is None:
+        cached_raw = _load_cached_selection(cache_path)
+        if cached_raw:
+            cached_selection = parse_structured_response(cached_raw, catalog)
+            if cached_selection is not None:
+                selection = cached_selection
+                used_provider = "cache"
+
+    # Stage 3: fully deterministic — keyword-extracted listing terms still
+    # drive skills reordering and anchor-tool emphasis without any LLM.
     deterministic_fallback = False
     if selection is None:
-        family = detect_role_family(job_text, families)
-        if family is None:
-            details = "; ".join(provider_errors) if provider_errors else "No providers attempted"
-            return ResumeRewriteResult(
-                status="error",
-                message=f"All resume providers failed and no role family could be detected: {details}",
-                prompt_preview=prompt[:500],
-                scraped_job=scraped_job,
-            )
-        selection = StructuredSelection(role_family_key=family.key)
+        selection = StructuredSelection(
+            keywords=extract_listing_keywords(job_text, tuple(catalog.skill_anchors)),
+        )
         deterministic_fallback = True
 
-    latex_document, report = render_structured_resume(catalog, families, selection)
+    # Grounding audit: catch domain fabrications (industries/equipment/processes
+    # the candidate never touched) that per-bullet regex validation cannot see.
+    # Cached selections are audited too — they are LLM output. Deterministic
+    # renders carry no rewrites, so there is nothing to audit.
+    # Gate on the EFFECTIVE config, not the raw profile config: aggressive and
+    # strong-aggressive modes disable the audit by design (domain reframing /
+    # fabrication is their entire point), and reading the raw flag here was
+    # letting the audit blank nearly every strong-aggressive bullet, which the
+    # keywordless filter then scrapped — 5-bullet, 0-tailored pages.
+    grounding_audit_status = "disabled"
+    grounding_flagged: list[str] = []
+    if _effective_render_config(catalog.render_config).grounding_audit and selection.bullets:
+        grounding_audit_status, grounding_flagged = _audit_selection_grounding(
+            settings, catalog, selection, client_factory
+        )
+
+    jd_tools = (
+        tuple(_extract_jd_tools(job_text, catalog.skill_anchors))
+        if catalog.render_config.aggressive
+        else ()
+    )
+    latex_document, report = render_structured_resume(
+        catalog, selection, jd_tools, jd_text=scraped_job.description or ""
+    )
 
     summary = {
         "mode": "structured",
         "rewrite_scope": report.rewrite_scope,
-        "role_family": report.role_family_key,
         "visible_entries": report.visible_entries,
         "hidden_entries": report.hidden_entries,
         "visible_bullet_count": report.visible_bullet_count,
         "tailored_bullets_used": report.tailored_bullets_used,
-        "canonical_fallbacks": report.canonical_fallbacks,
+        "canonical_fallbacks": report.canonical_fallbacks + grounding_flagged,
+        "grounding_audit": grounding_audit_status,
+        "grounding_flagged": grounding_flagged,
         "excluded_entries": report.excluded_entries,
         "ignored_exclusions": report.ignored_exclusions,
-        "included_extras": report.included_extras,
-        "ignored_inclusions": report.ignored_inclusions,
+        "header_tech_applied": report.header_tech_applied,
+        "header_tech_rejected": report.header_tech_rejected,
         "fidelity_findings": report.fidelity_findings,
         "keywords": selection.keywords,
+        "core_work": selection.core_work,
         "deterministic_fallback": deterministic_fallback,
         "provider_errors": provider_errors,
+        "aggressive": aggressive,
+        "strong_aggressive": strong_aggressive,
     }
 
+    aggressive_suffix = (
+        " [strong-aggressive mode]" if strong_aggressive
+        else " [aggressive mode]" if aggressive
+        else ""
+    )
     if deterministic_fallback:
         message = (
-            "Structured resume rendered deterministically (all LLM providers failed: "
+            "Structured resume rendered deterministically with extracted listing keywords "
+            "(all LLM providers failed: "
             + ("; ".join(provider_errors) or "none attempted")
             + ")."
         )
+    elif used_provider == "cache":
+        message = (
+            f"Structured resume rebuilt from cached selection (providers unavailable): "
+            f"{report.visible_bullet_count} bullets, "
+            f"{report.tailored_bullets_used} tailored.{aggressive_suffix}"
+        )
     else:
         message = (
-            f"Structured resume tailored via {used_provider}: family {report.role_family_key}, "
-            f"{report.visible_bullet_count} bullets, {report.tailored_bullets_used} tailored."
+            f"Structured resume tailored via {used_provider}: "
+            f"{report.visible_bullet_count} bullets, {report.tailored_bullets_used} tailored.{aggressive_suffix}"
         )
+
+    _append_structured_telemetry(
+        {
+            "ts": round(time.time(), 1),
+            "title": job.title[:120],
+            "url": job.posting_url,
+            "provider": used_provider or ("deterministic" if deterministic_fallback else None),
+            "bullets": report.visible_bullet_count,
+            "tailored": report.tailored_bullets_used,
+            "fallback_count": len(report.canonical_fallbacks),
+            "fallback_reasons": report.canonical_fallbacks,
+            "fidelity_count": len(report.fidelity_findings),
+            "header_tech_applied": len(report.header_tech_applied),
+            "grounding_audit": grounding_audit_status,
+            "grounding_flagged": grounding_flagged,
+            "deterministic": deterministic_fallback,
+            "provider_error_count": len(provider_errors),
+        }
+    )
 
     return ResumeRewriteResult(
         status="ok",
@@ -1527,6 +1817,8 @@ def generate_resume_rewrite(
     template_path: Path = TEMPLATE_PATH,
     scraper: Callable[[str], ScrapedJobPosting] | None = None,
     client_factory: Callable[[str], Any] | None = None,
+    aggressive: bool = False,
+    strong_aggressive: bool = False,
 ) -> ResumeRewriteResult:
     scrape = scraper or scrape_job_posting
     try:
@@ -1538,16 +1830,16 @@ def generate_resume_rewrite(
     # structured pipeline: the LLM only returns JSON decisions and the LaTeX is
     # rendered deterministically from template parts, so it always compiles.
     baseinfo_path = (baseinfo_paths or [DEFAULT_BASEINFO_PATH])[0]
-    structured_profile = load_structured_profile(template_path, baseinfo_path)
-    if structured_profile is not None:
-        catalog, families = structured_profile
+    catalog = load_structured_profile(template_path, baseinfo_path)
+    if catalog is not None:
         return _generate_structured_rewrite(
             settings,
             job,
             scraped_job,
             catalog,
-            families,
             client_factory,
+            aggressive=aggressive,
+            strong_aggressive=strong_aggressive,
         )
 
     baseinfo = load_baseinfo_text(baseinfo_paths)
@@ -1558,83 +1850,37 @@ def generate_resume_rewrite(
     text = ""
     used_provider: str | None = None
 
-    for provider in _provider_switch_candidates(settings):
-        if not provider.api_key:
-            provider_errors.append(f"{provider.name}: missing API key")
-            continue
-
-        capabilities = PROVIDER_CAPABILITIES.get(provider.name)
-        effective_prompt = (
-            _truncate_prompt_for_provider(prompt, capabilities.max_prompt_chars)
-            if capabilities and len(prompt) > capabilities.max_prompt_chars
-            else prompt
-        )
-        # Context caching is Gemini-only; suppress cache_name for providers
-        # that do not support cachedContents to avoid silent failures.
-        effective_cache_name = (
-            cache_name if capabilities and capabilities.supports_context_cache else None
-        )
-        timeout = capabilities.request_timeout_seconds if capabilities else 45
-
+    # Context caching is Gemini-only; the iterator suppresses cache_name for
+    # providers that do not support cachedContents to avoid silent failures.
+    for provider_name, text in _iter_provider_responses(
+        settings,
+        prompt,
+        client_factory,
+        cache_name=cache_name,
+        errors=provider_errors,
+    ):
+        # Validate LaTeX extraction before committing to this provider.
+        # Some models return non-empty text that contains no valid LaTeX document
+        # (e.g. a refusal, a truncated response, or a plain-text resume). Fall
+        # through to the next provider in that case rather than returning
+        # latex_document=None to the caller.
+        _candidate: str | None = None
         try:
-            if provider.name in ("gemini", "gemini-flash"):
-                text = _generate_with_gemini(
-                    settings,
-                    effective_prompt,
-                    effective_cache_name,
-                    client_factory,
-                    model_override=provider.model if provider.name == "gemini-flash" else None,
-                )
-            elif provider.name == "openrouter":
-                text = _generate_with_openai_compatible_provider(
-                    endpoint=OPENROUTER_CHAT_COMPLETIONS_URL,
-                    api_key=provider.api_key,
-                    model=provider.model,
-                    prompt=effective_prompt,
-                    include_openrouter_headers=True,
-                    timeout_seconds=timeout,
-                )
-            elif provider.name == "groq":
-                text = _generate_with_openai_compatible_provider(
-                    endpoint=GROQ_CHAT_COMPLETIONS_URL,
-                    api_key=provider.api_key,
-                    model=provider.model,
-                    prompt=effective_prompt,
-                    timeout_seconds=timeout,
-                )
-            else:
-                provider_errors.append(f"{provider.name}: unsupported provider")
-                continue
-        except Exception as exc:
-            provider_errors.append(f"{provider.name}: {exc}")
-            continue
-
-        if text.strip():
-            # Validate LaTeX extraction before committing to this provider.
-            # Some models return non-empty text that contains no valid LaTeX document
-            # (e.g. a refusal, a truncated response, or a plain-text resume). Fall
-            # through to the next provider in that case rather than returning
-            # latex_document=None to the caller.
-            _candidate: str | None = None
-            try:
-                _parsed_check = json.loads(text)
-                if isinstance(_parsed_check, dict):
-                    for _key in ("rewritten_tex", "latex", "latex_document"):
-                        _val = _parsed_check.get(_key)
-                        if isinstance(_val, str) and "\\documentclass" in _val and "\\end{document}" in _val:
-                            _candidate = _val.strip()
-                            break
-            except json.JSONDecodeError:
-                pass
-            if _candidate is None:
-                _candidate = extract_latex_document(text)
-            if _candidate is not None:
-                used_provider = provider.name
-                break
-            provider_errors.append(f"{provider.name}: response contained no valid LaTeX document")
-            continue
-
-        provider_errors.append(f"{provider.name}: empty response")
+            _parsed_check = json.loads(text)
+            if isinstance(_parsed_check, dict):
+                for _key in ("rewritten_tex", "latex", "latex_document"):
+                    _val = _parsed_check.get(_key)
+                    if isinstance(_val, str) and "\\documentclass" in _val and "\\end{document}" in _val:
+                        _candidate = _val.strip()
+                        break
+        except json.JSONDecodeError:
+            pass
+        if _candidate is None:
+            _candidate = extract_latex_document(text)
+        if _candidate is not None:
+            used_provider = provider_name
+            break
+        provider_errors.append(f"{provider_name}: response contained no valid LaTeX document")
 
     if not text:
         details = "; ".join(provider_errors) if provider_errors else "No providers attempted"
@@ -1718,54 +1964,10 @@ def generate_validated_with_providers(
     (rejection advances to the next provider). Returns (value, provider_name),
     or (None, None) when no configured provider produced an accepted response.
     """
-    for provider in _provider_switch_candidates(settings):
-        if not provider.api_key:
-            continue
-
-        capabilities = PROVIDER_CAPABILITIES.get(provider.name)
-        effective_prompt = (
-            _truncate_prompt_for_provider(prompt, capabilities.max_prompt_chars)
-            if capabilities and len(prompt) > capabilities.max_prompt_chars
-            else prompt
-        )
-        timeout = capabilities.request_timeout_seconds if capabilities else 45
-
-        try:
-            if provider.name in ("gemini", "gemini-flash"):
-                text = _generate_with_gemini(
-                    settings,
-                    effective_prompt,
-                    None,
-                    client_factory,
-                    model_override=provider.model if provider.name == "gemini-flash" else None,
-                )
-            elif provider.name == "openrouter":
-                text = _generate_with_openai_compatible_provider(
-                    endpoint=OPENROUTER_CHAT_COMPLETIONS_URL,
-                    api_key=provider.api_key,
-                    model=provider.model,
-                    prompt=effective_prompt,
-                    include_openrouter_headers=True,
-                    timeout_seconds=timeout,
-                )
-            elif provider.name == "groq":
-                text = _generate_with_openai_compatible_provider(
-                    endpoint=GROQ_CHAT_COMPLETIONS_URL,
-                    api_key=provider.api_key,
-                    model=provider.model,
-                    prompt=effective_prompt,
-                    timeout_seconds=timeout,
-                )
-            else:
-                continue
-        except Exception:
-            continue
-
-        if not text.strip():
-            continue
+    for provider_name, text in _iter_provider_responses(settings, prompt, client_factory):
         value = validate(text)
         if value is not None:
-            return value, provider.name
+            return value, provider_name
 
     return None, None
 

@@ -87,30 +87,10 @@ GOOD_PROPOSAL = {
             "category": "fabrication",
         },
     ],
-    "families": [
-        {
-            "name": "MACHINING / CNC",
-            "keywords": ["cnc", "machinist", "mill", "lathe", "tolerance"],
-            "must_show": ["machining"],
-            "show": ["fabrication"],
-            "hide": [],
-        },
-        {
-            "name": "FABRICATION / WELDING",
-            "keywords": ["welding", "fabrication", "assembly", "fitter"],
-            "must_show": ["fabrication"],
-            "show": ["machining"],
-            "hide": [],
-        },
-    ],
     "skill_anchors": {
         "Machines": ["Haas mill", "Manual lathe", "MIG welder"],
         "Software": ["SolidWorks", "Excel"],
         "Certifications": ["WHMIS", "Forklift"],
-    },
-    "family_skill_priority": {
-        "MACHINING": ["Haas mill", "Manual lathe", "SolidWorks"],
-        "FABRICATION": ["MIG welder", "SolidWorks"],
     },
 }
 
@@ -144,21 +124,17 @@ def test_bootstrap_happy_path_produces_valid_structured_profile(freeform_profile
 
     assert result.status == "ok", result.messages
     assert result.attempts == 1
-    assert result.families == ["MACHINING", "FABRICATION"]
     assert result.categories == ["fabrication", "machining"]
     assert result.structured_config["rewrite_scope"] == "limited"
-    assert result.structured_config["family_skill_priority"]["MACHINING"][0] == "Haas mill"
 
     # The produced files must load through the REAL structured loader.
     out = tmp_path / "converted"
     out.mkdir()
     (out / "template.tex").write_text(result.template_text, encoding="utf-8")
     (out / "baseinfo.txt").write_text(result.baseinfo_text, encoding="utf-8")
-    loaded = load_structured_profile(out / "template.tex", out / "baseinfo.txt")
-    assert loaded is not None
-    catalog, families = loaded
+    catalog = load_structured_profile(out / "template.tex", out / "baseinfo.txt")
+    assert catalog is not None
     assert len(catalog.entries) == 3
-    assert {f.key for f in families} == {"MACHINING", "FABRICATION"}
     assert "haas mill" in catalog.skill_anchors
 
 
@@ -211,27 +187,27 @@ def test_bootstrap_short_circuits_already_tagged_profile(freeform_profile, tmp_p
     assert called.calls == []
 
 
-def test_bootstrap_replaces_existing_guide_section_idempotently(freeform_profile, tmp_path) -> None:
+def test_bootstrap_replaces_existing_anchor_section_idempotently(freeform_profile, tmp_path) -> None:
     baseinfo_path = freeform_profile / "baseinfo.txt"
     baseinfo_path.write_text(
-        UNTAGGED_BASEINFO
-        + "\n== ROLE TYPE SELECTION GUIDE ==\n\nOLD STALE roles\n  MUST SHOW: stale\n",
+        UNTAGGED_BASEINFO + "\n== SKILL ANCHORS ==\nStale: Old Tool\n",
         encoding="utf-8",
     )
     generator = _generator_returning(GOOD_PROPOSAL)
     result = bootstrap_structured_profile(freeform_profile, None, tmp_path / "work", generator=generator)
     assert result.status == "ok"
-    assert "OLD STALE" not in result.baseinfo_text
-    assert result.baseinfo_text.count("== ROLE TYPE SELECTION GUIDE ==") == 1
+    assert "Old Tool" not in result.baseinfo_text
     assert result.baseinfo_text.count("== SKILL ANCHORS ==") == 1
 
 
-def test_parse_bootstrap_response_rejects_unknown_family_category() -> None:
+def test_parse_bootstrap_response_ignores_legacy_family_keys() -> None:
     proposal = json.loads(json.dumps(GOOD_PROPOSAL))
-    proposal["families"][0]["must_show"] = ["ghost_category"]
+    proposal["families"] = [{"name": "MACHINING", "must_show": ["machining"]}]
+    proposal["family_skill_priority"] = {"MACHINING": ["Haas mill"]}
     parsed, errors = parse_bootstrap_response(json.dumps(proposal))
-    assert parsed is None
-    assert any("ghost_category" in e for e in errors)
+    assert errors == []
+    assert parsed is not None
+    assert len(parsed.entries) == 3
 
 
 def test_apply_tags_rejects_ambiguous_snippet() -> None:

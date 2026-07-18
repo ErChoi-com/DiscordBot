@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -21,26 +22,43 @@ from services.resumes.structured import (
     MAX_VISIBLE_BULLETS,
     MIN_VISIBLE_BULLETS,
     StructuredSelection,
+    _bold_jd_tools,
+    _extract_jd_tools,
+    _inject_jd_tools_into_skills,
+    _SKIP_JD_INJECT,
     build_structured_prompt,
-    detect_role_family,
+    enforce_cross_bullet_consistency,
     extract_json_object,
     load_structured_profile,
-    parse_role_guide,
     parse_structured_response,
     parse_template_catalog,
     render_structured_resume,
     validate_tailored_bullet,
 )
 
+@pytest.fixture(autouse=True)
+def _isolate_structured_state(tmp_path, monkeypatch):
+    """Keep selection cache, telemetry, and provider cooldowns test-local."""
+    import services.resumes.listing as listing_module
+
+    monkeypatch.setattr(listing_module, "STRUCTURED_SELECTION_CACHE_DIR", tmp_path / "sel_cache")
+    monkeypatch.setattr(listing_module, "STRUCTURED_TELEMETRY_PATH", tmp_path / "telemetry.jsonl")
+    listing_module._PROVIDER_COOLDOWN_UNTIL.clear()
+
+
 PROFILE_DIR = Path(__file__).resolve().parents[1] / "src" / "services" / "resumes" / "resumes_cache" / "xboxsignout._"
 TEMPLATE_TEXT = (PROFILE_DIR / "template.tex").read_text(encoding="utf-8")
 BASEINFO_TEXT = (PROFILE_DIR / "baseinfo.txt").read_text(encoding="utf-8")
 
 # Load via load_structured_profile so the profile's structured_config.json
-# (forbidden terms, budget) applies, exactly as in production.
-_LOADED_PROFILE = load_structured_profile(PROFILE_DIR / "template.tex", PROFILE_DIR / "baseinfo.txt")
-assert _LOADED_PROFILE is not None
-CATALOG, FAMILIES = _LOADED_PROFILE
+# (budget, adjacent-tool leeway) applies, exactly as in production.
+CATALOG = load_structured_profile(PROFILE_DIR / "template.tex", PROFILE_DIR / "baseinfo.txt")
+assert CATALOG is not None
+
+
+def _entry_id(fragment: str) -> str:
+    assert CATALOG is not None
+    return next(e.entry_id for e in CATALOG.entries if fragment in e.entry_id)
 
 
 def _scraped(description: str, title: str = "Software Engineer") -> ScrapedJobPosting:
@@ -60,12 +78,12 @@ def _scraped(description: str, title: str = "Software Engineer") -> ScrapedJobPo
 
 def test_catalog_parses_all_tagged_entries() -> None:
     assert CATALOG is not None
-    assert len(CATALOG.entries) == 10
+    assert len(CATALOG.entries) == 12
     assert CATALOG.entry_sections == ("Projects", "Experience")
     projects = [e for e in CATALOG.entries if e.section == "Projects"]
     experience = [e for e in CATALOG.entries if e.section == "Experience"]
-    assert len(projects) == 6
-    assert len(experience) == 4
+    assert len(projects) == 7
+    assert len(experience) == 5
 
 
 def test_catalog_preserves_headers_verbatim() -> None:
@@ -86,57 +104,6 @@ def test_catalog_tail_keeps_skills_and_education() -> None:
 def test_catalog_returns_none_for_untagged_template() -> None:
     plain = "\\documentclass{article}\\begin{document}Hello\\end{document}"
     assert parse_template_catalog(plain) is None
-
-
-# ---------------------------------------------------------------------------
-# Role guide parsing + detection
-# ---------------------------------------------------------------------------
-
-def test_role_guide_parses_four_families() -> None:
-    keys = [family.key for family in FAMILIES]
-    assert keys == ["EMBEDDED", "SOFTWARE", "FRONTEND", "ML"]
-
-
-def test_role_guide_must_show_lists() -> None:
-    embedded = next(f for f in FAMILIES if f.key == "EMBEDDED")
-    assert {"embedded", "hardware", "fpga", "teaching"} <= embedded.must_show
-    assert "fullstack" in embedded.hide
-
-    ml = next(f for f in FAMILIES if f.key == "ML")
-    assert "ml" in ml.must_show
-    assert "embedded" in ml.hide
-
-
-def test_detect_role_family_embedded() -> None:
-    family = detect_role_family(
-        "Firmware developer for microcontroller platforms, embedded C, RTOS, bare-metal drivers",
-        FAMILIES,
-    )
-    assert family is not None and family.key == "EMBEDDED"
-
-
-def test_detect_role_family_ml() -> None:
-    family = detect_role_family(
-        "Machine learning engineer building model training and inference pipelines, data science",
-        FAMILIES,
-    )
-    assert family is not None and family.key == "ML"
-
-
-def test_detect_role_family_keywords_match_whole_tokens_only() -> None:
-    # "Registered Nurse" must not score the EMBEDDED keyword "register" via
-    # substring; with no true keyword hits, detection falls back to the
-    # most-inclusive-family rule, i.e. the same family a no-keyword listing gets.
-    nurse = detect_role_family(
-        "Registered Nurse - patient care, clinical documentation, medication administration",
-        FAMILIES,
-    )
-    no_keywords = detect_role_family("completely unrelated listing text", FAMILIES)
-    assert nurse is not None and no_keywords is not None
-    assert nurse.key == no_keywords.key
-    # Real token usage still routes correctly.
-    real = detect_role_family("firmware engineer writing register maps for MCU drivers", FAMILIES)
-    assert real is not None and real.key == "EMBEDDED"
 
 
 # ---------------------------------------------------------------------------
@@ -185,43 +152,62 @@ def test_validate_bullet_allows_metric_moved_within_entry() -> None:
     assert reason is None
 
 
-def test_validate_bullet_rejects_invented_metric() -> None:
+def test_validate_bullet_rejects_ungrounded_unbolded_tool_without_leeway() -> None:
+    """A model that drops \\textbf{} must not smuggle tools past grounding on
+    a conservative profile (observed: 'State Management (Riverpod)' written
+    into a React bullet)."""
     text, reason = validate_tailored_bullet(
-        "Reduced downtime by 41\\% and boosted speed by 95\\%.", CANONICAL
+        "Maintained documentation applying State Management (Riverpod) "
+        "principles, reducing downtime by 41\\%.",
+        CANONICAL,
+        skill_anchors=("latex", "git"),
     )
-    assert text is None and "invented number 95" in str(reason)
+    assert text is None and "ungrounded tool token" in str(reason)
 
 
-def test_validate_bullet_rejects_forbidden_domain_term() -> None:
-    from services.resumes.structured import RenderConfig
-
-    config = RenderConfig(forbidden_terms=("scada",))
+def test_validate_bullet_leeway_allows_unbolded_inserted_tool() -> None:
+    """Writing-quality policy (2026-07-11): profiles with adjacent_tool_leeway
+    keep unbolded skill insertions — the LLM grounding audit, not the
+    deterministic guard, arbitrates claims that outright don't make sense."""
+    assert CATALOG is not None and CATALOG.render_config.adjacent_tool_leeway
     text, reason = validate_tailored_bullet(
-        "Documented SCADA workflows, reducing downtime by 41\\%.", CANONICAL, config
-    )
-    assert text is None and "forbidden term" in str(reason)
-    # Without a profile config there is nothing to forbid — per-profile data.
-    text, reason = validate_tailored_bullet(
-        "Documented SCADA workflows, reducing downtime by 41\\%.", CANONICAL
+        "Maintained documentation applying State Management (Riverpod) "
+        "principles, reducing downtime by 41\\%.",
+        CANONICAL,
+        CATALOG.render_config,
+        skill_anchors=("latex", "git"),
     )
     assert reason is None and text is not None
 
 
-def test_forbidden_terms_match_whole_words_only() -> None:
-    """Regression: 'rust' must not fire inside 'robust', 'hmi' inside 'algorithmic'."""
-    from services.resumes.structured import RenderConfig
-
-    config = RenderConfig(forbidden_terms=("rust", "hmi"))
+def test_validate_bullet_allows_unbolded_tool_from_entry_grounding() -> None:
+    entry_context = CANONICAL + " Built dashboards with \\textbf{Tableau}."
     text, reason = validate_tailored_bullet(
-        "Built robust algorithmic pipelines, reducing downtime by 41\\%.",
+        "Maintained documentation and Tableau dashboards, reducing downtime "
+        "by 41\\%.",
         CANONICAL,
-        config,
+        entry_context=entry_context,
+    )
+    assert reason is None and text is not None
+
+
+def test_validate_bullet_restores_canonical_emphasis() -> None:
+    """Formatting repair (2026-07-11): a rewrite that kept a canonical-bolded
+    tool name but dropped its \\textbf{} gets the emphasis restored."""
+    text, reason = validate_tailored_bullet(
+        "Maintained LaTeX documentation of workflows, reducing downtime by 41\\%.",
+        CANONICAL,
     )
     assert reason is None
-    text, reason = validate_tailored_bullet(
-        "Built pipelines in Rust, reducing downtime by 41\\%.", CANONICAL, config
-    )
-    assert text is None and "forbidden term 'rust'" in str(reason)
+    assert text is not None and "\\textbf{LaTeX}" in text
+
+
+def test_validate_bullet_emphasis_restore_respects_existing_bold() -> None:
+    tailored = "Maintained \\textbf{LaTeX} documentation, reducing downtime by 41\\%."
+    text, reason = validate_tailored_bullet(tailored, CANONICAL)
+    assert reason is None
+    assert text is not None and text.count("\\textbf{LaTeX}") == 1
+    assert "\\textbf{\\textbf{" not in text
 
 
 def test_lowercase_concept_word_demoted_not_rejected() -> None:
@@ -281,12 +267,102 @@ def test_validate_bullet_rejects_quoted_posting_phrase() -> None:
     assert text is None and reason == "quoted posting phrase"
 
 
-def test_validate_bullet_rejects_appended_filler_clause() -> None:
+def test_validate_bullet_strips_appended_filler_clause() -> None:
+    """A bolted-on filler tail is stripped; the rest of the rewrite survives
+    (rejecting the whole bullet threw away otherwise-good tailoring)."""
     text, reason = validate_tailored_bullet(
         "Maintained \\textbf{LaTeX} docs, reducing downtime by 41\\%, demonstrating analytical rigour.",
         CANONICAL,
     )
-    assert text is None and "appended filler clause 'demonstrating'" in str(reason)
+    assert reason is None
+    assert text is not None
+    assert "demonstrating" not in text
+    assert "41\\%" in text
+    assert text.endswith(".")
+
+
+def test_validate_bullet_aggressive_skips_quote_and_filler_guards() -> None:
+    """Aggressive mode is style-only: the same two inputs that a normal build
+    rejects/strips (see test_validate_bullet_rejects_quoted_posting_phrase and
+    test_validate_bullet_strips_appended_filler_clause) pass through whole."""
+    from services.resumes.structured import RenderConfig
+
+    text, reason = validate_tailored_bullet(
+        'Built pipelines, providing "computer modeling experience", reducing downtime by 41\\%.',
+        CANONICAL,
+        RenderConfig(aggressive=True),
+    )
+    assert reason is None
+    assert text is not None and '"computer modeling experience"' in text
+
+    text, reason = validate_tailored_bullet(
+        "Maintained \\textbf{LaTeX} docs, reducing downtime by 41\\%, demonstrating analytical rigour.",
+        CANONICAL,
+        RenderConfig(aggressive=True),
+    )
+    assert reason is None
+    assert text is not None and "demonstrating analytical rigour" in text
+
+
+def test_validate_bullet_aggressive_raises_bold_density_cap() -> None:
+    """The bold-density cap itself stays a cap (never fully disabled) — but
+    _effective_render_config raises it by 2 for aggressive builds."""
+    from services.resumes.structured import RenderConfig, _effective_render_config, parse_skill_anchors
+
+    anchors = parse_skill_anchors(BASEINFO_TEXT)
+    bullet = (
+        "Used \\textbf{Kafka}, \\textbf{FastAPI}, \\textbf{Pandas}, \\textbf{NumPy}, "
+        "\\textbf{TensorFlow}, \\textbf{Docker}, and \\textbf{Git} to reduce downtime by 41\\%."
+    )
+    base_config = RenderConfig(max_bold_per_bullet=6)
+    text, reason = validate_tailored_bullet(bullet, CANONICAL, base_config, skill_anchors=anchors)
+    assert reason is None and text is not None
+    assert text.count("\\textbf{") == 6  # one of the 7 demoted to plain text
+
+    aggressive_config = _effective_render_config(RenderConfig(max_bold_per_bullet=6, aggressive=True))
+    text, reason = validate_tailored_bullet(bullet, CANONICAL, aggressive_config, skill_anchors=anchors)
+    assert reason is None and text is not None
+    assert text.count("\\textbf{") == 7  # aggressive cap (8) fits all 7
+
+
+def test_validate_bullet_aggressive_allows_fabricated_tools() -> None:
+    """Aggressive mode allows bolded terms the candidate never listed."""
+    from services.resumes.structured import RenderConfig
+
+    bullet = (
+        "Deployed on \\textbf{Kubernetes} and \\textbf{Solidworks}, "
+        "reducing downtime by 41\\%."
+    )
+    text, reason = validate_tailored_bullet(bullet, CANONICAL, RenderConfig(aggressive=True))
+    assert reason is None and text is not None
+    assert "\\textbf{Kubernetes}" in text
+    assert "\\textbf{Solidworks}" in text
+
+
+def test_effective_render_config_scales_only_when_aggressive() -> None:
+    from services.resumes.structured import RenderConfig, _effective_render_config
+
+    base = RenderConfig(max_bold_per_bullet=6, max_bullet_chars=400)
+    assert _effective_render_config(base) is base  # no-op, not even a copy
+
+    aggressive = RenderConfig(
+        max_bold_per_bullet=6,
+        max_bullet_chars=400,
+        aggressive=True,
+        adjacent_tool_leeway=False,
+        grounding_audit=False,
+    )
+    scaled = _effective_render_config(aggressive)
+    assert scaled.max_bold_per_bullet == 8
+    assert scaled.adjacent_tool_leeway is True
+    assert scaled.grounding_audit is False
+    # Never touched: max_bullet_chars looks like a style knob but live-trial
+    # evidence (2026-07-12) showed raising it breaks the page-character-budget
+    # calibration (a real listing went from 1 page to 2). Page-fit knobs are
+    # layout limits, not tailoring freedom.
+    assert scaled.max_bullet_chars == 400
+    assert scaled.max_visible_bullets == aggressive.max_visible_bullets
+    assert scaled.max_total_bullet_chars == aggressive.max_total_bullet_chars
 
 
 def test_parse_skill_anchors_reads_real_baseinfo() -> None:
@@ -323,6 +399,23 @@ def test_validate_bullet_rejects_invented_tool_outside_anchors() -> None:
         skill_anchors=(),
     )
     assert reason is None
+
+
+def test_validate_bullet_adjacent_tool_leeway_skips_invented_tool_reject() -> None:
+    """With adjacent_tool_leeway on, an unanchored product-shaped tool no
+    longer hard-rejects; the LLM grounding audit polices plausibility instead."""
+    from services.resumes.structured import RenderConfig, parse_skill_anchors
+
+    anchors = parse_skill_anchors(BASEINFO_TEXT)
+    config = RenderConfig(adjacent_tool_leeway=True)
+    text, reason = validate_tailored_bullet(
+        "Built an AI harness with \\textbf{LangChain}, reducing downtime by 41\\%.",
+        CANONICAL,
+        config,
+        skill_anchors=anchors,
+    )
+    assert reason is None
+    assert text is not None and "\\textbf{LangChain}" in text
 
 
 def test_short_anchor_does_not_substring_match_everything() -> None:
@@ -369,22 +462,355 @@ def test_catalog_loads_skill_anchors() -> None:
     assert "kafka" in CATALOG.skill_anchors
 
 
-def test_render_rejects_invented_tool_in_bullet(monkeypatch) -> None:
-    """End-to-end: an invented tool in a tailored bullet falls back to canonical."""
+def test_render_invented_tool_respects_leeway_config(monkeypatch) -> None:
+    """End-to-end: without leeway an invented tool falls back to canonical;
+    with the profile's leeway on, the deterministic gate passes it through."""
     assert CATALOG is not None
     monkeypatch.setattr(CATALOG.render_config, "rewrite_scope", "full")
-    goopter = next(e for e in CATALOG.entries if "goopter" in e.entry_id)
+    goopter = _entry_id("goopter")
     selection = StructuredSelection(
-        role_family_key="ML",
+        ranking=[goopter],
         bullets={
-            goopter.entry_id: [
+            goopter: [
                 "Engineered pipelines on \\textbf{Kubernetes} using \\textbf{Kafka} and \\textbf{FastAPI}."
             ]
         },
     )
-    latex, report = render_structured_resume(CATALOG, FAMILIES, selection)
+    monkeypatch.setattr(CATALOG.render_config, "adjacent_tool_leeway", False)
+    latex, report = render_structured_resume(CATALOG, selection)
     assert "Kubernetes" not in latex
     assert any("invented tool" in item for item in report.canonical_fallbacks)
+
+    monkeypatch.setattr(CATALOG.render_config, "adjacent_tool_leeway", True)
+    latex, report = render_structured_resume(CATALOG, selection)
+    assert "Kubernetes" in latex
+    assert not any("invented tool" in item for item in report.canonical_fallbacks)
+
+
+def test_render_aggressive_forces_leeway_even_when_profile_default_is_off(monkeypatch) -> None:
+    """A ".resumebuild --aggressive" build must behave like adjacent_tool_leeway
+    is on even for a profile whose structured_config.json has it off."""
+    assert CATALOG is not None
+    monkeypatch.setattr(CATALOG.render_config, "rewrite_scope", "full")
+    monkeypatch.setattr(CATALOG.render_config, "adjacent_tool_leeway", False)
+    goopter = _entry_id("goopter")
+    selection = StructuredSelection(
+        ranking=[goopter],
+        bullets={
+            goopter: [
+                "Engineered pipelines on \\textbf{Kubernetes} using \\textbf{Kafka} and \\textbf{FastAPI}."
+            ]
+        },
+    )
+
+    monkeypatch.setattr(CATALOG.render_config, "aggressive", False)
+    latex, report = render_structured_resume(CATALOG, selection)
+    assert "Kubernetes" not in latex
+    assert any("invented tool" in item for item in report.canonical_fallbacks)
+
+    monkeypatch.setattr(CATALOG.render_config, "aggressive", True)
+    latex, report = render_structured_resume(CATALOG, selection)
+    assert "Kubernetes" in latex
+    assert not any("invented tool" in item for item in report.canonical_fallbacks)
+
+
+# ---------------------------------------------------------------------------
+# Cross-bullet consistency guards
+# ---------------------------------------------------------------------------
+
+def _guard_state(bullets: dict[tuple[str, int], tuple[str, str, bool]]):
+    """Build (ordered_keys, canonicals, resolved, tailored) from
+    {key: (canonical, resolved, tailored)} for enforce_cross_bullet_consistency."""
+    ordered = list(bullets)
+    canonicals = {k: v[0] for k, v in bullets.items()}
+    resolved = {k: v[1] for k, v in bullets.items()}
+    tailored = {k: v[2] for k, v in bullets.items()}
+    return ordered, canonicals, resolved, tailored
+
+
+def test_guard_reverts_metric_stated_twice_in_entry() -> None:
+    ordered, canonicals, resolved, tailored = _guard_state({
+        ("obotz", 0): (
+            "Improved robotics scores by 35\\% through instruction.",
+            "Improved robotics scores by 35\\% through instruction.",
+            False,
+        ),
+        ("obotz", 1): (
+            "Helped students place in the 75th percentile of competitions.",
+            "Helped students improve completion scores by 35\\% in competitions.",
+            True,
+        ),
+    })
+    reasons = enforce_cross_bullet_consistency(ordered, canonicals, resolved, tailored)
+    assert resolved[("obotz", 1)] == canonicals[("obotz", 1)]
+    assert not tailored[("obotz", 1)]
+    assert any("stated twice" in r for r in reasons)
+
+
+def test_guard_keeps_metric_duplicated_between_canonicals() -> None:
+    # Both canonical bullets legitimately state 35% — the profile's own truth
+    # is exempt, even when one bullet is a tailored rewrite keeping the number.
+    ordered, canonicals, resolved, tailored = _guard_state({
+        ("e", 0): ("Raised scores 35\\% via drills.", "Raised scores 35\\% via drills.", False),
+        ("e", 1): (
+            "Sustained the 35\\% gain across terms.",
+            "Sustained the 35\\% score gain across every term taught.",
+            True,
+        ),
+    })
+    reasons = enforce_cross_bullet_consistency(ordered, canonicals, resolved, tailored)
+    assert tailored[("e", 1)]
+    assert reasons == []
+
+
+def test_guard_reverts_near_duplicate_sibling() -> None:
+    ordered, canonicals, resolved, tailored = _guard_state({
+        ("e", 0): (
+            "Assisted students improving robotics problem completion through digital logic concepts.",
+            "Assisted students improving robotics problem completion through digital logic concepts.",
+            False,
+        ),
+        ("e", 1): (
+            "Delivered clear simplified explanations of technical processes to parents.",
+            "Assisted students improving robotics problem completion via digital logic concepts.",
+            True,
+        ),
+    })
+    reasons = enforce_cross_bullet_consistency(ordered, canonicals, resolved, tailored)
+    assert resolved[("e", 1)] == canonicals[("e", 1)]
+    assert any("near-duplicate" in r for r in reasons)
+
+
+def test_guard_reverts_shared_opening_clause_even_with_low_whole_bullet_overlap() -> None:
+    """Regression: two bullets that open on nearly the same clause but end on
+    unrelated content dodge the whole-sentence NEAR_DUPLICATE_JACCARD check
+    (their diverging endings drag the overlap down) even though a human
+    reader immediately notices the repeated setup."""
+    ordered, canonicals, resolved, tailored = _guard_state({
+        ("mcg3d", 0): (
+            "Integration work: frontend features wired to Python (Flask) backend services over secure RESTful APIs.",
+            "Integrated frontend features with Python (Flask) backend services and secure RESTful APIs, contributing to AI-enabled workflows using OpenAI APIs.",
+            True,
+        ),
+        ("mcg3d", 1): (
+            "Environment: deployment and testing in a containerized Docker setup, with contributions to technical documentation.",
+            "Integrated frontend features with Python backend services and RESTful APIs, applying critical thinking to resolve data flow and interface issues.",
+            True,
+        ),
+    })
+    reasons = enforce_cross_bullet_consistency(ordered, canonicals, resolved, tailored)
+    assert resolved[("mcg3d", 1)] == canonicals[("mcg3d", 1)]
+    assert any("shares its opening clause" in r for r in reasons)
+
+
+def test_guard_reverts_restated_fact_with_reordered_opening_words() -> None:
+    """Regression (live): 'Built production-ready web applications using React
+    and TypeScript, focusing on...' vs 'Built production-ready web interfaces
+    using React and TypeScript with a focus on...' restate the identical fact
+    twice. Whole-bullet Jaccard is 0.55 here -- below even the pre-loosening
+    0.6 threshold -- so only a bag-of-words check on the opening span (not
+    exact sequential prefix matching) catches this."""
+    ordered, canonicals, resolved, tailored = _guard_state({
+        ("mcg3d", 0): (
+            "Frontend features built in React and TypeScript.",
+            "Built production-ready web applications using React and TypeScript, focusing on scalable component architecture, performance, and user-centric design.",
+            True,
+        ),
+        ("mcg3d", 1): (
+            "Environment: deployment and testing in a containerized Docker setup.",
+            "Built production-ready web interfaces using React and TypeScript with a focus on scalable component architecture.",
+            True,
+        ),
+    })
+    reasons = enforce_cross_bullet_consistency(ordered, canonicals, resolved, tailored)
+    assert resolved[("mcg3d", 1)] == canonicals[("mcg3d", 1)]
+    assert any("shares its opening clause" in r for r in reasons)
+
+
+def test_guard_reverts_credential_handling_restated() -> None:
+    """Regression (live): both bullets open 'Implemented secure credential
+    handling...' then diverge -- another same-setup restatement caught only
+    by the opening-span bag-of-words check, not whole-bullet Jaccard."""
+    ordered, canonicals, resolved, tailored = _guard_state({
+        ("wma", 0): (
+            "Security and features: secure credential handling, key generation and error recovery, machine learning autocomplete, and in-browser Python code execution.",
+            "Implemented secure credential handling and key generation routines to strengthen application-level security and data integrity.",
+            True,
+        ),
+        ("wma", 1): (
+            "Infrastructure: a Raspberry Pi running Ubuntu serves as the networking backend with a secure PostgreSQL server, exposed as a layered RESTful API.",
+            "Implemented secure credential handling, key generation and error recovery, machine learning autocomplete and Python code execution in-browser.",
+            True,
+        ),
+    })
+    reasons = enforce_cross_bullet_consistency(ordered, canonicals, resolved, tailored)
+    assert resolved[("wma", 1)] == canonicals[("wma", 1)]
+    assert any("shares its opening clause" in r for r in reasons)
+
+
+def test_guard_reverts_verb_object_tool_collision_at_half_overlap() -> None:
+    """Regression (live, KPMG cyber run): 'Built adaptive algorithms using
+    TensorFlow and scikit-learn...' next to the canonical 'Built reinforcement
+    algorithms using TensorFlow, enabling...' restates the same fact — the
+    tailored bullet was supposed to rewrite the DASHBOARD canonical but
+    drifted onto the RL fact instead. Opening-span Jaccard is exactly 0.5
+    (verb+object+tool shared, modifiers differ), which the original 0.6
+    threshold missed."""
+    ordered, canonicals, resolved, tailored = _guard_state({
+        ("goopter", 0): (
+            "Also shipped an analytics dashboard on PyTorch Lightning and NumPy, with Tableau and Power BI integrations.",
+            "Built adaptive algorithms using TensorFlow and scikit-learn to detect patterns in high-frequency trading data streams.",
+            True,
+        ),
+        ("goopter", 1): (
+            "Built reinforcement algorithms using TensorFlow, enabling adaptive, high-frequency trading signal generation.",
+            "Built reinforcement algorithms using TensorFlow, enabling adaptive, high-frequency trading signal generation.",
+            False,
+        ),
+    })
+    reasons = enforce_cross_bullet_consistency(ordered, canonicals, resolved, tailored)
+    assert resolved[("goopter", 0)] == canonicals[("goopter", 0)]
+    assert any("shares its opening clause" in r for r in reasons)
+
+
+def test_guard_allows_shared_opening_already_true_of_canonicals() -> None:
+    """A shared opening clause that the CANONICAL bullets already share is the
+    profile's own truth, not a tailoring defect — must not revert."""
+    ordered, canonicals, resolved, tailored = _guard_state({
+        ("e", 0): (
+            "Improved robotics scores through hands-on instruction of digital logic concepts for students.",
+            "Improved robotics scores through hands-on instruction of digital logic principles for learners.",
+            True,
+        ),
+        ("e", 1): (
+            "Improved robotics scores through hands-on instruction of embedded programming for students.",
+            "Improved robotics scores through hands-on instruction of embedded firmware for learners.",
+            True,
+        ),
+    })
+    reasons = enforce_cross_bullet_consistency(ordered, canonicals, resolved, tailored)
+    assert resolved[("e", 0)] != canonicals[("e", 0)]
+    assert resolved[("e", 1)] != canonicals[("e", 1)]
+    assert not any("shares its opening clause" in r for r in reasons)
+
+
+def test_guard_allows_moderate_sibling_overlap() -> None:
+    """The loosened Jaccard threshold (0.75) tolerates siblings that merely
+    share topic vocabulary without being near-copies."""
+    ordered, canonicals, resolved, tailored = _guard_state({
+        ("e", 0): (
+            "Assisted students improving robotics problem completion through digital logic concepts.",
+            "Assisted students improving robotics problem completion through digital logic concepts.",
+            False,
+        ),
+        ("e", 1): (
+            "Delivered clear simplified explanations of technical processes to parents.",
+            "Guided students through robotics fundamentals with hands-on digital logic exercises weekly.",
+            True,
+        ),
+    })
+    reasons = enforce_cross_bullet_consistency(ordered, canonicals, resolved, tailored)
+    assert tailored[("e", 1)]
+    assert reasons == []
+
+
+def test_guard_aggressive_thresholds_tolerate_repetition_default_reverts() -> None:
+    """Two siblings share 9/11 whole-bullet words (0.818 Jaccard, disjoint
+    openings so the opening-clause guard stays quiet in both modes): default
+    thresholds (0.75) revert the second one, the loosened aggressive-mode
+    thresholds (0.92) that render_structured_resume passes when
+    config.aggressive is set let it stand."""
+    fixture = {
+        ("g", 0): (
+            "Wrote integration tests for the payment gateway module.",
+            "Refactored using Kafka Python FastAPI Pandas NumPy pipelines for trading.",
+            True,
+        ),
+        ("g", 1): (
+            "Documented onboarding steps for new engineering hires.",
+            "Migrated using Kafka Python FastAPI Pandas NumPy pipelines for trading.",
+            True,
+        ),
+    }
+
+    ordered, canonicals, resolved, tailored = _guard_state(fixture)
+    default_reasons = enforce_cross_bullet_consistency(ordered, canonicals, resolved, tailored)
+    assert resolved[("g", 1)] == canonicals[("g", 1)]
+    assert any("near-duplicate" in r for r in default_reasons)
+    assert not any("opening clause" in r for r in default_reasons)
+
+    ordered, canonicals, resolved, tailored = _guard_state(fixture)
+    aggressive_reasons = enforce_cross_bullet_consistency(
+        ordered,
+        canonicals,
+        resolved,
+        tailored,
+        near_duplicate_jaccard=0.92,
+        opening_overlap_jaccard=0.75,
+        max_phrase_bullets=6,
+        max_stem_bullets=8,
+    )
+    assert aggressive_reasons == []
+    assert resolved[("g", 1)] == "Migrated using Kafka Python FastAPI Pandas NumPy pipelines for trading."
+
+
+def test_guard_reverts_phrase_repeated_across_entries() -> None:
+    # "functional specifications" bolted into four different entries: the
+    # first three occurrences stay (loosened cap), the fourth reverts.
+    entries = {}
+    for n, eid in enumerate(("alpha", "beta", "gamma", "delta")):
+        entries[(eid, 0)] = (
+            f"Built module {n} for the platform team.",
+            f"Built module {n}, defining functional specifications for delivery.",
+            True,
+        )
+    ordered, canonicals, resolved, tailored = _guard_state(entries)
+    reasons = enforce_cross_bullet_consistency(ordered, canonicals, resolved, tailored)
+    assert tailored[("alpha", 0)] and tailored[("beta", 0)] and tailored[("gamma", 0)]
+    assert not tailored[("delta", 0)]
+    # Which of the overlapping repeated n-grams is named first is unimportant.
+    assert any("repeated across" in r and "delta[0]" in r for r in reasons)
+
+
+def test_guard_reverts_long_word_leaned_on_everywhere() -> None:
+    # "documenting"/"documentation" stem-matched across five entries: the
+    # fifth reverts (loosened cap of 4). Canonical uses don't count.
+    entries = {}
+    variants = ("documenting", "documentation", "documenting", "documented", "documentation")
+    for n, (eid, word) in enumerate(zip(("a", "b", "c", "d", "e"), variants)):
+        entries[(eid, 0)] = (
+            f"Shipped feature {n} for the team.",
+            f"Shipped feature {n}, {word} workflows for stakeholders.",
+            True,
+        )
+    ordered, canonicals, resolved, tailored = _guard_state(entries)
+    reasons = enforce_cross_bullet_consistency(ordered, canonicals, resolved, tailored)
+    assert not tailored[("e", 0)]
+    assert sum(1 for k in entries if tailored[k]) == 4
+    assert any("repeated across" in r for r in reasons)
+
+
+def test_render_reverts_duplicate_metric_bullet_end_to_end(monkeypatch) -> None:
+    """The live-observed Obotz defect: a rewrite relocated the 35% metric into
+    a sibling bullet while the canonical bullet still stated it."""
+    assert CATALOG is not None
+    monkeypatch.setattr(CATALOG.render_config, "rewrite_scope", "full")
+    obotz = _entry_id("obotz")
+    selection = StructuredSelection(
+        ranking=[obotz],
+        bullets={
+            obotz: [
+                "",
+                "Helped students improve robotics problem completion scores by 35\\% "
+                "using custom \\textbf{Arduino} hardware.",
+            ]
+        },
+    )
+    latex, report = render_structured_resume(CATALOG, selection)
+    # The canonical 75th-percentile bullet is restored; 35% appears once.
+    assert "75th percentile" in latex
+    assert latex.count("35\\%") == 1
+    assert any("stated twice" in item for item in report.canonical_fallbacks)
 
 
 def test_validate_bullet_escapes_stray_specials() -> None:
@@ -403,44 +829,56 @@ def _count_visible_bullets(latex: str) -> int:
     return latex.count("\\item")
 
 
-@pytest.mark.parametrize("family_key", ["EMBEDDED", "SOFTWARE", "FRONTEND", "ML"])
-def test_render_bullet_count_within_budget(family_key: str) -> None:
+@pytest.mark.parametrize(
+    "ranking_fragments",
+    [
+        [],  # template order
+        ["goopter", "markham", "frontend", "obotz"],  # experience first
+        ["web-messaging", "frontend", "goopter"],  # web-flavoured
+    ],
+)
+def test_render_bullet_count_within_budget(ranking_fragments: list[str]) -> None:
     assert CATALOG is not None
-    latex, report = render_structured_resume(
-        CATALOG, FAMILIES, StructuredSelection(role_family_key=family_key)
-    )
+    selection = StructuredSelection(ranking=[_entry_id(f) for f in ranking_fragments])
+    latex, report = render_structured_resume(CATALOG, selection)
     assert MIN_VISIBLE_BULLETS <= report.visible_bullet_count <= MAX_VISIBLE_BULLETS
     assert _count_visible_bullets(latex) == report.visible_bullet_count
 
 
-def test_render_embedded_shows_hardware_hides_web() -> None:
+def test_render_ranking_decides_visibility() -> None:
+    """Ranking every non-embedded entry above eebot pushes eebot off the page —
+    no entry has category immunity anymore."""
     assert CATALOG is not None
-    latex, report = render_structured_resume(
-        CATALOG, FAMILIES, StructuredSelection(role_family_key="EMBEDDED")
-    )
+    ranking = [
+        _entry_id(f)
+        for f in (
+            "web-messaging", "frontend", "goopter", "markham",
+            "terrain", "bookstore", "obotz", "particle",
+        )
+    ]
+    latex, report = render_structured_resume(CATALOG, StructuredSelection(ranking=ranking))
+    assert "Web Messaging App" in latex
+    assert "MCG3D" in latex
+    assert _entry_id("eebot") in report.hidden_entries
+    assert "eebot Mobile Robot System" not in latex
+
+
+def test_render_any_combination_can_surface_together() -> None:
+    """Entries from formerly-incompatible buckets (frontend + embedded + ML)
+    render side by side when the ranking calls for it."""
+    assert CATALOG is not None
+    ranking = [_entry_id("frontend"), _entry_id("eebot"), _entry_id("goopter")]
+    latex, report = render_structured_resume(CATALOG, StructuredSelection(ranking=ranking))
+    for fragment in ("frontend", "eebot", "goopter"):
+        assert _entry_id(fragment) in report.visible_entries
+    assert "MCG3D" in latex
     assert "eebot Mobile Robot System" in latex
-    assert "Arithmetic and Logic Unit" in latex
-    assert "Obotz Robotics" in latex
-    assert "Web Messaging App" not in latex
-    assert "MCG3D" not in latex
-    assert "Goopter" not in latex
-
-
-def test_render_ml_shows_goopter_with_kafka() -> None:
-    assert CATALOG is not None
-    latex, _ = render_structured_resume(
-        CATALOG, FAMILIES, StructuredSelection(role_family_key="ML")
-    )
     assert "Goopter" in latex
-    assert "Kafka" in latex
-    assert "eebot" not in latex
 
 
 def test_render_has_no_comment_environments_and_single_document() -> None:
     assert CATALOG is not None
-    latex, _ = render_structured_resume(
-        CATALOG, FAMILIES, StructuredSelection(role_family_key="SOFTWARE")
-    )
+    latex, _ = render_structured_resume(CATALOG, StructuredSelection())
     assert latex.count("\\begin{document}") == 1
     assert latex.count("\\end{document}") == 1
     assert "\\begin{comment}" not in latex
@@ -450,10 +888,8 @@ def test_render_has_no_comment_environments_and_single_document() -> None:
 
 def test_render_preserves_mandatory_blocks() -> None:
     assert CATALOG is not None
-    for family_key in ("EMBEDDED", "SOFTWARE", "FRONTEND", "ML"):
-        latex, _ = render_structured_resume(
-            CATALOG, FAMILIES, StructuredSelection(role_family_key=family_key)
-        )
+    for ranking in ([], [_entry_id("goopter"), _entry_id("frontend")]):
+        latex, _ = render_structured_resume(CATALOG, StructuredSelection(ranking=ranking))
         assert "Ernest Choi" in latex
         assert "ernestljchoi@gmail.com" in latex
         assert "\\section*{Skills}" in latex
@@ -464,47 +900,12 @@ def test_render_preserves_mandatory_blocks() -> None:
 def test_render_preserves_markham_metrics_when_visible() -> None:
     assert CATALOG is not None
     latex, _ = render_structured_resume(
-        CATALOG, FAMILIES, StructuredSelection(role_family_key="EMBEDDED")
+        CATALOG, StructuredSelection(ranking=[_entry_id("markham")])
     )
-    if "City of Markham" in latex:
-        assert "41\\%" in latex
-        assert "14\\%" in latex
-        assert "20\\%" in latex
-
-
-def test_render_must_show_survives_hostile_ranking() -> None:
-    """A ranking that buries MUST SHOW entries cannot hide them."""
-    assert CATALOG is not None
-    web_ids = [e.entry_id for e in CATALOG.entries if "web-messaging" in e.entry_id]
-    selection = StructuredSelection(role_family_key="EMBEDDED", ranking=web_ids)
-    latex, report = render_structured_resume(CATALOG, FAMILIES, selection)
-    assert "eebot Mobile Robot System" in latex
-    assert "Web Messaging App" not in latex
-
-
-def test_render_uses_valid_tailored_bullets_and_falls_back_on_bad_ones(monkeypatch) -> None:
-    assert CATALOG is not None
-    monkeypatch.setattr(CATALOG.render_config, "rewrite_scope", "full")
-    goopter = next(e for e in CATALOG.entries if "goopter" in e.entry_id)
-    tailored_ok = (
-        "Engineered a distributed low-latency data pipeline for quantitative trading with "
-        "\\textbf{Kafka}, \\textbf{FastAPI}, and asynchronous \\textbf{Python} using "
-        "\\textbf{Pandas}, \\textbf{NumPy}, and \\textbf{scikit-learn} for production analytics."
-    )
-    selection = StructuredSelection(
-        role_family_key="ML",
-        bullets={
-            goopter.entry_id: [
-                tailored_ok,
-                "Built models with SCADA integration using \\textbf{TensorFlow}.",  # forbidden term
-            ]
-        },
-    )
-    latex, report = render_structured_resume(CATALOG, FAMILIES, selection)
-    assert "production analytics" in latex  # tailored bullet 0 used
-    assert "SCADA" not in latex  # bullet 1 fell back to canonical
-    assert report.tailored_bullets_used == 1
-    assert any("forbidden term" in item for item in report.canonical_fallbacks)
+    assert "City of Markham" in latex
+    assert "41\\%" in latex
+    assert "14\\%" in latex
+    assert "20\\%" in latex
 
 
 # ---------------------------------------------------------------------------
@@ -512,8 +913,8 @@ def test_render_uses_valid_tailored_bullets_and_falls_back_on_bad_ones(monkeypat
 # ---------------------------------------------------------------------------
 
 def test_extract_json_object_handles_fences_and_prose() -> None:
-    payload = extract_json_object('Here you go:\n```json\n{"role_family": "ML"}\n```')
-    assert payload == {"role_family": "ML"}
+    payload = extract_json_object('Here you go:\n```json\n{"keywords": ["ML"]}\n```')
+    assert payload == {"keywords": ["ML"]}
     payload = extract_json_object('prefix {"a": {"b": 1}} suffix')
     assert payload == {"a": {"b": 1}}
     assert extract_json_object("no json here") is None
@@ -627,16 +1028,16 @@ def test_validate_bullet_markdown_bold_still_subject_to_grounding() -> None:
     assert "mission critical infrastructure" in sanitized
 
 
-def test_parse_structured_response_falls_back_to_keyword_family() -> None:
+def test_parse_structured_response_ignores_legacy_family_fields() -> None:
+    """Old-style payloads carrying role_family/include keys still parse; the
+    unknown fields are simply ignored."""
     assert CATALOG is not None
     selection = parse_structured_response(
-        '{"role_family": "BANANA", "ranking": [], "bullets": {}}',
+        '{"role_family": "BANANA", "include": ["x"], "ranking": [], "bullets": {}}',
         CATALOG,
-        FAMILIES,
-        "embedded firmware microcontroller RTOS",
     )
     assert selection is not None
-    assert selection.role_family_key == "EMBEDDED"
+    assert selection.ranking == []
 
 
 def test_parse_structured_response_filters_unknown_ids() -> None:
@@ -644,14 +1045,11 @@ def test_parse_structured_response_filters_unknown_ids() -> None:
     selection = parse_structured_response(
         json.dumps(
             {
-                "role_family": "ML",
                 "ranking": ["nonexistent-entry", CATALOG.entries[0].entry_id],
                 "bullets": {"nonexistent-entry": ["x"], CATALOG.entries[0].entry_id: ["y"]},
             }
         ),
         CATALOG,
-        FAMILIES,
-        "ml job",
     )
     assert selection is not None
     assert selection.ranking == [CATALOG.entries[0].entry_id]
@@ -706,9 +1104,8 @@ def test_generate_resume_rewrite_structured_path_with_json_response(tmp_path: Pa
 
     response = json.dumps(
         {
-            "role_family": "ML",
             "keywords": ["Python", "TensorFlow"],
-            "ranking": [],
+            "ranking": [_entry_id("goopter"), _entry_id("markham")],
             "bullets": {},
         }
     )
@@ -732,7 +1129,7 @@ def test_generate_resume_rewrite_structured_path_with_json_response(tmp_path: Pa
     assert "Goopter" in result.latex_document
     summary = json.loads(result.rewritten_resume or "{}")
     assert summary["mode"] == "structured"
-    assert summary["role_family"] == "ML"
+    assert _entry_id("goopter") in summary["visible_entries"]
     # Structured mode must not send the legacy context cache, but does request
     # native JSON output.
     sent_config = models_api.calls[0].get("config")
@@ -745,6 +1142,46 @@ def test_generate_resume_rewrite_structured_path_with_json_response(tmp_path: Pa
         sent_config.get("response_mime_type") if isinstance(sent_config, dict) else None
     )
     assert mime == "application/json"
+
+
+def test_generate_resume_rewrite_aggressive_flag_reaches_prompt_and_summary(tmp_path: Path) -> None:
+    """End-to-end: the aggressive=True kwarg on generate_resume_rewrite must
+    reach the actual prompt text sent to the provider (not just an internal
+    flag nobody reads) and be reported back in the summary/message."""
+    profile = _profile_copy(tmp_path)
+    job = extract_job_context_from_message(
+        "[LinkedIn] Machine Learning Engineer\nhttps://example.com/job"
+    )
+    assert job is not None
+
+    response = json.dumps(
+        {
+            "keywords": ["Python", "TensorFlow"],
+            "ranking": [_entry_id("goopter"), _entry_id("markham")],
+            "bullets": {},
+        }
+    )
+    models_api = _FakeModelsApi(response)
+
+    result = generate_resume_rewrite(
+        settings=GeminiSettings(api_key="test-key", model="gemini-2.5-pro"),
+        job=job,
+        cache_name="cachedContents/999",
+        baseinfo_paths=[profile / "baseinfo.txt"],
+        support_paths=[profile / "instructions.txt"],
+        template_path=profile / "template.tex",
+        scraper=lambda _: _scraped("Machine learning model training pipelines with Python"),
+        client_factory=lambda _: _FakeGeminiClient(models_api),
+        aggressive=True,
+    )
+
+    assert result.status == "ok"
+    sent_prompt = models_api.calls[0].get("contents")
+    assert isinstance(sent_prompt, str) and "AGGRESSIVE MODE" in sent_prompt
+
+    summary = json.loads(result.rewritten_resume or "{}")
+    assert summary["aggressive"] is True
+    assert "aggressive mode" in (result.message or "").lower()
 
 
 def test_generate_resume_rewrite_structured_deterministic_fallback(
@@ -785,7 +1222,6 @@ def test_generate_resume_rewrite_structured_deterministic_fallback(
     assert "eebot Mobile Robot System" in result.latex_document
     summary = json.loads(result.rewritten_resume or "{}")
     assert summary["deterministic_fallback"] is True
-    assert summary["role_family"] == "EMBEDDED"
 
 
 def test_generate_resume_rewrite_untagged_template_uses_legacy_path(tmp_path: Path) -> None:
@@ -819,23 +1255,44 @@ def test_generate_resume_rewrite_untagged_template_uses_legacy_path(tmp_path: Pa
 
 def test_build_structured_prompt_mentions_every_entry() -> None:
     assert CATALOG is not None
-    prompt = build_structured_prompt(
-        "Software Engineer", "Build APIs", ["Python"], CATALOG, FAMILIES
-    )
+    prompt = build_structured_prompt("Software Engineer", "Build APIs", ["Python"], CATALOG)
     for entry in CATALOG.entries:
         assert entry.entry_id in prompt
-    assert "role_family" in prompt
+    assert "role_family" not in prompt
     assert "ONLY a JSON object" in prompt
+    assert '"ranking"' in prompt
+    assert '"exclude"' in prompt
+
+
+def test_parse_skill_anchor_display_preserves_original_casing() -> None:
+    from services.resumes.structured import parse_skill_anchor_display
+
+    baseinfo = (
+        "== SKILL ANCHORS ==\n"
+        "Languages: JavaScript/Node.js, Python, C++\n"
+        "Tools: PostgreSQL, Git\n"
+    )
+    display = parse_skill_anchor_display(baseinfo)
+    assert display["postgresql"] == "PostgreSQL"
+    assert display["git"] == "Git"
+    assert display["python"] == "Python"
+    # Slash-compound parts get their own display entry too.
+    assert display["javascript"] == "JavaScript"
+    assert display["node.js"] == "Node.js"
+    # No SKILL ANCHORS section -> empty map, matching parse_skill_anchors' ().
+    assert parse_skill_anchor_display("no anchors here") == {}
 
 
 def test_build_structured_prompt_exposes_skill_anchors() -> None:
     """The model must see the candidate's real toolset to weave tools in."""
     assert CATALOG is not None
-    prompt = build_structured_prompt(
-        "Software Engineer", "Build APIs", ["Python"], CATALOG, FAMILIES
-    )
+    prompt = build_structured_prompt("Software Engineer", "Build APIs", ["Python"], CATALOG)
     assert "<skill_anchors>" in prompt
-    assert "kafka" in prompt
+    # Anchors are matched case-insensitively internally, but shown to the
+    # model with their original baseinfo casing so a freshly patched-in tool
+    # (no existing occurrence to copy casing from) is written correctly.
+    assert "Kafka" in prompt
+    assert "kafka" not in prompt.replace("Kafka", "")
     assert "PRIMARY GOAL" in prompt
 
     # Profiles without anchors get no section (check disabled end to end).
@@ -843,8 +1300,42 @@ def test_build_structured_prompt_exposes_skill_anchors() -> None:
 
     bare = copy.deepcopy(CATALOG)
     bare.skill_anchors = ()
-    prompt = build_structured_prompt("Engineer", "desc", [], bare, FAMILIES)
+    prompt = build_structured_prompt("Engineer", "desc", [], bare)
     assert "<skill_anchors>" not in prompt
+
+
+def test_prompt_adjacent_tool_leeway_note_tracks_config(monkeypatch) -> None:
+    assert CATALOG is not None
+    monkeypatch.setattr(CATALOG.render_config, "adjacent_tool_leeway", True)
+    prompt = build_structured_prompt("Engineer", "desc", [], CATALOG)
+    assert "closely" in prompt and "adjacent" in prompt
+    monkeypatch.setattr(CATALOG.render_config, "adjacent_tool_leeway", False)
+    prompt = build_structured_prompt("Engineer", "desc", [], CATALOG)
+    assert "must never appear" in prompt
+
+
+def test_prompt_aggressive_note_and_leeway_wording_track_effective_config(monkeypatch) -> None:
+    """The prompt must match what the validator will actually allow: with
+    aggressive on, the anchor-boundary wording switches to the leeway framing
+    even though the profile's own adjacent_tool_leeway is off, and an
+    AGGRESSIVE MODE note appears."""
+    assert CATALOG is not None
+    monkeypatch.setattr(CATALOG.render_config, "adjacent_tool_leeway", False)
+    monkeypatch.setattr(CATALOG.render_config, "aggressive", False)
+    prompt = build_structured_prompt("Engineer", "desc", [], CATALOG)
+    assert "AGGRESSIVE MODE" not in prompt
+    assert "must never appear" in prompt
+
+    monkeypatch.setattr(CATALOG.render_config, "aggressive", True)
+    prompt = build_structured_prompt("Engineer", "desc", [], CATALOG)
+    assert "AGGRESSIVE MODE" in prompt
+    assert "KEYWORD INJECTION" in prompt
+    assert "any tool from the JD" in prompt
+    assert "you may name a tool ONLY when it is closely" not in prompt
+    assert "Employers" in prompt and "titles" in prompt and "dates" in prompt
+    assert "COHERENCE IS MANDATORY" in prompt
+    assert "\\textbf{}" in prompt
+    assert "coherent" in prompt.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -905,14 +1396,7 @@ def test_jake_style_template_parses_and_renders() -> None:
     assert prefix == "\\resumeSubHeadingListStart"
     assert suffix == "\\resumeSubHeadingListEnd"
 
-    families = parse_role_guide(JBASE := (
-        "== ROLE TYPE SELECTION GUIDE ==\n\n"
-        "BACKEND roles\n  Keywords: backend, microservices\n"
-        "  MUST SHOW: dotnet\n  SHOW: data\n  HIDE:\n"
-    ))
-    latex, report = render_structured_resume(
-        catalog, families, StructuredSelection(role_family_key="BACKEND")
-    )
+    latex, report = render_structured_resume(catalog, StructuredSelection())
     # Renders with the template's own structure, and fidelity lint is clean.
     assert "\\resumeSubHeadingListStart" in latex
     assert "\\resumeSubHeadingListEnd" in latex
@@ -931,8 +1415,8 @@ def test_char_budget_trims_long_tailored_bullets() -> None:
     bullets = {
         entry.entry_id: [long_bullet] * len(entry.bullets) for entry in CATALOG.entries
     }
-    selection = StructuredSelection(role_family_key="ML", bullets=bullets)
-    _, report = render_structured_resume(CATALOG, FAMILIES, selection)
+    selection = StructuredSelection(bullets=bullets)
+    _, report = render_structured_resume(CATALOG, selection)
     # Char pressure trims below the count ceiling — and may dip up to 2 below
     # the count minimum, because a second page is the worse outcome.
     assert report.visible_bullet_count >= CATALOG.render_config.min_visible_bullets - 2
@@ -944,22 +1428,20 @@ def test_baseinfo_blocks_parsed_by_tag() -> None:
 
     blocks, profile = parse_baseinfo_blocks(BASEINFO_TEXT)
     assert "ml" in blocks and "Goopter" in blocks["ml"]
-    assert "Kafka" in blocks["ml"]
-    assert "teaching" in blocks and "35%" in blocks["teaching"]
+    # Each block is header + a user-editable "Notes:" slot for supplementary
+    # facts (not a restatement of the canonical bullets).
+    assert "Notes:" in blocks["ml"]
+    assert "teaching" in blocks and "Notes:" in blocks["teaching"]
     # Multi-tag entries land under every tag.
     assert "hardware" in blocks and "fpga" in blocks
     assert blocks["hardware"] == blocks["fpga"]
-    # Candidate-level facts come from the header, guide is excluded.
+    # Candidate-level facts come from the header.
     assert "Ernest Choi" in profile
-    assert "MUST SHOW" not in profile
-    assert all("MUST SHOW" not in text for text in blocks.values())
 
 
 def test_prompt_includes_baseinfo_background_per_entry() -> None:
     assert CATALOG is not None
-    prompt = build_structured_prompt(
-        "ML Engineer", "train models", [], CATALOG, FAMILIES
-    )
+    prompt = build_structured_prompt("ML Engineer", "train models", [], CATALOG)
     assert "verified background" in prompt
     assert "<candidate_facts>" in prompt
     assert "Toronto Metropolitan University" in prompt
@@ -984,21 +1466,18 @@ def test_baseinfo_fact_not_rejected_as_invented() -> None:
 
 def test_render_fidelity_clean_for_real_profile() -> None:
     assert CATALOG is not None
-    for family_key in ("EMBEDDED", "SOFTWARE", "FRONTEND", "ML"):
-        _, report = render_structured_resume(
-            CATALOG, FAMILIES, StructuredSelection(role_family_key=family_key)
-        )
+    for ranking in ([], [_entry_id("goopter"), _entry_id("frontend"), _entry_id("eebot")]):
+        _, report = render_structured_resume(CATALOG, StructuredSelection(ranking=ranking))
         assert report.fidelity_findings == []
 
 
 def test_load_structured_profile_roundtrip() -> None:
-    loaded = load_structured_profile(
+    catalog = load_structured_profile(
         PROFILE_DIR / "template.tex", PROFILE_DIR / "baseinfo.txt"
     )
-    assert loaded is not None
-    catalog, families = loaded
-    assert len(catalog.entries) == 10
-    assert len(families) == 4
+    assert catalog is not None
+    assert len(catalog.entries) == 12
+    assert catalog.render_config.adjacent_tool_leeway is True
 
 
 # ---------------------------------------------------------------------------
@@ -1038,18 +1517,29 @@ def test_render_config_rejects_unknown_rewrite_scope(tmp_path: Path) -> None:
     assert config.rewrite_scope == "full"
 
 
+def test_render_config_parses_adjacent_tool_leeway(tmp_path: Path) -> None:
+    from services.resumes.structured import RenderConfig
+
+    path = tmp_path / "structured_config.json"
+    path.write_text(json.dumps({"adjacent_tool_leeway": True}), encoding="utf-8")
+    assert RenderConfig.from_file(path).adjacent_tool_leeway is True
+    path.write_text(json.dumps({}), encoding="utf-8")
+    assert RenderConfig.from_file(path).adjacent_tool_leeway is False
+    path.write_text(json.dumps({"adjacent_tool_leeway": "yes"}), encoding="utf-8")
+    assert RenderConfig.from_file(path).adjacent_tool_leeway is False  # non-bool ignored
+
+
 def test_render_selection_scope_ignores_all_tailored_bullets(monkeypatch) -> None:
     assert CATALOG is not None
     monkeypatch.setattr(CATALOG.render_config, "rewrite_scope", "selection")
     selection = StructuredSelection(
-        role_family_key="ML",
         bullets=_tailored_bullets_for_all_entries("zzmarker"),
     )
-    latex, report = render_structured_resume(CATALOG, FAMILIES, selection)
+    latex, report = render_structured_resume(CATALOG, selection)
     assert "zzmarker" not in latex
     assert report.tailored_bullets_used == 0
     assert report.rewrite_scope == "selection"
-    # Selection decisions still apply: the render is family-shaped, not empty.
+    # Selection decisions still apply: the render is not empty.
     assert report.visible_bullet_count > 0
 
 
@@ -1058,10 +1548,9 @@ def test_render_limited_scope_tailors_only_first_n_bullets(monkeypatch) -> None:
     monkeypatch.setattr(CATALOG.render_config, "rewrite_scope", "limited")
     monkeypatch.setattr(CATALOG.render_config, "limited_rewrite_bullets", 4)
     selection = StructuredSelection(
-        role_family_key="ML",
         bullets=_tailored_bullets_for_all_entries("zzmarker"),
     )
-    latex, report = render_structured_resume(CATALOG, FAMILIES, selection)
+    latex, report = render_structured_resume(CATALOG, selection)
     assert report.tailored_bullets_used == 4
     assert latex.count("zzmarker") == 4
     assert report.rewrite_scope == "limited"
@@ -1077,10 +1566,9 @@ def test_render_full_scope_tailors_everything(monkeypatch) -> None:
     assert CATALOG is not None
     monkeypatch.setattr(CATALOG.render_config, "rewrite_scope", "full")
     selection = StructuredSelection(
-        role_family_key="ML",
         bullets=_tailored_bullets_for_all_entries("zzmarker"),
     )
-    latex, report = render_structured_resume(CATALOG, FAMILIES, selection)
+    latex, report = render_structured_resume(CATALOG, selection)
     assert report.tailored_bullets_used == report.visible_bullet_count
     assert report.rewrite_scope == "full"
 
@@ -1088,7 +1576,7 @@ def test_render_full_scope_tailors_everything(monkeypatch) -> None:
 def test_prompt_mentions_selection_scope(monkeypatch) -> None:
     assert CATALOG is not None
     monkeypatch.setattr(CATALOG.render_config, "rewrite_scope", "selection")
-    prompt = build_structured_prompt("Engineer", "Job description", [], CATALOG, FAMILIES)
+    prompt = build_structured_prompt("Engineer", "Job description", [], CATALOG)
     assert "RENDERS ALL BULLET TEXT CANONICALLY" in prompt
 
 
@@ -1096,21 +1584,21 @@ def test_prompt_mentions_limited_rewrite_budget(monkeypatch) -> None:
     assert CATALOG is not None
     monkeypatch.setattr(CATALOG.render_config, "rewrite_scope", "limited")
     monkeypatch.setattr(CATALOG.render_config, "limited_rewrite_bullets", 5)
-    prompt = build_structured_prompt("Engineer", "Job description", [], CATALOG, FAMILIES)
+    prompt = build_structured_prompt("Engineer", "Job description", [], CATALOG)
     assert "REWRITE BUDGET" in prompt
     assert "first 5" in prompt
 
 
 def test_prompt_contains_prose_quality_rules() -> None:
     assert CATALOG is not None
-    prompt = build_structured_prompt("Engineer", "Job description", [], CATALOG, FAMILIES)
+    prompt = build_structured_prompt("Engineer", "Job description", [], CATALOG)
     assert "NO EMPTY PURPOSE CLAUSES" in prompt
     assert "NEVER REDUCE SPECIFICITY" in prompt
     assert "VARY SENTENCE SHAPE" in prompt
 
 
 # ---------------------------------------------------------------------------
-# Filler-tail rejection and bold-density cap
+# Filler-tail stripping and bold-density cap
 # ---------------------------------------------------------------------------
 
 
@@ -1124,10 +1612,22 @@ def test_prompt_contains_prose_quality_rules() -> None:
         ", streamlining operational workflows",
     ],
 )
-def test_validate_bullet_rejects_empty_purpose_clause_tails(tail: str) -> None:
+def test_validate_bullet_strips_empty_purpose_clause_tails(tail: str) -> None:
     text, reason = validate_tailored_bullet(
         f"Maintained \\textbf{{LaTeX}} documentation for the team{tail}.",
         CANONICAL,
+    )
+    assert reason is None
+    assert text is not None
+    assert text == "Maintained \\textbf{LaTeX} documentation for the team."
+
+
+def test_validate_bullet_filler_strip_rejects_degenerate_stub() -> None:
+    """When almost nothing remains before the filler connector, stripping would
+    leave a stub — the bullet still falls back to canonical."""
+    text, reason = validate_tailored_bullet(
+        "Built a cache while ensuring stakeholder alignment throughout delivery.",
+        "Built a cache layer, cutting latency by 40\\%.",
     )
     assert text is None
     assert "filler clause" in str(reason)
@@ -1143,79 +1643,6 @@ def test_validate_bullet_allows_filler_gerund_present_in_canonical() -> None:
     assert text is not None
 
 
-def test_render_config_parses_family_skill_priority(tmp_path: Path) -> None:
-    from services.resumes.structured import RenderConfig
-
-    path = tmp_path / "structured_config.json"
-    path.write_text(
-        json.dumps({"family_skill_priority": {"embedded": ["C", "VHDL"], "ml": ["Python"]}}),
-        encoding="utf-8",
-    )
-    config = RenderConfig.from_file(path)
-    assert config.family_skill_priority == {"EMBEDDED": ("C", "VHDL"), "ML": ("Python",)}
-
-
-def test_reorder_skills_family_priority_orders_without_listing_keywords() -> None:
-    from services.resumes.structured import reorder_skills_for_keywords
-
-    tail = (
-        "\\section*{Skills}\n"
-        "\\textbf{Languages:} JavaScript/Node.js, Java, Python, C++, C, SQL, VHDL \\\\\n"
-    )
-    result = reorder_skills_for_keywords(tail, [], ("C", "C++", "VHDL"))
-    languages = next(l for l in result.splitlines() if "Languages" in l)
-    items = languages.split("}", 1)[1].rstrip(" \\").strip()
-    # Family priority order leads; the rest keep canonical order.
-    assert items.startswith("C, C++, VHDL")
-    assert "JavaScript/Node.js" in items and "Java" in items
-
-
-def test_reorder_skills_listing_keywords_outrank_family_priority() -> None:
-    from services.resumes.structured import reorder_skills_for_keywords
-
-    tail = (
-        "\\section*{Skills}\n"
-        "\\textbf{Languages:} Java, Python, C++, C \\\\\n"
-    )
-    result = reorder_skills_for_keywords(tail, ["Python"], ("C", "C++"))
-    languages = next(l for l in result.splitlines() if "Languages" in l)
-    items = languages.split("}", 1)[1].rstrip(" \\").strip()
-    assert items.startswith("Python, C, C++")
-
-
-def test_reorder_skills_single_letter_priority_does_not_match_substrings() -> None:
-    from services.resumes.structured import reorder_skills_for_keywords
-
-    tail = (
-        "\\section*{Skills}\n"
-        "\\textbf{Languages:} CSS, scikit-learn, C \\\\\n"
-    )
-    result = reorder_skills_for_keywords(tail, [], ("C",))
-    languages = next(l for l in result.splitlines() if "Languages" in l)
-    items = languages.split("}", 1)[1].rstrip(" \\").strip()
-    # "C" must float, but must NOT drag CSS or scikit-learn with it.
-    assert items == "C, CSS, scikit-learn"
-
-
-def test_render_embedded_family_leads_skills_with_c_not_javascript() -> None:
-    assert CATALOG is not None
-    selection = StructuredSelection(role_family_key="EMBEDDED")
-    latex, _ = render_structured_resume(CATALOG, FAMILIES, selection)
-    languages = next(l for l in latex.splitlines() if l.startswith("\\textbf{Languages:}"))
-    items = languages.split("}", 1)[1].strip()
-    assert items.startswith("C,")
-    assert items.index("C,") < items.index("JavaScript")
-
-
-def test_render_ml_family_leads_skills_with_python() -> None:
-    assert CATALOG is not None
-    selection = StructuredSelection(role_family_key="ML")
-    latex, _ = render_structured_resume(CATALOG, FAMILIES, selection)
-    languages = next(l for l in latex.splitlines() if l.startswith("\\textbf{Languages:}"))
-    items = languages.split("}", 1)[1].strip()
-    assert items.startswith("Python")
-
-
 def test_validate_bullet_demotes_bold_beyond_density_cap() -> None:
     canonical = (
         "Built pipelines using \\textbf{Kafka}, \\textbf{FastAPI}, \\textbf{Python}, "
@@ -1228,24 +1655,286 @@ def test_validate_bullet_demotes_bold_beyond_density_cap() -> None:
     )
     assert reason is None
     assert text is not None
-    assert text.count("\\textbf{") == 3
+    assert text.count("\\textbf{") == 4  # default cap
     # Demoted tools remain as plain text.
-    assert "Pandas" in text and "NumPy" in text
+    assert "NumPy" in text
+    assert "\\textbf{NumPy}" not in text
+
+
+def test_validate_bullet_bold_cap_keeps_listing_relevant_bolds() -> None:
+    canonical = (
+        "Built tools with \\textbf{Python}, \\textbf{Kafka}, \\textbf{Pandas}, "
+        "and \\textbf{NumPy} plus \\textbf{Docker}."
+    )
+    text, reason = validate_tailored_bullet(
+        canonical,
+        canonical,
+        listing_keywords=("Docker", "containerization"),
+    )
+    assert reason is None
+    assert text.count("\\textbf{") == 4  # default cap
+    # Docker matches the listing -> kept despite being the last bold.
+    assert "\\textbf{Docker}" in text
+    assert "\\textbf{NumPy}" not in text
+
+
+# ---------------------------------------------------------------------------
+# Skills-section reordering
+# ---------------------------------------------------------------------------
+
+
+def test_reorder_skills_listing_keywords_match_whole_words_only() -> None:
+    from services.resumes.structured import reorder_skills_for_keywords
+
+    tail = (
+        "\\section*{Skills}\n"
+        "\\textbf{Languages:} JavaScript/Node.js, Java, Python, C++, C, CSS \\\\\n"
+    )
+    # None of these keywords name C — the letter c inside "react"/"recruitment"
+    # must not float the C item to the front.
+    result = reorder_skills_for_keywords(
+        tail, ["React", "recruitment", "communication skills", "CSS"]
+    )
+    languages = next(l for l in result.splitlines() if "Languages" in l)
+    items = [i.strip() for i in languages.split("}", 1)[1].rstrip(" \\").split(",")]
+    assert items[0] == "CSS"
+    # C keeps its canonical position (after C++), not promoted.
+    assert items.index("C") == items.index("C++") + 1
+    # A keyword that genuinely names the item as a whole word still promotes it.
+    result = reorder_skills_for_keywords(tail, ["embedded C firmware"])
+    languages = next(l for l in result.splitlines() if "Languages" in l)
+    items = languages.split("}", 1)[1].rstrip(" \\").strip()
+    assert items.startswith("C,")
+
+
+def test_reorder_skills_trims_unmatched_items_beyond_cap() -> None:
+    from services.resumes.structured import reorder_skills_for_keywords
+
+    tail = (
+        "\\section*{Skills}\n"
+        "\\textbf{Languages:} JavaScript/Node.js, Java, Python, C++, C, SQL, "
+        "HTML, CSS, GLSL, VHDL, Verilog, MATLAB \\\\\n"
+    )
+    result = reorder_skills_for_keywords(
+        tail,
+        ["JavaScript", "HTML", "CSS"],
+        max_items_per_line=6,
+    )
+    languages = next(l for l in result.splitlines() if "Languages" in l)
+    items = [i.strip() for i in languages.split("}", 1)[1].rstrip(" \\").split(",")]
+    assert len(items) == 6
+    # Matched items always survive.
+    for kept in ("JavaScript/Node.js", "HTML", "CSS"):
+        assert kept in items
+    # Unmatched tail items beyond the cap are cut.
+    for cut in ("VHDL", "Verilog", "MATLAB"):
+        assert cut not in items
+    # Cap of 0 (default) preserves every item — reorder-only legacy behavior.
+    result_off = reorder_skills_for_keywords(tail, ["HTML"])
+    languages_off = next(l for l in result_off.splitlines() if "Languages" in l)
+    items_off = [i.strip() for i in languages_off.split("}", 1)[1].rstrip(" \\").split(",")]
+    assert len(items_off) == 12
+    # Matched items always survive even when they alone exceed the cap.
+    result_over = reorder_skills_for_keywords(
+        tail,
+        ["JavaScript", "Java", "Python", "C++", "SQL", "HTML", "CSS"],
+        max_items_per_line=2,
+    )
+    languages_over = next(l for l in result_over.splitlines() if "Languages" in l)
+    items_over = [i.strip() for i in languages_over.split("}", 1)[1].rstrip(" \\").split(",")]
+    assert len(items_over) == 7
+
+
+def test_skills_reorder_moves_matching_tools_first() -> None:
+    from services.resumes.structured import reorder_skills_for_keywords
+
+    tail = (
+        "\\section*{Skills}\n"
+        "\\textbf{Tools:} Git, PostgreSQL, Ubuntu Linux, Docker, Kafka, Tableau \\\\\n"
+        "\\textbf{Platforms:} GitHub, GitLab, Raspberry Pi, Arduino\n"
+        "\\section*{Education}\n"
+        "\\textbf{School} -- Degree \\hfill 2023--2027"
+    )
+    result = reorder_skills_for_keywords(tail, ["Kafka", "Docker"])
+    tools_line = next(l for l in result.splitlines() if "Tools:" in l)
+    items = tools_line.split("}", 1)[1].rstrip(" \\").split(", ")
+    assert items[0].strip() in ("Docker", "Kafka")
+    assert items[1].strip() in ("Docker", "Kafka")
+    # Content preserved exactly: same items, same count, trailing break intact.
+    assert sorted(i.strip() for i in items) == sorted(
+        ["Git", "PostgreSQL", "Ubuntu Linux", "Docker", "Kafka", "Tableau"]
+    )
+    assert tools_line.rstrip().endswith("\\\\")
+    # Education line untouched.
+    assert "\\textbf{School} -- Degree \\hfill 2023--2027" in result
+
+
+def test_skills_reorder_noop_without_keywords() -> None:
+    from services.resumes.structured import reorder_skills_for_keywords
+
+    assert CATALOG is not None
+    assert reorder_skills_for_keywords(CATALOG.tail, []) == CATALOG.tail
+
+
+def test_render_reorders_real_skills_section() -> None:
+    assert CATALOG is not None
+    selection = StructuredSelection(keywords=["Kafka", "TensorFlow"])
+    latex, _ = render_structured_resume(CATALOG, selection)
+    tools_line = next(l for l in latex.splitlines() if l.startswith("\\textbf{Tools:}"))
+    assert tools_line.index("Kafka") < tools_line.index("Git")
+
+
+# ---------------------------------------------------------------------------
+# Header tech retargeting + listing-aware emphasis
+# ---------------------------------------------------------------------------
+
+
+def test_extract_json_object_salvages_truncated_response() -> None:
+    # Response dies mid-bullet (output-token limit): everything that arrived
+    # intact must survive.
+    truncated = (
+        '{"keywords": ["Python", "PyTorch"], '
+        '"bullets": {"entry-a": ["Full bullet zero.", "Full bullet one."], '
+        '"entry-b": ["Partial bullet that never fini'
+    )
+    payload = extract_json_object(truncated)
+    assert payload is not None
+    assert payload["keywords"] == ["Python", "PyTorch"]
+    assert payload["bullets"]["entry-a"] == ["Full bullet zero.", "Full bullet one."]
+    # Truncation cut inside a key: dangling pair is dropped, prefix survives.
+    truncated2 = '{"keywords": ["EMBEDDED"], "ranking": ["a", "b"], "weak_bul'
+    payload2 = extract_json_object(truncated2)
+    assert payload2 is not None
+    assert payload2["ranking"] == ["a", "b"]
+
+
+def test_extract_listing_keywords_deterministic() -> None:
+    from services.resumes.structured import extract_listing_keywords
+
+    jd = (
+        "Embedded Firmware Intern\n"
+        "We build sensor products. You will write firmware in C for STM32 "
+        "microcontrollers, debug with logic analyzers, and work with I2C and SPI "
+        "peripherals. Experience with Python scripting and Git is required. "
+        "Firmware testing and sensor calibration are part of the role."
+    )
+    keywords = extract_listing_keywords(jd, ("C", "Python", "Git", "Kafka", "React"))
+    lowered = [k.lower() for k in keywords]
+    # Anchors the listing names come first; anchors it doesn't stay out.
+    assert "c" in lowered and "python" in lowered and "git" in lowered
+    assert "kafka" not in lowered and "react" not in lowered
+    # Frequent content words appear.
+    assert "firmware" in lowered
+    assert len(keywords) <= 10
+
+
+def test_filler_clause_and_while_forms_stripped_or_rejected() -> None:
+    canonical = "Built a cache layer, cutting latency by 40\\%."
+    # Long remainder: the filler tail is stripped, the rewrite survives.
+    text, reason = validate_tailored_bullet(
+        "Built a cache layer, cutting latency by 40\\% and demonstrating continuous improvement.",
+        canonical,
+    )
+    assert reason is None
+    assert text is not None
+    assert "demonstrating" not in text
+    assert "40\\%" in text
+    # Short remainder: stripping would leave a stub, so it still rejects.
+    text, reason = validate_tailored_bullet(
+        "Built a cache layer while ensuring stakeholder alignment.",
+        canonical,
+    )
+    assert text is None
+    assert "filler" in reason
+
+
+def test_retarget_header_tech_grounded_swap_and_casing() -> None:
+    from services.resumes.structured import retarget_header_tech
+
+    header = "\\textbf{Web Messaging App} | \\textit{JavaScript, Node.js, SQL} \\\\"
+    grounding = (
+        "Built a platform with Node.js, JavaScript, and WebRTC. "
+        "Used a Raspberry Pi with PostgreSQL as a RESTful API backend."
+    )
+    new_header, reason = retarget_header_tech(
+        header, ["webrtc", "Node.js", "PostgreSQL"], grounding
+    )
+    assert reason is None
+    # Casing comes from the grounding text, not the model.
+    assert "\\textit{WebRTC, Node.js, PostgreSQL}" in new_header
+    assert new_header.startswith("\\textbf{Web Messaging App} | ")
+    assert new_header.endswith("\\\\")
+
+
+def test_retarget_header_tech_rejects_ungrounded_and_markup() -> None:
+    from services.resumes.structured import retarget_header_tech
+
+    header = "\\textbf{App} | \\textit{Java} \\\\"
+    grounding = "Built an app in Java."
+    for bad in (["Kubernetes"], ["Java", "Rust"], ["\\textbf{Java}"], []):
+        new_header, reason = retarget_header_tech(header, bad, grounding)
+        assert new_header is None
+        assert reason
+    # Header without a \textit list cannot be retargeted.
+    new_header, reason = retarget_header_tech(
+        "\\textbf{Intern,} {Company} -- Remote \\\\", ["Java"], grounding
+    )
+    assert new_header is None
+
+
+def test_emphasize_listing_tools_bolds_wanted_anchors_only() -> None:
+    from services.resumes.structured import emphasize_listing_tools
+
+    text = "Built pipelines with Kafka and Pandas on \\textbf{Ubuntu Linux}."
+    out = emphasize_listing_tools(
+        text,
+        skill_anchors=("Kafka", "Pandas", "Git"),
+        keywords=["Kafka", "streaming data"],
+        max_bold=3,
+    )
+    # Kafka is anchor + keyword -> bolded; Pandas is anchor but not asked for.
+    assert "\\textbf{Kafka}" in out
+    assert "\\textbf{Pandas}" not in out
+    # Existing bold untouched, no nesting.
+    assert "\\textbf{Ubuntu Linux}" in out
+    assert "\\textbf{\\textbf" not in out
+
+
+def test_emphasize_listing_tools_respects_cap_and_existing_bolds() -> None:
+    from services.resumes.structured import emphasize_listing_tools
+
+    text = "Used \\textbf{A}, \\textbf{B}, and \\textbf{D} with Kafka daily."
+    out = emphasize_listing_tools(text, ("Kafka",), ["Kafka"], max_bold=3)
+    assert out == text  # already at cap
+    # Already-bolded tool is never double-wrapped elsewhere.
+    text2 = "\\textbf{Kafka} pipelines; Kafka consumers."
+    out2 = emphasize_listing_tools(text2, ("Kafka",), ["Kafka"], max_bold=3)
+    assert out2 == text2
+
+
+def test_render_applies_grounded_header_tech_with_clean_fidelity() -> None:
+    assert CATALOG is not None
+    entry = CATALOG.entry("web-messaging-app")
+    assert entry is not None
+    selection = StructuredSelection(
+        ranking=["web-messaging-app", "particle-fluid-simulation"],
+        header_tech={
+            "web-messaging-app": ["PostgreSQL", "Node.js", "WebRTC"],
+            # Ungrounded for this entry -> rejected, header stays canonical.
+            "particle-fluid-simulation": ["Kafka"],
+        },
+    )
+    latex, report = render_structured_resume(CATALOG, selection)
+    assert report.header_tech_applied == ["web-messaging-app"]
+    assert any(r.startswith("particle-fluid-simulation:") for r in report.header_tech_rejected)
+    assert "\\textit{PostgreSQL, Node.js, WebRTC}" in latex
+    assert entry.header not in latex  # replaced
+    assert report.fidelity_findings == []
 
 
 # ---------------------------------------------------------------------------
 # Edge cases: parser hardening
 # ---------------------------------------------------------------------------
-
-MINI_GUIDE = """
-== ROLE TYPE SELECTION GUIDE ==
-
-ALPHA roles
-  Keywords: alpha, widget
-  MUST SHOW: one
-  SHOW: two
-  HIDE: three
-"""
 
 
 def _mini_template(entry_block: str) -> str:
@@ -1273,10 +1962,7 @@ def test_parser_strips_comment_wrapper_between_tag_and_header() -> None:
     assert "\\begin{comment}" not in entry.header
     assert entry.header.startswith("\\textbf{Entry One}")
 
-    families = parse_role_guide(MINI_GUIDE)
-    latex, _ = render_structured_resume(
-        catalog, families, StructuredSelection(role_family_key="ALPHA")
-    )
+    latex, _ = render_structured_resume(catalog, StructuredSelection())
     assert "\\begin{comment}" not in latex
     assert latex.count("\\begin{itemize}") == latex.count("\\end{itemize}")
 
@@ -1330,10 +2016,8 @@ def test_parse_response_accepts_title_keyed_bullets() -> None:
     assert CATALOG is not None
     goopter = next(e for e in CATALOG.entries if "goopter" in e.entry_id)
     selection = parse_structured_response(
-        json.dumps({"role_family": "ML", "bullets": {goopter.title: ["Rewritten."]}}),
+        json.dumps({"bullets": {goopter.title: ["Rewritten."]}}),
         CATALOG,
-        FAMILIES,
-        "ml job",
     )
     assert selection is not None
     assert goopter.entry_id in selection.bullets
@@ -1343,12 +2027,8 @@ def test_parse_response_accepts_dict_wrapped_bullets() -> None:
     assert CATALOG is not None
     entry = CATALOG.entries[0]
     selection = parse_structured_response(
-        json.dumps(
-            {"role_family": "ML", "bullets": {entry.entry_id: [{"text": "Wrapped bullet."}]}}
-        ),
+        json.dumps({"bullets": {entry.entry_id: [{"text": "Wrapped bullet."}]}}),
         CATALOG,
-        FAMILIES,
-        "ml job",
     )
     assert selection is not None
     assert selection.bullets[entry.entry_id] == ["Wrapped bullet."]
@@ -1358,17 +2038,15 @@ def test_parse_response_deduplicates_ranking() -> None:
     assert CATALOG is not None
     entry = CATALOG.entries[0]
     selection = parse_structured_response(
-        json.dumps({"role_family": "ML", "ranking": [entry.entry_id, entry.entry_id]}),
+        json.dumps({"ranking": [entry.entry_id, entry.entry_id]}),
         CATALOG,
-        FAMILIES,
-        "ml job",
     )
     assert selection is not None
     assert selection.ranking == [entry.entry_id]
 
 
 # ---------------------------------------------------------------------------
-# Edge cases: validation + detection
+# Edge cases: validation
 # ---------------------------------------------------------------------------
 
 def test_validate_bullet_rejects_caret_outside_math() -> None:
@@ -1377,31 +2055,6 @@ def test_validate_bullet_rejects_caret_outside_math() -> None:
     # ...but inside math mode it is fine.
     text, reason = validate_tailored_bullet("Improved $x^{41}$ throughput", CANONICAL)
     assert reason is None
-
-
-def test_validate_bullet_respects_config_extra_forbidden_terms() -> None:
-    from services.resumes.structured import RenderConfig
-
-    config = RenderConfig(extra_forbidden_terms=("cobol",))
-    text, reason = validate_tailored_bullet(
-        "Modernized COBOL systems, reducing downtime by 41\\%.", CANONICAL, config
-    )
-    assert text is None and "forbidden term 'cobol'" in str(reason)
-
-
-def test_detect_role_family_generic_software_listing() -> None:
-    """A listing that only says 'software' must not land on the first family."""
-    family = detect_role_family(
-        "Software Developer Intern working on internal tooling", FAMILIES
-    )
-    assert family is not None and family.key == "SOFTWARE"
-
-
-def test_detect_role_family_no_signal_prefers_most_inclusive() -> None:
-    family = detect_role_family("Administrative assistant position", FAMILIES)
-    assert family is not None
-    widest = max(FAMILIES, key=lambda f: len(f.must_show | f.show))
-    assert family.key == widest.key
 
 
 # ---------------------------------------------------------------------------
@@ -1414,85 +2067,72 @@ def test_structured_config_overrides_bullet_budget(tmp_path: Path) -> None:
         json.dumps({"min_visible_bullets": 8, "max_visible_bullets": 11}),
         encoding="utf-8",
     )
-    loaded = load_structured_profile(profile / "template.tex", profile / "baseinfo.txt")
-    assert loaded is not None
-    catalog, families = loaded
+    catalog = load_structured_profile(profile / "template.tex", profile / "baseinfo.txt")
+    assert catalog is not None
     assert catalog.render_config.max_visible_bullets == 11
-    _, report = render_structured_resume(
-        catalog, families, StructuredSelection(role_family_key="ML")
-    )
+    _, report = render_structured_resume(catalog, StructuredSelection())
     assert report.visible_bullet_count <= 11
 
 
 def test_structured_config_invalid_json_falls_back_to_defaults(tmp_path: Path) -> None:
     profile = _profile_copy(tmp_path)
     (profile / "structured_config.json").write_text("{not json", encoding="utf-8")
-    loaded = load_structured_profile(profile / "template.tex", profile / "baseinfo.txt")
-    assert loaded is not None
-    catalog, _ = loaded
+    catalog = load_structured_profile(profile / "template.tex", profile / "baseinfo.txt")
+    assert catalog is not None
     assert catalog.render_config.max_visible_bullets == MAX_VISIBLE_BULLETS
 
 
 def test_structured_guidance_flows_into_prompt(tmp_path: Path) -> None:
     profile = _profile_copy(tmp_path)
-    (profile / "structured_guidance.txt").write_text(
+    (profile / "instructions.txt").write_text(
         "Voice: sample guidance marker.", encoding="utf-8"
     )
-    loaded = load_structured_profile(profile / "template.tex", profile / "baseinfo.txt")
-    assert loaded is not None
-    catalog, families = loaded
+    catalog = load_structured_profile(profile / "template.tex", profile / "baseinfo.txt")
+    assert catalog is not None
     prompt = build_structured_prompt(
-        "Engineer", "desc", [], catalog, families, extra_guidance=catalog.guidance
+        "Engineer", "desc", [], catalog, extra_guidance=catalog.guidance
     )
     assert "sample guidance marker" in prompt
     assert "<profile_guidance>" in prompt
 
 
 # ---------------------------------------------------------------------------
-# Entry exclusion + weak-bullet trimming
+# Entry exclusion + capacity rollback + weak-bullet trimming
 # ---------------------------------------------------------------------------
 
-def test_exclusion_of_show_entry_is_honoured_when_budget_allows() -> None:
-    """FRONTEND family: excluding Obotz (SHOW, teaching) drops it — the page
-    can still be filled from the remaining SHOW entries (pfs+terrain+markham)."""
+def test_exclusion_honoured_when_page_can_still_be_filled() -> None:
     assert CATALOG is not None
-    obotz = next(e for e in CATALOG.entries if "obotz" in e.entry_id)
-    selection = StructuredSelection(
-        role_family_key="FRONTEND", exclusions=[obotz.entry_id]
-    )
-    latex, report = render_structured_resume(CATALOG, FAMILIES, selection)
+    obotz = _entry_id("obotz")
+    selection = StructuredSelection(exclusions=[obotz])
+    latex, report = render_structured_resume(CATALOG, selection)
     assert "Obotz Robotics" not in latex
-    assert obotz.entry_id in report.excluded_entries
+    assert obotz in report.excluded_entries
     # Page must still be filled from remaining entries.
     assert report.visible_bullet_count >= CATALOG.render_config.min_visible_bullets
 
 
-def test_exclusion_of_must_show_entry_is_ignored() -> None:
+def test_top_ranked_entry_can_be_excluded() -> None:
+    """No entry has category immunity: excluding the highest-ranked entry
+    drops it as long as the page can be filled without it."""
     assert CATALOG is not None
-    goopter = next(e for e in CATALOG.entries if "goopter" in e.entry_id)
-    selection = StructuredSelection(role_family_key="ML", exclusions=[goopter.entry_id])
-    latex, report = render_structured_resume(CATALOG, FAMILIES, selection)
-    assert "Goopter" in latex
-    assert goopter.entry_id in report.ignored_exclusions
-    assert goopter.entry_id not in report.excluded_entries
+    goopter = _entry_id("goopter")
+    selection = StructuredSelection(ranking=[goopter], exclusions=[goopter])
+    latex, report = render_structured_resume(CATALOG, selection)
+    assert "Goopter" not in latex
+    assert goopter in report.excluded_entries
+    assert report.visible_bullet_count >= CATALOG.render_config.min_visible_bullets
 
 
 def test_exclusions_rolled_back_when_page_cannot_be_filled() -> None:
-    """Excluding every SHOW entry must be rolled back to reach the minimum."""
+    """Excluding every entry must be rolled back to reach the minimum."""
     assert CATALOG is not None
-    ml = next(f for f in FAMILIES if f.key == "ML")
-    show_ids = [
-        e.entry_id
-        for e in CATALOG.entries
-        if (set(c.lower() for c in e.categories) & ml.show)
-        and not (set(c.lower() for c in e.categories) & ml.must_show)
-    ]
-    selection = StructuredSelection(role_family_key="ML", exclusions=show_ids)
-    _, report = render_structured_resume(CATALOG, FAMILIES, selection)
+    all_ids = [e.entry_id for e in CATALOG.entries]
+    selection = StructuredSelection(exclusions=all_ids)
+    _, report = render_structured_resume(CATALOG, selection)
     assert report.visible_bullet_count >= CATALOG.render_config.min_visible_bullets
     assert report.ignored_exclusions  # some exclusions were re-admitted
     # Honoured + ignored must account for every requested exclusion.
-    assert set(report.excluded_entries) | set(report.ignored_exclusions) >= set(show_ids)
+    assert set(report.excluded_entries) | set(report.ignored_exclusions) == set(all_ids)
 
 
 def test_weak_bullet_hint_steers_trimming() -> None:
@@ -1506,10 +2146,9 @@ def test_weak_bullet_hint_steers_trimming() -> None:
     catalog.render_config = RenderConfig(min_visible_bullets=8, max_visible_bullets=10)
     pfs = next(e for e in catalog.entries if "particle" in e.entry_id)
     selection = StructuredSelection(
-        role_family_key="SOFTWARE",
         weak_bullets={pfs.entry_id: [0]},  # flag the FIRST bullet as weakest
     )
-    latex, report = render_structured_resume(catalog, FAMILIES, selection)
+    latex, report = render_structured_resume(catalog, selection)
     if pfs.entry_id in report.visible_entries:
         rendered_after_pfs = latex.split(pfs.header, 1)[1].split("\\end{itemize}", 1)[0]
         kept_first = pfs.bullets[0].split("\\", 1)[0][:40] in rendered_after_pfs
@@ -1517,67 +2156,6 @@ def test_weak_bullet_hint_steers_trimming() -> None:
         # If trimming touched this entry, bullet 0 goes before the last one.
         if not (kept_first and kept_last):
             assert kept_last and not kept_first
-
-
-def test_inclusion_promotes_hidden_entry_when_listing_calls_for_it() -> None:
-    """ML family hides terrain (graphics); an explicit include promotes it."""
-    assert CATALOG is not None
-    terrain = next(e for e in CATALOG.entries if "terrain" in e.entry_id)
-    selection = StructuredSelection(
-        role_family_key="ML",
-        ranking=[terrain.entry_id],  # model ranks its requested entry high
-        inclusions=[terrain.entry_id],
-    )
-    latex, report = render_structured_resume(CATALOG, FAMILIES, selection)
-    assert "Algorithm Terrain Visualizer" in latex
-    assert terrain.entry_id in report.included_extras
-    assert terrain.entry_id not in report.hidden_entries
-    assert report.visible_bullet_count <= CATALOG.render_config.max_visible_bullets
-
-
-def test_inclusion_ignored_when_budget_has_no_room() -> None:
-    assert CATALOG is not None
-    import copy
-    from services.resumes.structured import RenderConfig
-
-    catalog = copy.deepcopy(CATALOG)
-    # EMBEDDED must-show already needs 8 bullets; ceiling of 9 leaves no room
-    # for a 3-bullet promoted entry.
-    catalog.render_config = RenderConfig(min_visible_bullets=8, max_visible_bullets=9)
-    webmsg = next(e for e in catalog.entries if "web-messaging" in e.entry_id)
-    selection = StructuredSelection(
-        role_family_key="EMBEDDED", inclusions=[webmsg.entry_id]
-    )
-    latex, report = render_structured_resume(catalog, FAMILIES, selection)
-    assert "Web Messaging App" not in latex
-    assert webmsg.entry_id in report.ignored_inclusions
-
-
-def test_inclusion_cap_limits_promotions_to_two() -> None:
-    """Requesting every hidden entry only promotes MAX_INCLUSIONS of them."""
-    assert CATALOG is not None
-    ml = next(f for f in FAMILIES if f.key == "ML")
-    hidden_ids = [
-        e.entry_id
-        for e in CATALOG.entries
-        if not (set(c.lower() for c in e.categories) & (ml.must_show | ml.show))
-    ]
-    assert len(hidden_ids) > 2
-    selection = StructuredSelection(role_family_key="ML", inclusions=hidden_ids)
-    _, report = render_structured_resume(CATALOG, FAMILIES, selection)
-    assert len(report.included_extras) <= 2
-    assert set(report.included_extras) | set(report.ignored_inclusions) >= set(hidden_ids)
-
-
-def test_inclusion_of_visible_entry_is_a_noop() -> None:
-    """Including an entry that is already MUST SHOW/SHOW changes nothing."""
-    assert CATALOG is not None
-    goopter = next(e for e in CATALOG.entries if "goopter" in e.entry_id)
-    selection = StructuredSelection(role_family_key="ML", inclusions=[goopter.entry_id])
-    latex, report = render_structured_resume(CATALOG, FAMILIES, selection)
-    assert report.included_extras == []
-    assert goopter.entry_id in report.ignored_inclusions
-    assert latex.count("Goopter") == 1  # no duplicate rendering
 
 
 def test_tool_moved_within_entry_is_not_invented() -> None:
@@ -1596,7 +2174,7 @@ def test_tool_moved_within_entry_is_not_invented() -> None:
         entry_context=entry_context,
     )
     assert reason is None
-    # But a tool from nowhere in the entry is still rejected.
+    # But a tool from nowhere in the entry is still rejected (default config).
     text, reason = validate_tailored_bullet(
         "Performed system validation with \\textbf{Terraform}, reducing reported errors by 20\\%.",
         "Performed system validation and testing, reducing reported errors by 20\\%.",
@@ -1611,93 +2189,37 @@ def test_bullet_order_front_loads_relevant_bullet() -> None:
     assert CATALOG is not None
     markham = next(e for e in CATALOG.entries if "markham" in e.entry_id)
     selection = StructuredSelection(
-        role_family_key="EMBEDDED",
+        ranking=[markham.entry_id],
         bullet_order={markham.entry_id: [2, 0, 1]},
     )
-    latex, report = render_structured_resume(CATALOG, FAMILIES, selection)
-    if markham.entry_id in report.visible_entries:
-        block = latex.split(markham.header, 1)[1].split("\\end{itemize}", 1)[0]
-        first_bullet = block.split("\\item", 2)[1]
-        assert "20\\%" in first_bullet  # canonical bullet 2 leads
+    latex, report = render_structured_resume(CATALOG, selection)
+    assert markham.entry_id in report.visible_entries
+    block = latex.split(markham.header, 1)[1].split("\\end{itemize}", 1)[0]
+    first_bullet = block.split("\\item", 2)[1]
+    assert "20\\%" in first_bullet  # canonical bullet 2 leads
 
 
 def test_bullet_order_invalid_indices_ignored() -> None:
     assert CATALOG is not None
     markham = next(e for e in CATALOG.entries if "markham" in e.entry_id)
     selection = StructuredSelection(
-        role_family_key="EMBEDDED",
+        ranking=[markham.entry_id],
         bullet_order={markham.entry_id: [9, 7]},  # out of range
     )
-    latex, report = render_structured_resume(CATALOG, FAMILIES, selection)
+    latex, report = render_structured_resume(CATALOG, selection)
     # All three canonical bullets still render, original order.
     assert "41\\%" in latex and "14\\%" in latex and "20\\%" in latex
-
-
-def test_skills_reorder_moves_matching_tools_first() -> None:
-    from services.resumes.structured import reorder_skills_for_keywords
-
-    tail = (
-        "\\section*{Skills}\n"
-        "\\textbf{Tools:} Git, PostgreSQL, Ubuntu Linux, Docker, Kafka, Tableau \\\\\n"
-        "\\textbf{Platforms:} GitHub, GitLab, Raspberry Pi, Arduino\n"
-        "\\section*{Education}\n"
-        "\\textbf{School} -- Degree \\hfill 2023--2027"
-    )
-    result = reorder_skills_for_keywords(tail, ["Kafka", "Docker"])
-    tools_line = next(l for l in result.splitlines() if "Tools:" in l)
-    items = tools_line.split("}", 1)[1].rstrip(" \\").split(", ")
-    assert items[0].strip() in ("Docker", "Kafka")
-    assert items[1].strip() in ("Docker", "Kafka")
-    # Content preserved exactly: same items, same count, trailing break intact.
-    assert sorted(i.strip() for i in items) == sorted(
-        ["Git", "PostgreSQL", "Ubuntu Linux", "Docker", "Kafka", "Tableau"]
-    )
-    assert tools_line.rstrip().endswith("\\\\")
-    # Education line untouched.
-    assert "\\textbf{School} -- Degree \\hfill 2023--2027" in result
-
-
-def test_skills_reorder_noop_without_keywords() -> None:
-    from services.resumes.structured import reorder_skills_for_keywords
-
-    assert CATALOG is not None
-    assert reorder_skills_for_keywords(CATALOG.tail, []) == CATALOG.tail
-
-
-def test_render_reorders_real_skills_section() -> None:
-    assert CATALOG is not None
-    selection = StructuredSelection(
-        role_family_key="ML", keywords=["Kafka", "TensorFlow"]
-    )
-    latex, _ = render_structured_resume(CATALOG, FAMILIES, selection)
-    tools_line = next(l for l in latex.splitlines() if l.startswith("\\textbf{Tools:}"))
-    assert tools_line.index("Kafka") < tools_line.index("Git")
 
 
 def test_parse_response_reads_bullet_order() -> None:
     assert CATALOG is not None
     entry = CATALOG.entries[0]
     selection = parse_structured_response(
-        json.dumps({"role_family": "ML", "bullet_order": {entry.entry_id: [1, 0]}}),
+        json.dumps({"bullet_order": {entry.entry_id: [1, 0]}}),
         CATALOG,
-        FAMILIES,
-        "ml job",
     )
     assert selection is not None
     assert selection.bullet_order == {entry.entry_id: [1, 0]}
-
-
-def test_parse_response_reads_include_key() -> None:
-    assert CATALOG is not None
-    terrain = next(e for e in CATALOG.entries if "terrain" in e.entry_id)
-    selection = parse_structured_response(
-        json.dumps({"role_family": "ML", "include": [terrain.entry_id, "bogus"]}),
-        CATALOG,
-        FAMILIES,
-        "ml job",
-    )
-    assert selection is not None
-    assert selection.inclusions == [terrain.entry_id]
 
 
 def test_parse_response_reads_exclude_and_weak_bullets() -> None:
@@ -1707,25 +2229,63 @@ def test_parse_response_reads_exclude_and_weak_bullets() -> None:
     selection = parse_structured_response(
         json.dumps(
             {
-                "role_family": "SOFTWARE",
                 "exclude": [obotz.entry_id, "unknown-entry"],
                 "weak_bullets": {pfs.entry_id: [2, 0], "unknown-entry": [1]},
             }
         ),
         CATALOG,
-        FAMILIES,
-        "backend job",
     )
     assert selection is not None
     assert selection.exclusions == [obotz.entry_id]
     assert selection.weak_bullets == {pfs.entry_id: [2, 0]}
 
 
+def test_prompt_requests_core_work_before_ranking() -> None:
+    """The objects-of-work scaffold: the model must articulate what each entry
+    actually built/operated BEFORE ranking, and the ranking notes must tell it
+    that shared process words alone (debugging, testing) do not count."""
+    assert CATALOG is not None
+    prompt = build_structured_prompt("DevOps Intern", "Deploy cloud services", [], CATALOG)
+    assert '"core_work"' in prompt
+    # Schema order is generation order: core_work must precede ranking so the
+    # model writes the phrases before it ranks.
+    assert prompt.index('"core_work"') < prompt.index('"ranking"')
+    assert "generic process words" in prompt
+    assert "core_work FIRST" in prompt
+
+
+def test_parse_response_reads_core_work() -> None:
+    assert CATALOG is not None
+    entry = CATALOG.entries[0]
+    other = CATALOG.entries[1]
+    selection = parse_structured_response(
+        json.dumps(
+            {
+                "core_work": {
+                    entry.entry_id: "  GPU particle shaders  ",
+                    # Title-keyed entries resolve like every other id map.
+                    other.title: "web messaging platform",
+                    "unknown-entry": "nothing",
+                    entry.entry_id + "-bogus": 42,
+                },
+            }
+        ),
+        CATALOG,
+    )
+    assert selection is not None
+    assert selection.core_work == {
+        entry.entry_id: "GPU particle shaders",
+        other.entry_id: "web messaging platform",
+    }
+
+
 def test_profile_cache_purge_keeps_structured_files(tmp_path: Path) -> None:
-    """ensure_profile_cache must never delete structured_config/guidance.
+    """ensure_profile_cache must never delete structured_config.json.
 
     Regression: the purge originally allowed only the three legacy files, so
-    the structured pipeline's optional files were wiped on every bot run.
+    the structured pipeline's optional config file was wiped on every bot run.
+    (Structured prompt guidance now lives in instructions.txt itself — an
+    always-allowed file — rather than a separate optional guidance file.)
     """
     from services.resumes.resume import ensure_profile_cache
 
@@ -1738,23 +2298,20 @@ def test_profile_cache_purge_keeps_structured_files(tmp_path: Path) -> None:
     profile = cache_root / "user.profile"
     profile.mkdir()
     (profile / "structured_config.json").write_text("{}", encoding="utf-8")
-    (profile / "structured_guidance.txt").write_text("guidance", encoding="utf-8")
     (profile / "junk.tmp").write_text("junk", encoding="utf-8")
 
     ensure_profile_cache("user.profile", cache_root)
 
     assert (profile / "structured_config.json").exists()
-    assert (profile / "structured_guidance.txt").exists()
     assert not (profile / "junk.tmp").exists()  # real junk still purged
 
 
 def test_profile_guidance_file_is_loaded_for_real_profile() -> None:
-    loaded = load_structured_profile(
+    catalog = load_structured_profile(
         PROFILE_DIR / "template.tex", PROFILE_DIR / "baseinfo.txt"
     )
-    assert loaded is not None
-    catalog, _ = loaded
-    assert "Seniority calibration" in catalog.guidance
+    assert catalog is not None
+    assert "Seniority" in catalog.guidance
 
 
 # ---------------------------------------------------------------------------
@@ -1797,20 +2354,6 @@ JANE_TEMPLATE = r"""\documentclass[11pt]{article}
 
 JANE_BASEINFO = """
 Jane Doe profile facts.
-
-== ROLE TYPE SELECTION GUIDE ==
-
-BACKEND roles
-  Keywords: backend, microservices, API, .NET
-  MUST SHOW: dotnet
-  SHOW: data
-  HIDE:
-
-DATA roles
-  Keywords: analytics, SQL, reporting, data
-  MUST SHOW: data
-  SHOW: dotnet
-  HIDE:
 """
 
 
@@ -1820,15 +2363,14 @@ def _jane_profile(tmp_path: Path) -> Path:
     (profile / "template.tex").write_text(JANE_TEMPLATE, encoding="utf-8")
     (profile / "baseinfo.txt").write_text(JANE_BASEINFO, encoding="utf-8")
     (profile / "instructions.txt").write_text("n/a", encoding="utf-8")
-    # Jane really works with C#/.NET: replace the default forbidden terms,
-    # and use a bullet budget matching her small resume.
+    # Jane really works with C#/.NET (no skill anchors declared for her
+    # profile, so the invented-tool check has nothing to compare against);
+    # use a bullet budget matching her small resume.
     (profile / "structured_config.json").write_text(
         json.dumps(
             {
-                "forbidden_terms": ["scada", "hvac"],
                 "min_visible_bullets": 3,
                 "max_visible_bullets": 4,
-                "min_must_show_bullets": 1,
             }
         ),
         encoding="utf-8",
@@ -1838,21 +2380,18 @@ def _jane_profile(tmp_path: Path) -> Path:
 
 def test_second_profile_same_conventions_works_end_to_end(tmp_path: Path) -> None:
     profile = _jane_profile(tmp_path)
-    loaded = load_structured_profile(profile / "template.tex", profile / "baseinfo.txt")
-    assert loaded is not None
-    catalog, families = loaded
+    catalog = load_structured_profile(profile / "template.tex", profile / "baseinfo.txt")
+    assert catalog is not None
     assert [e.entry_id for e in catalog.entries] == [
         "software-engineer-contoso",
         "data-analyst-fabrikam",
     ]
-    assert [f.key for f in families] == ["BACKEND", "DATA"]
     assert all(e.smallskip for e in catalog.entries)
 
     job = extract_job_context_from_message("[LinkedIn] Backend Developer\nhttps://example.com/job")
     assert job is not None
     response = json.dumps(
         {
-            "role_family": "BACKEND",
             "ranking": ["software-engineer-contoso", "data-analyst-fabrikam"],
             "bullets": {
                 "software-engineer-contoso": [
@@ -1880,18 +2419,1041 @@ def test_second_profile_same_conventions_works_end_to_end(tmp_path: Path) -> Non
     assert "Engineered C\\# microservices on .NET" in latex
     assert "Ernest" not in latex
     summary = json.loads(result.rewritten_resume or "{}")
-    assert summary["role_family"] == "BACKEND"
     assert summary["tailored_bullets_used"] == 2
 
 
-def test_second_profile_forbidden_override_still_blocks_config_terms(tmp_path: Path) -> None:
-    profile = _jane_profile(tmp_path)
-    loaded = load_structured_profile(profile / "template.tex", profile / "baseinfo.txt")
-    assert loaded is not None
-    catalog, _ = loaded
-    text, reason = validate_tailored_bullet(
-        "Built SCADA dashboards handling 2M requests daily.",
-        "Built C\\# microservices on .NET handling 2M requests daily.",
-        catalog.render_config,
+def test_all_selection_knobs_together_produce_coherent_report() -> None:
+    """Umbrella use-case test: every selection-level modding knob exercised in
+    one build — ranking, exclusion, weak-bullet steering, bullet ordering, and
+    listing keywords — must produce a coherent report and a fidelity-clean
+    document."""
+    assert CATALOG is not None
+    goopter = next(e for e in CATALOG.entries if "goopter" in e.entry_id)
+    obotz = next(e for e in CATALOG.entries if "obotz" in e.entry_id)
+    terrain = next(e for e in CATALOG.entries if "terrain" in e.entry_id)
+    markham = next(e for e in CATALOG.entries if "markham" in e.entry_id)
+
+    selection = StructuredSelection(
+        ranking=[goopter.entry_id, terrain.entry_id, markham.entry_id],
+        keywords=["python", "kafka"],
+        exclusions=[obotz.entry_id],
+        weak_bullets={markham.entry_id: [0]},
+        bullet_order={goopter.entry_id: list(range(len(goopter.bullets)))[::-1]},
     )
-    assert text is None and "forbidden term 'scada'" in str(reason)
+    latex, report = render_structured_resume(CATALOG, selection)
+
+    # Ranked entries lead the page; the exclusion is accounted for either way.
+    assert goopter.entry_id in report.visible_entries
+    assert terrain.entry_id in report.visible_entries
+    assert "Goopter" in latex
+    assert obotz.entry_id in set(report.excluded_entries) | set(report.ignored_exclusions)
+
+    # Bullet order applied to Goopter: its rendered first bullet is the
+    # canonical LAST bullet when the reversal order was honoured.
+    if len(goopter.bullets) > 1:
+        goopter_block = latex.split(goopter.header, 1)[1]
+        first_positions = {
+            index: goopter_block.find(bullet[:40])
+            for index, bullet in enumerate(goopter.bullets)
+            if goopter_block.find(bullet[:40]) != -1
+        }
+        if len(first_positions) > 1:
+            rendered_first = min(first_positions, key=first_positions.get)
+            assert rendered_first == len(goopter.bullets) - 1
+
+    # Budget + structural coherence.
+    assert report.visible_bullet_count <= CATALOG.render_config.max_visible_bullets
+    assert report.visible_bullet_count >= CATALOG.render_config.min_visible_bullets - 2
+    assert report.fidelity_findings == []
+    assert latex.count("\\end{document}") == 1
+    assert not (set(report.visible_entries) & set(report.hidden_entries))
+
+
+def test_aggressive_char_trim_floor_dips_deeper_than_normal() -> None:
+    """Aggressive mode sets char_trim_floor = min_visible_bullets - 5 (vs -2).
+
+    With long-enough tailored bullets the char budget is still exceeded at the
+    normal floor of 12 bullets.  A normal build stops there (second page is
+    accepted); an aggressive build keeps trimming to ~9-11, preventing overflow.
+    """
+    import copy
+
+    normal_cat = copy.deepcopy(CATALOG)
+    aggressive_cat = copy.deepcopy(CATALOG)
+    aggressive_cat.render_config.aggressive = True
+
+    long_bullet = "Implemented distributed " + "microservice orchestration " * 9
+    bullets = {
+        entry.entry_id: [long_bullet] * len(entry.bullets)
+        for entry in CATALOG.entries
+    }
+    selection = StructuredSelection(bullets=bullets)
+
+    _, normal_report = render_structured_resume(normal_cat, selection)
+    _, aggr_report = render_structured_resume(aggressive_cat, selection)
+
+    normal_floor = normal_cat.render_config.min_visible_bullets - 2  # 12
+    aggressive_floor = max(aggressive_cat.render_config.min_visible_bullets - 5, 1)  # 9
+
+    assert normal_report.visible_bullet_count >= normal_floor
+    assert aggr_report.visible_bullet_count >= aggressive_floor
+    assert aggr_report.visible_bullet_count < normal_report.visible_bullet_count
+
+
+def test_provider_order_gemini_first() -> None:
+    """Provider order always starts with Gemini (including aggressive)."""
+    from services.resumes.listing import _provider_switch_candidates
+
+    settings = GeminiSettings(
+        api_key="fake-gemini",
+        model="gemini-2.5-flash",
+        openrouter_api_key="fake-openrouter",
+        groq_api_key="fake-groq",
+    )
+
+    candidates = _provider_switch_candidates(settings)
+    names = [p.name for p in candidates]
+
+    assert names[0] == "gemini"
+    assert set(names) == {"gemini", "gemini-flash", "openrouter", "groq"}
+
+
+# ---------------------------------------------------------------------------
+# Template ↔ baseinfo auto-sync
+# ---------------------------------------------------------------------------
+
+from services.resumes.structured import (
+    _detect_untagged_entries,
+    _infer_tag,
+    sync_template_baseinfo,
+)
+
+
+def test_detect_untagged_entry(tmp_path: Path) -> None:
+    """An entry without a % [tag] line is detected as untagged."""
+    template = (
+        "\\documentclass{article}\n\\begin{document}\n"
+        "\\section*{Experience}\n"
+        "% [frontend]\n"
+        "\\textbf{Frontend Intern,} {Acme} -- Remote \\hfill 2025 \\\\\n"
+        "\\begin{itemize}\n  \\item Built React apps.\n\\end{itemize}\n\n"
+        "\\textbf{Electrical Lead,} {RocketClub} -- Toronto \\hfill 2024 \\\\\n"
+        "\\begin{itemize}\n  \\item Designed PCBs.\n\\end{itemize}\n\n"
+        "\\section*{Skills}\nStuff\n"
+        "\\end{document}\n"
+    )
+    parsed_titles = {"Frontend Intern Acme"}
+    untagged = _detect_untagged_entries(template, parsed_titles)
+    assert len(untagged) == 1
+    assert "Electrical Lead" in untagged[0][1]
+    assert untagged[0][2] == "Experience"
+
+
+def test_detect_ignores_commented_entries() -> None:
+    """Entries inside \\begin{comment} blocks are not flagged as untagged."""
+    template = (
+        "\\documentclass{article}\n\\begin{document}\n"
+        "\\section*{Projects}\n"
+        "% [web]\n"
+        "\\textbf{Web App} | \\textit{JS} \\\\\n"
+        "\\begin{itemize}\n  \\item Built it.\n\\end{itemize}\n\n"
+        "\\begin{comment}\n"
+        "\\textbf{Old Project} | \\textit{C} \\\\\n"
+        "\\begin{itemize}\n  \\item Wrote code.\n\\end{itemize}\n"
+        "\\end{comment}\n"
+        "\\section*{Skills}\nStuff\n"
+        "\\end{document}\n"
+    )
+    untagged = _detect_untagged_entries(template, {"Web App"})
+    assert len(untagged) == 0
+
+
+def test_infer_tag_avoids_collisions() -> None:
+    """Tag inference skips generic words and appends suffixes on collision."""
+    assert _infer_tag("Frontend Development Intern", set()) == "frontend"
+    assert _infer_tag("Frontend Development Intern", {"frontend"}) == "frontend_development"
+    assert _infer_tag("Frontend Development Intern", {"frontend", "frontend_development"}) == "frontend2"
+    assert _infer_tag("Senior Lead Intern", set()) == "senior"  # all words are skip-words, falls back to words[0]
+    assert _infer_tag("Senior Lead Intern", {"senior"}) == "senior2"  # collision triggers suffix
+
+
+def test_sync_writes_tag_and_baseinfo_stub(tmp_path: Path) -> None:
+    """sync_template_baseinfo inserts % [tag] and a baseinfo stub, then
+    writes both files to disk."""
+    template = (
+        "\\documentclass{article}\n\\begin{document}\n"
+        "\\section*{Experience}\n"
+        "% [ml]\n"
+        "\\textbf{ML Intern,} {BigCo} -- Remote \\hfill 2025 \\\\\n"
+        "\\begin{itemize}\n  \\item Trained models.\n\\end{itemize}\n\n"
+        "\\textbf{Hardware Eng,} {RocketCo} -- Toronto \\hfill 2024 \\\\\n"
+        "\\begin{itemize}\n  \\item Designed \\textbf{PCB} circuits using \\textbf{KiCad}.\n\\end{itemize}\n\n"
+        "\\section*{Skills}\nStuff\n"
+        "\\end{document}\n"
+    )
+    baseinfo = (
+        "Candidate profile facts:\n\n"
+        "== EXPERIENCE ==\n\n"
+        "[ml] ML Intern, BigCo\nNotes:\n\n"
+        "== SKILL ANCHORS ==\n"
+        "Languages: Python\n"
+    )
+    tpl_path = tmp_path / "template.tex"
+    bio_path = tmp_path / "baseinfo.txt"
+    tpl_path.write_text(template, encoding="utf-8")
+    bio_path.write_text(baseinfo, encoding="utf-8")
+
+    new_tpl, new_bio, msgs = sync_template_baseinfo(
+        tpl_path, bio_path, template, baseinfo, {"ML Intern BigCo"},
+    )
+
+    assert "% [hardware]" in new_tpl
+    assert "[hardware] Hardware Eng" in new_bio
+    assert any("Auto-tagged" in m for m in msgs)
+    # Files written to disk
+    assert "% [hardware]" in tpl_path.read_text(encoding="utf-8")
+    assert "[hardware]" in bio_path.read_text(encoding="utf-8")
+
+
+def test_sync_adds_skill_anchors(tmp_path: Path) -> None:
+    """Bold tools from an untagged entry are added to SKILL ANCHORS."""
+    template = (
+        "\\documentclass{article}\n\\begin{document}\n"
+        "\\section*{Experience}\n"
+        "% [web]\n"
+        "\\textbf{Web Dev,} {Acme} \\\\\n"
+        "\\begin{itemize}\n  \\item Built apps.\n\\end{itemize}\n\n"
+        "\\textbf{EE Member,} {Club} \\\\\n"
+        "\\begin{itemize}\n  \\item Used \\textbf{Altium} and \\textbf{KiCad} for \\textbf{PCB} design.\n\\end{itemize}\n\n"
+        "\\section*{Skills}\nStuff\n"
+        "\\end{document}\n"
+    )
+    baseinfo = (
+        "== EXPERIENCE ==\n\n"
+        "[web] Web Dev\nNotes:\n\n"
+        "== SKILL ANCHORS ==\n"
+        "Languages: Python\n"
+    )
+    tpl_path = tmp_path / "template.tex"
+    bio_path = tmp_path / "baseinfo.txt"
+    tpl_path.write_text(template, encoding="utf-8")
+    bio_path.write_text(baseinfo, encoding="utf-8")
+
+    _, new_bio, msgs = sync_template_baseinfo(
+        tpl_path, bio_path, template, baseinfo, {"Web Dev Acme"},
+    )
+
+    assert "Altium" in new_bio
+    assert "KiCad" in new_bio
+    assert any("skill anchors" in m.lower() for m in msgs)
+
+
+def test_sync_noop_when_all_tagged(tmp_path: Path) -> None:
+    """No changes when all entries already have tags."""
+    template = (
+        "\\documentclass{article}\n\\begin{document}\n"
+        "\\section*{Experience}\n"
+        "% [ml]\n"
+        "\\textbf{ML Intern,} {BigCo} \\\\\n"
+        "\\begin{itemize}\n  \\item Trained models.\n\\end{itemize}\n\n"
+        "\\section*{Skills}\nStuff\n"
+        "\\end{document}\n"
+    )
+    baseinfo = "== EXPERIENCE ==\n\n[ml] ML Intern\nNotes:\n"
+    tpl_path = tmp_path / "template.tex"
+    bio_path = tmp_path / "baseinfo.txt"
+    tpl_path.write_text(template, encoding="utf-8")
+    bio_path.write_text(baseinfo, encoding="utf-8")
+
+    new_tpl, new_bio, msgs = sync_template_baseinfo(
+        tpl_path, bio_path, template, baseinfo, {"ML Intern BigCo"},
+    )
+
+    assert new_tpl == template
+    assert new_bio == baseinfo
+    assert msgs == []
+
+
+# ---------------------------------------------------------------------------
+# _bold_jd_tools tests
+# ---------------------------------------------------------------------------
+
+
+class TestBoldJdTools:
+    def test_basic_bolding(self):
+        text = r"Built a pipeline using Docker and Kubernetes."
+        result = _bold_jd_tools(text, ("Docker", "Kubernetes"), max_bold=5)
+        assert r"\textbf{Docker}" in result
+        assert r"\textbf{Kubernetes}" in result
+
+    def test_skips_already_bolded(self):
+        text = r"Built a pipeline using \textbf{Docker} and Kubernetes."
+        result = _bold_jd_tools(text, ("Docker", "Kubernetes"), max_bold=5)
+        assert result.count(r"\textbf{Docker}") == 1
+        assert r"\textbf{Kubernetes}" in result
+
+    def test_max_bold_limit(self):
+        text = r"Used Docker, Kubernetes, and Terraform for deployment."
+        result = _bold_jd_tools(text, ("Docker", "Kubernetes", "Terraform"), max_bold=2)
+        bold_count = len(re.findall(r"\\textbf\{", result))
+        assert bold_count == 2
+
+    def test_max_bold_already_at_limit(self):
+        text = r"Used \textbf{Docker} and \textbf{React} plus Kubernetes."
+        result = _bold_jd_tools(text, ("Kubernetes",), max_bold=2)
+        assert r"\textbf{Kubernetes}" not in result
+
+    def test_protected_span_skipping_textit(self):
+        """The finditer fix: if first occurrence is inside \\textit{}, find the next one."""
+        text = r"Used \textit{Kubernetes tools} for CI, then deployed Kubernetes in prod."
+        result = _bold_jd_tools(text, ("Kubernetes",), max_bold=5)
+        assert r"\textbf{Kubernetes}" in result
+        assert result.index(r"\textbf{Kubernetes}") > result.index(r"\textit{")
+
+    def test_protected_textit_span(self):
+        text = r"Used \textit{Python, Docker} stack and Docker for CI."
+        result = _bold_jd_tools(text, ("Docker",), max_bold=5)
+        assert r"\textbf{Docker}" in result
+        assert result.index(r"\textbf{Docker}") > result.index(r"\textit{")
+
+    def test_no_match_returns_unchanged(self):
+        text = r"Built a web application with React."
+        result = _bold_jd_tools(text, ("Kubernetes",), max_bold=5)
+        assert result == text
+
+    def test_case_insensitive_match(self):
+        text = r"Managed kubernetes clusters for production."
+        result = _bold_jd_tools(text, ("Kubernetes",), max_bold=5)
+        assert r"\textbf{kubernetes}" in result
+
+    def test_word_boundary_no_partial_match(self):
+        text = r"Used reactivity patterns in the frontend."
+        result = _bold_jd_tools(text, ("React",), max_bold=5)
+        assert r"\textbf{" not in result
+
+    def test_empty_jd_tools(self):
+        text = r"Built a pipeline."
+        result = _bold_jd_tools(text, (), max_bold=5)
+        assert result == text
+
+
+# ---------------------------------------------------------------------------
+# _inject_jd_tools_into_skills tests
+# ---------------------------------------------------------------------------
+
+
+class TestInjectJdToolsIntoSkills:
+    SKILLS_TAIL = (
+        "\\section*{Skills}\n"
+        "\\textbf{Languages:} Python, JavaScript \\\\\n"
+        "\\textbf{Frameworks:} React, Flask \\\\\n"
+        "\\textbf{Tools:} Git, Docker \\\\\n"
+        "\\textbf{Platforms:} GitHub, AWS \\\\\n"
+        "\n"
+        "\\section*{Education}\n"
+        "\\textbf{TMU} -- BEng Computer Engineering\n"
+    )
+
+    def test_category_routing_tools(self):
+        result = _inject_jd_tools_into_skills(
+            self.SKILLS_TAIL, ("ServiceNow",), skill_anchors=(),
+        )
+        assert "ServiceNow" in result.split("\\textbf{Tools:}")[1].split("\n")[0]
+
+    def test_category_routing_frameworks(self):
+        result = _inject_jd_tools_into_skills(
+            self.SKILLS_TAIL, ("Django",), skill_anchors=(),
+        )
+        assert "Django" in result.split("\\textbf{Frameworks:}")[1].split("\n")[0]
+
+    def test_category_routing_platforms(self):
+        result = _inject_jd_tools_into_skills(
+            self.SKILLS_TAIL, ("Azure",), skill_anchors=(),
+        )
+        assert "Azure" in result.split("\\textbf{Platforms:}")[1].split("\n")[0]
+
+    def test_category_routing_languages(self):
+        result = _inject_jd_tools_into_skills(
+            self.SKILLS_TAIL, ("Rust",), skill_anchors=(),
+        )
+        assert "Rust" in result.split("\\textbf{Languages:}")[1].split("\n")[0]
+
+    def test_unknown_category_defaults_to_tools(self):
+        result = _inject_jd_tools_into_skills(
+            self.SKILLS_TAIL, ("SomeObscureTool",), skill_anchors=(),
+        )
+        assert "SomeObscureTool" in result.split("\\textbf{Tools:}")[1].split("\n")[0]
+
+    def test_dedup_against_skill_anchors(self):
+        result = _inject_jd_tools_into_skills(
+            self.SKILLS_TAIL, ("Docker",), skill_anchors=("Docker",),
+        )
+        tools_line = [l for l in result.splitlines() if "\\textbf{Tools:}" in l][0]
+        assert tools_line.count("Docker") == 1
+
+    def test_dedup_against_existing_tail_text(self):
+        result = _inject_jd_tools_into_skills(
+            self.SKILLS_TAIL, ("Git",), skill_anchors=(),
+        )
+        tools_line = [l for l in result.splitlines() if "\\textbf{Tools:}" in l][0]
+        assert tools_line.count("Git") == 1
+
+    def test_empty_jd_tools_returns_unchanged(self):
+        result = _inject_jd_tools_into_skills(
+            self.SKILLS_TAIL, (), skill_anchors=(),
+        )
+        assert result == self.SKILLS_TAIL
+
+    def test_fallback_to_last_skills_line(self):
+        tail = (
+            "\\section*{Skills}\n"
+            "\\textbf{Languages:} Python \\\\\n"
+            "\n"
+            "\\section*{Education}\n"
+            "\\textbf{TMU} -- BEng\n"
+        )
+        result = _inject_jd_tools_into_skills(
+            tail, ("ServiceNow",), skill_anchors=(),
+        )
+        langs_line = [l for l in result.splitlines() if "\\textbf{Languages:}" in l][0]
+        assert "ServiceNow" in langs_line
+
+    def test_does_not_inject_into_education_section(self):
+        result = _inject_jd_tools_into_skills(
+            self.SKILLS_TAIL, ("ServiceNow",), skill_anchors=(),
+        )
+        edu_section = result.split("\\section*{Education}")[1]
+        assert "ServiceNow" not in edu_section
+
+    def test_multiple_tools_multiple_categories(self):
+        result = _inject_jd_tools_into_skills(
+            self.SKILLS_TAIL,
+            ("ServiceNow", "Django", "Azure", "Rust"),
+            skill_anchors=(),
+        )
+        assert "ServiceNow" in result.split("\\textbf{Tools:}")[1].split("\n")[0]
+        assert "Django" in result.split("\\textbf{Frameworks:}")[1].split("\n")[0]
+        assert "Azure" in result.split("\\textbf{Platforms:}")[1].split("\n")[0]
+        assert "Rust" in result.split("\\textbf{Languages:}")[1].split("\n")[0]
+
+    def test_line_break_preserved(self):
+        result = _inject_jd_tools_into_skills(
+            self.SKILLS_TAIL, ("ServiceNow",), skill_anchors=(),
+        )
+        tools_line = [l for l in result.splitlines() if "\\textbf{Tools:}" in l][0]
+        assert tools_line.rstrip().endswith("\\\\")
+
+
+# ---------------------------------------------------------------------------
+# _extract_jd_tools tests
+# ---------------------------------------------------------------------------
+
+
+class TestExtractJdTools:
+    def test_extracts_known_terms(self):
+        desc = "We use Kubernetes and Terraform for our infrastructure."
+        result = _extract_jd_tools(desc, skill_anchors=())
+        result_lower = [t.lower() for t in result]
+        assert "kubernetes" in result_lower
+        assert "terraform" in result_lower
+
+    def test_skips_skill_anchors(self):
+        desc = "Must know Jenkins and Kubernetes."
+        result = _extract_jd_tools(desc, skill_anchors=("Jenkins",))
+        result_lower = [t.lower() for t in result]
+        assert "jenkins" not in result_lower
+        assert "kubernetes" in result_lower
+
+    def test_skip_jd_inject_filter(self):
+        desc = "Experience with Lean, Six Sigma, ITIL, PMP, Jenkins required."
+        result = _extract_jd_tools(desc, skill_anchors=())
+        result_lower = [t.lower() for t in result]
+        assert "jenkins" in result_lower
+        for blocked in ("lean", "six sigma", "itil", "pmp"):
+            assert blocked not in result_lower
+
+    def test_teams_filtered_out(self):
+        desc = "Work with cross-functional teams and Microsoft Teams."
+        result = _extract_jd_tools(desc, skill_anchors=())
+        result_lower = [t.lower() for t in result]
+        assert "teams" not in result_lower
+        assert "microsoft teams" in result_lower
+
+    def test_rest_filtered_out(self):
+        desc = "Build REST APIs and handle the rest of the infrastructure."
+        result = _extract_jd_tools(desc, skill_anchors=())
+        result_lower = [t.lower() for t in result]
+        assert "rest" not in result_lower
+
+    def test_preserves_original_case(self):
+        desc = "Experience with KUBERNETES clusters."
+        result = _extract_jd_tools(desc, skill_anchors=())
+        originals = {t for t in result if t.lower() == "kubernetes"}
+        assert any(t == "KUBERNETES" for t in originals)
+
+    def test_no_matches_returns_empty(self):
+        desc = "We're looking for a passionate team player."
+        result = _extract_jd_tools(desc, skill_anchors=())
+        assert result == []
+
+    def test_deduplication(self):
+        desc = "Kubernetes Kubernetes Kubernetes clusters Kubernetes."
+        result = _extract_jd_tools(desc, skill_anchors=())
+        k8s_hits = [t for t in result if t.lower() == "kubernetes"]
+        assert len(k8s_hits) == 1
+
+
+# ---------------------------------------------------------------------------
+# _SKIP_JD_INJECT coverage
+# ---------------------------------------------------------------------------
+
+
+class TestSkipJdInject:
+    def test_certifications_in_skip_set(self):
+        for term in ("comptia", "comptia a+", "ccna", "ccnp", "ccie"):
+            assert term in _SKIP_JD_INJECT
+
+    def test_methodologies_in_skip_set(self):
+        for term in ("lean", "six sigma", "waterfall", "itil", "cobit", "prince2", "pmp"):
+            assert term in _SKIP_JD_INJECT
+
+    def test_teams_in_skip_set(self):
+        assert "teams" in _SKIP_JD_INJECT
+
+    def test_rest_in_skip_set(self):
+        assert "rest" in _SKIP_JD_INJECT
+
+    def test_real_tools_not_in_skip_set(self):
+        for term in ("docker", "kubernetes", "react", "python", "aws"):
+            assert term not in _SKIP_JD_INJECT
+
+    def test_common_word_collisions_in_skip_set(self):
+        """2026-07-17: found live — 'Fall 2026 and Spring 2027' (hiring
+        season) got 'Spring' injected as the Java framework into unrelated
+        bullets and Skills. These all double as ordinary English words that
+        dominate plain JD prose over their tech sense."""
+        for term in (
+            "spring", "go", "workday", "spark", "express", "helm",
+            "celery", "airflow", "chef", "vite", "postman",
+        ):
+            assert term in _SKIP_JD_INJECT
+
+    def test_spring_not_extracted_from_hiring_season_sentence(self):
+        desc = "We are seeking an Intern for Fall 2026 and Spring 2027."
+        result = _extract_jd_tools(desc, skill_anchors=())
+        assert "spring" not in {t.lower() for t in result}
+
+    def test_go_not_extracted_from_ordinary_verb_usage(self):
+        desc = "You'll go above and beyond, willing to go the extra mile."
+        result = _extract_jd_tools(desc, skill_anchors=())
+        assert "go" not in {t.lower() for t in result}
+
+    def test_real_spring_boot_framework_still_extracted(self):
+        """The multi-word 'spring boot' is unambiguous and stays matchable —
+        only the bare 'spring' collision is excluded."""
+        desc = "Experience building microservices with Spring Boot required."
+        result = _extract_jd_tools(desc, skill_anchors=())
+        assert "spring boot" in {t.lower() for t in result}
+
+
+# ---------------------------------------------------------------------------
+# Ownership / scope / metric-category reinforcement (2026-07-16)
+# ---------------------------------------------------------------------------
+
+from services.resumes.structured import TemplateEntry, _entry_metric_menu
+
+
+def test_prompt_contains_ownership_scope_rule() -> None:
+    assert CATALOG is not None
+    prompt = build_structured_prompt("Engineer", "Job description", [], CATALOG)
+    assert "OWNERSHIP AND SCOPE" in prompt
+    assert "scale, cost, reliability, adoption" in prompt
+    assert "never invent a number for a" in prompt
+
+
+def test_validate_bullet_demotes_unsupported_ownership_verb() -> None:
+    """Demote-not-veto: 'Led' with no leadership fact in the grounding is
+    swapped for a collaborative verb; the rest of the rewrite survives."""
+    text, reason = validate_tailored_bullet(
+        "Led \\textbf{LaTeX} documentation efforts, reducing downtime by 41\\%.",
+        CANONICAL,
+    )
+    assert reason is None and text is not None
+    assert text.startswith("Co-led ")
+    assert "41\\%" in text
+
+
+def test_validate_bullet_keeps_ownership_verb_with_grounding() -> None:
+    """A baseinfo 'Ownership:' line (part of entry_context) licenses the verb."""
+    entry_context = CANONICAL + " Ownership: sole owner of the documentation workflow."
+    text, reason = validate_tailored_bullet(
+        "Led \\textbf{LaTeX} documentation efforts, reducing downtime by 41\\%.",
+        CANONICAL,
+        entry_context=entry_context,
+    )
+    assert reason is None and text is not None
+    assert text.startswith("Led ")
+
+
+def test_validate_bullet_ownership_verb_grounded_by_canonical_verb() -> None:
+    """The canonical bullet's own opening verb is profile truth — never demoted."""
+    canonical = "Managed windowing, input, and render contexts with \\textbf{GLFW}."
+    text, reason = validate_tailored_bullet(
+        "Managed render contexts and windowing with \\textbf{GLFW}.",
+        canonical,
+    )
+    assert reason is None and text is not None
+    assert text.startswith("Managed ")
+
+
+def test_validate_bullet_rejects_ungrounded_number() -> None:
+    """Numeric invention was previously policed only by prompt text; the
+    deterministic guard protects the new baseinfo scope/team-size figures."""
+    text, reason = validate_tailored_bullet(
+        "Maintained \\textbf{LaTeX} documentation for a team of 12, reducing "
+        "downtime by 41\\%.",
+        CANONICAL,
+    )
+    assert text is None and "ungrounded number" in str(reason)
+
+
+def test_validate_bullet_accepts_background_sourced_number() -> None:
+    entry_context = CANONICAL + " Scope: supported a department of 12 staff."
+    text, reason = validate_tailored_bullet(
+        "Maintained \\textbf{LaTeX} documentation for a department of 12 staff, "
+        "reducing downtime by 41\\%.",
+        CANONICAL,
+        entry_context=entry_context,
+    )
+    assert reason is None and text is not None
+
+
+def test_validate_bullet_number_grounding_normalizes_commas() -> None:
+    entry_context = CANONICAL + " Scale: deduplicated 206,775 job postings."
+    text, reason = validate_tailored_bullet(
+        "Maintained pipelines that deduplicated 206775 job postings, reducing "
+        "downtime by 41\\%.",
+        CANONICAL,
+        entry_context=entry_context,
+    )
+    assert reason is None and text is not None
+
+
+def test_entry_metric_menu_preserves_category_label() -> None:
+    """A Notes line's category label survives the snippet window even when the
+    number sits more than 40 chars into the line."""
+    entry = TemplateEntry(
+        entry_id="projects-widget",
+        section="Projects",
+        categories=("widget",),
+        header="\\textbf{Widget} \\\\",
+        bullets=("Built a widget for internal use.",),
+        title="Widget",
+    )
+    background = (
+        "[widget] Widget (Python)\n"
+        "Reliability: documentation-driven fixes across every workflow helped "
+        "cut website downtime by 41%.\n"
+        "Scale: deduplicated 206,775 job postings in one month."
+    )
+    menu = _entry_metric_menu(entry, background)
+    assert any(item.startswith("Reliability:") and "41" in item for item in menu)
+    # A comma-grouped number is one menu item, shown with its commas.
+    comma_items = [item for item in menu if "206,775" in item]
+    assert len(comma_items) == 1
+    assert not any("775 " in item and "206,775" not in item for item in menu)
+
+
+def test_baseinfo_notes_flow_into_prompt_background() -> None:
+    """The populated xboxsignout._ Notes reach the prompt as verified background."""
+    assert CATALOG is not None
+    prompt = build_structured_prompt("Engineer", "Job description", [], CATALOG)
+    assert "sole designer and developer of the entire system" in prompt
+    assert "206,775 job postings" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Listing-language checklist (2026-07-16)
+# ---------------------------------------------------------------------------
+
+JD_LANG_DESC = (
+    "We build observability tooling for cloud infrastructure. You will design "
+    "monitoring dashboards, automate deployment pipelines, and improve "
+    "incident response. Experience with Docker containers, Kafka streaming, "
+    "and Python services required. Familiarity with observability platforms "
+    "and monitoring practices, deployment automation, and incident response "
+    "runbooks is a strong asset. Our monitoring stack ingests Kafka events "
+    "from Docker services; Python automation drives deployment and incident "
+    "workflows across the observability platform."
+)
+
+
+def test_prompt_includes_listing_language_block() -> None:
+    assert CATALOG is not None
+    prompt = build_structured_prompt("Platform Engineer", JD_LANG_DESC, [], CATALOG)
+    assert "<listing_language>" in prompt
+    assert "LISTING LANGUAGE EVERYWHERE" in prompt
+    block = prompt.split("<listing_language>")[1].split("</listing_language>")[0]
+    # Anchors the listing names arrive with display casing; soft JD vocabulary
+    # (non-anchor repeated terms) arrives too.
+    assert "Docker" in block and "Kafka" in block and "Python" in block
+    assert "monitoring" in block.lower()
+    assert "observability" in block.lower()
+
+
+def test_prompt_listing_language_absent_in_aggressive_modes(monkeypatch) -> None:
+    """Aggressive modes keep their stronger injection blocks; the truth-gated
+    checklist and its rule must not double up with them."""
+    assert CATALOG is not None
+    monkeypatch.setattr(CATALOG.render_config, "aggressive", True)
+    prompt = build_structured_prompt("Platform Engineer", JD_LANG_DESC, [], CATALOG)
+    assert "<listing_language>" not in prompt
+    assert "LISTING LANGUAGE EVERYWHERE" not in prompt
+    assert "AGGRESSIVE MODE" in prompt
+
+    monkeypatch.setattr(CATALOG.render_config, "aggressive", False)
+    monkeypatch.setattr(CATALOG.render_config, "strong_aggressive", True)
+    prompt = build_structured_prompt("Platform Engineer", JD_LANG_DESC, [], CATALOG)
+    assert "<listing_language>" not in prompt
+    assert "LISTING LANGUAGE EVERYWHERE" not in prompt
+
+
+def test_prompt_listing_language_omitted_when_no_terms() -> None:
+    """A description with nothing extractable produces no empty block."""
+    assert CATALOG is not None
+    prompt = build_structured_prompt("Job", "help wanted", [], CATALOG)
+    assert "<listing_language>" not in prompt
+    assert "LISTING LANGUAGE EVERYWHERE" not in prompt
+
+
+def test_rewrite_scope_notes_renumbered_after_new_rules(monkeypatch) -> None:
+    """Scope notes were '14.' before rules 14/15 existed; they must not
+    collide with the ownership and listing-language rules."""
+    assert CATALOG is not None
+    monkeypatch.setattr(CATALOG.render_config, "rewrite_scope", "limited")
+    prompt = build_structured_prompt("Engineer", JD_LANG_DESC, [], CATALOG)
+    assert "16. REWRITE BUDGET" in prompt
+    assert "14. OWNERSHIP AND SCOPE" in prompt
+    assert "15. LISTING LANGUAGE EVERYWHERE" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Ownership/number guard hardening (2026-07-16 review fixes)
+# ---------------------------------------------------------------------------
+
+
+def test_ownership_guard_ignores_incidental_management_word() -> None:
+    """'reported progress to management' is prose about the org, not evidence
+    of the candidate managing anything — the demotion must still fire."""
+    canonical = (
+        "Tracked project milestones and reported progress to management in "
+        "\\textbf{Microsoft Suite}, reducing coordination delays by 14\\%."
+    )
+    text, reason = validate_tailored_bullet(
+        "Managed project milestone tracking, reducing coordination delays "
+        "by 14\\%.",
+        canonical,
+    )
+    assert reason is None and text is not None
+    assert text.startswith("Coordinated ")
+
+
+def test_ownership_guard_exact_canonical_verb_still_licenses() -> None:
+    canonical = "Managed windowing, input, and render contexts with \\textbf{GLFW}."
+    text, reason = validate_tailored_bullet(
+        "Managed render contexts and windowing with \\textbf{GLFW}.",
+        canonical,
+    )
+    assert reason is None and text is not None and text.startswith("Managed ")
+
+
+def test_ownership_guard_coled_grounding_does_not_license_led() -> None:
+    canonical = "Co-led weekly design reviews for the rendering module."
+    text, reason = validate_tailored_bullet(
+        "Led weekly design reviews for the rendering module.",
+        canonical,
+    )
+    assert reason is None and text is not None
+    assert text.startswith("Co-led ")
+
+
+def test_ownership_guard_unwraps_bolded_opening_verb() -> None:
+    text, reason = validate_tailored_bullet(
+        "\\textbf{Led} documentation efforts, reducing downtime by 41\\%.",
+        CANONICAL,
+    )
+    assert reason is None and text is not None
+    assert text.startswith("\\textbf{Co-led}")
+
+
+def test_number_guard_ignores_digits_inside_identifiers() -> None:
+    """'STM32' grounds the token STM32, not a free-floating '32' — and a
+    rewrite naming STM32 must not need standalone-32 grounding either."""
+    canonical = (
+        "Designed \\textbf{PCB circuits} for a custom STM32-based avionics "
+        "flight computer."
+    )
+    # Invented "32%" must NOT be grounded by the 32 inside STM32.
+    text, reason = validate_tailored_bullet(
+        "Designed PCB circuits, improving efficiency by 32\\%.",
+        canonical,
+        skill_anchors=("pcb", "stm32"),
+    )
+    assert text is None and "ungrounded number" in str(reason)
+    # Naming STM32 itself stays fine.
+    text, reason = validate_tailored_bullet(
+        "Designed \\textbf{PCB circuits} for an STM32-based flight computer.",
+        canonical,
+        skill_anchors=("pcb", "stm32"),
+    )
+    assert reason is None and text is not None
+
+
+def test_number_guard_runs_after_filler_strip_salvages_bullet() -> None:
+    """A fabricated figure living only in a strippable filler tail must not
+    reject the salvageable front of the rewrite."""
+    text, reason = validate_tailored_bullet(
+        "Maintained \\textbf{LaTeX} documentation, reducing downtime by "
+        "41\\%, ensuring reliability for over 500 users.",
+        CANONICAL,
+    )
+    assert reason is None and text is not None
+    assert "41\\%" in text
+    assert "500" not in text
+
+
+# ---------------------------------------------------------------------------
+# Strong-aggressive skills rewrite fixes (2026-07-17)
+# ---------------------------------------------------------------------------
+
+from services.resumes.structured import (
+    _reconcile_skills_and_bullets,
+    _rewrite_skills_for_jd,
+)
+
+SKILLS_TAIL = (
+    "\\section*{Skills}\n"
+    "\\textbf{Languages:} JavaScript, Java, Python, C++, C, SQL, HTML, CSS \\\\\n"
+    "\\textbf{Tools:} Git, PostgreSQL, Docker \\\\\n"
+    "\\section*{Education}\n"
+    "\\textbf{School} -- Degree \\hfill 2023--2027"
+)
+
+
+def test_rewrite_skills_keeps_nonmatching_canonical_items() -> None:
+    """Partial JD relevance must reorder, not gut, a skills line."""
+    tail = _rewrite_skills_for_jd(SKILLS_TAIL, ("Salesforce",), ["sql", "python"], ())
+    langs = next(l for l in tail.splitlines() if "Languages:" in l)
+    for item in ("JavaScript", "Java", "Python", "C++", "SQL", "HTML", "CSS"):
+        assert item in langs, f"{item} dropped from Languages"
+    # Relevant items lead.
+    assert langs.index("Python") < langs.index("JavaScript")
+    tools = next(l for l in tail.splitlines() if "Tools:" in l)
+    assert "Salesforce" in tools and "Git" in tools
+
+
+def test_rewrite_skills_single_letter_needs_whole_token_match() -> None:
+    """'C' must not rank as JD-relevant via substring noise ('css', 'excel')."""
+    tail = _rewrite_skills_for_jd(SKILLS_TAIL, (), ["css", "excel"], ())
+    langs = next(l for l in tail.splitlines() if "Languages:" in l)
+    items = [i.strip() for i in langs.split(":}")[1].rstrip(" \\").split(",")]
+    assert items[0] == "CSS"
+    assert "C" in items  # kept, just not falsely promoted
+    assert items.index("C") > items.index("CSS")
+
+
+def test_rewrite_skills_cap_cuts_only_unmatched_tail() -> None:
+    tail = _rewrite_skills_for_jd(
+        SKILLS_TAIL, ("Salesforce",), ["sql", "python"], (), max_items=3
+    )
+    langs = next(l for l in tail.splitlines() if "Languages:" in l)
+    items = [i.strip() for i in langs.split(":}")[1].rstrip(" \\").split(",")]
+    assert len(items) == 3
+    assert "Python" in items and "SQL" in items  # matched items survive
+
+
+def test_unbold_non_jd_terms_demotes_irrelevant_bolds() -> None:
+    from services.resumes.structured import _unbold_non_jd_terms
+
+    text = (
+        "Built \\textbf{Salesforce} flows and \\textbf{process maps} using "
+        "\\textbf{Python} for \\textbf{stakeholder alignment}."
+    )
+    out = _unbold_non_jd_terms(text, ("Salesforce", "Python"), ["sql"])
+    assert "\\textbf{Salesforce}" in out
+    assert "\\textbf{Python}" in out
+    assert "\\textbf{process maps}" not in out and "process maps" in out
+    assert "\\textbf{stakeholder alignment}" not in out and "stakeholder alignment" in out
+
+
+def test_unbold_non_jd_terms_containment_keeps_adjacent_forms() -> None:
+    from services.resumes.structured import _unbold_non_jd_terms
+
+    # "PostgreSQL" contains JD keyword "sql" — containment keeps it bolded,
+    # consistent with _filter_keywordless_bullets' matching.
+    text = "Managed \\textbf{PostgreSQL} validation."
+    out = _unbold_non_jd_terms(text, (), ["sql"])
+    assert "\\textbf{PostgreSQL}" in out
+    # No JD terms at all -> no-op, never mass-unbold.
+    assert _unbold_non_jd_terms(text, (), []) == text
+
+
+def test_unbold_non_jd_terms_keeps_verbatim_jd_vocabulary() -> None:
+    """A bold missing from the top-N keyword set but present verbatim in the
+    listing text survives — the model read the full JD (RCFA/Excel case)."""
+    from services.resumes.structured import _unbold_non_jd_terms
+
+    jd = "Perform RCFA and condition-based monitoring; report findings in Excel."
+    text = (
+        "Performed \\textbf{RCFA} investigations tracked in \\textbf{Excel}, "
+        "driving \\textbf{stakeholder alignment}."
+    )
+    out = _unbold_non_jd_terms(text, ("SAP",), ["maintenance"], jd_text=jd)
+    assert "\\textbf{RCFA}" in out
+    assert "\\textbf{Excel}" in out
+    assert "\\textbf{stakeholder alignment}" not in out
+    assert "stakeholder alignment" in out
+
+
+# ---------------------------------------------------------------------------
+# Strong-aggressive depth-over-breadth (2026-07-17)
+# ---------------------------------------------------------------------------
+
+
+def test_effective_config_sa_depth_knobs() -> None:
+    from services.resumes.structured import (
+        MAX_BULLET_CHARS,
+        RenderConfig,
+        _effective_render_config,
+    )
+
+    cfg = _effective_render_config(RenderConfig(strong_aggressive=True))
+    assert cfg.max_bullet_chars == MAX_BULLET_CHARS + 120
+    assert cfg.min_visible_bullets == MIN_VISIBLE_BULLETS - 5
+
+
+def test_sa_prompt_offers_depth_over_breadth(monkeypatch) -> None:
+    assert CATALOG is not None
+    monkeypatch.setattr(CATALOG.render_config, "strong_aggressive", True)
+    prompt = build_structured_prompt("Engineer", "desc", [], CATALOG)
+    assert "DEPTH OVER BREADTH" in prompt
+    assert "write UP TO this many" in prompt
+    assert "~450 characters" in prompt
+
+
+def test_sa_shorter_bullets_list_drops_trailing_slots(monkeypatch) -> None:
+    """In strong-aggressive, providing fewer bullets than canonical is an
+    intentional depth choice — the unwritten slots are dropped, not padded
+    with canonical text."""
+    assert CATALOG is not None
+    monkeypatch.setattr(CATALOG.render_config, "strong_aggressive", True)
+    web = _entry_id("web-messaging")
+    others = [e.entry_id for e in CATALOG.entries if e.entry_id != web]
+    selection = StructuredSelection(
+        ranking=[web] + others,
+        keywords=["python"],
+        bullets={
+            web: [
+                "Built \\textbf{Python} data services covering intake, "
+                "validation, and reporting for the platform.",
+                "Automated \\textbf{Python} test harnesses across the full "
+                "release cycle.",
+            ]
+        },
+    )
+    doc, report = render_structured_resume(CATALOG, selection)
+    chunk = doc.split("Web Messaging App")[1].split("\\end{itemize}")[0]
+    assert chunk.count("\\item") == 2
+    assert "Raspberry Pi" not in chunk  # canonical 3rd bullet not padded in
+
+
+def test_normal_mode_shorter_bullets_list_still_pads_canonical() -> None:
+    """Outside strong-aggressive, a short bullets list keeps canonical text
+    for the missing slots — unchanged behavior."""
+    assert CATALOG is not None
+    web = _entry_id("web-messaging")
+    others = [e.entry_id for e in CATALOG.entries if e.entry_id != web]
+    selection = StructuredSelection(
+        ranking=[web] + others,
+        keywords=["python"],
+        bullets={
+            web: [
+                "Built collaborative \\textbf{Python} tooling for real-time "
+                "messaging workflows.",
+            ]
+        },
+    )
+    doc, report = render_structured_resume(CATALOG, selection)
+    chunk = doc.split("Web Messaging App")[1].split("\\end{itemize}")[0]
+    assert chunk.count("\\item") == 3
+    assert "Raspberry Pi" in chunk
+
+
+def test_reconcile_ignores_header_bolds_and_preserves_case() -> None:
+    """Job titles / project names bolded in entry HEADERS must not become
+    'tools'; harvested bullet terms keep their original casing."""
+    rendered = (
+        "\\textbf{Frontend Development Intern,} {MCG3D} -- Remote \\\\\n"
+        "\\begin{itemize}\n"
+        "  \\item Built \\textbf{Salesforce} test flows in \\textbf{Python}.\n"
+        "\\end{itemize}\n"
+        "\\textbf{Web Messaging App} | \\textit{JavaScript} \\\\\n"
+        "\\begin{itemize}\n"
+        "  \\item Shipped \\textbf{WebRTC} messaging.\n"
+        "\\end{itemize}"
+    )
+    plain_tail = (
+        "\\section*{Skills}\n"
+        "\\textbf{Tools:} Git \\\\\n"
+        "\\section*{Education}\n"
+        "\\textbf{School} -- Degree"
+    )
+    tail = _reconcile_skills_and_bullets(plain_tail, rendered, ())
+    assert "frontend development intern" not in tail.lower().replace("skills", "")
+    assert "Web Messaging App" not in tail.split("Education")[0].replace(
+        "\\section*{Skills}", ""
+    )
+    tools = next(l for l in tail.splitlines() if "Tools:" in l)
+    assert "Salesforce" in tools  # original casing, not 'salesforce'
+    assert "Python" in tools or "Python" in tail  # harvested with casing intact
+    assert "salesforce," not in tools  # no lowercase duplicates
+
+
+def test_extract_listing_keywords_handles_bilingual_postings() -> None:
+    """Accented words must not shed ASCII fragments into the keyword list
+    (observed live: 'veloppement' and 'quipe' from a bilingual CFIA posting),
+    and common French filler must not rank as listing language."""
+    from services.resumes.structured import extract_listing_keywords
+
+    desc = (
+        "Développement d'applications avec notre équipe pour le développement "
+        "de pipelines. Le développement logiciel avec Python et Docker pour "
+        "notre équipe. Nous cherchons un stagiaire pour le développement avec "
+        "Python, Docker et des pipelines de données. Python and Docker "
+        "pipelines for data engineering."
+    )
+    terms = extract_listing_keywords(desc, ("python", "docker"), max_keywords=15)
+    lowered = [t.lower() for t in terms]
+    assert "python" in lowered and "docker" in lowered
+    for fragment in ("veloppement", "quipe"):
+        assert fragment not in lowered
+    for filler in ("avec", "pour", "notre", "équipe", "développement", "stagiaire"):
+        assert filler not in lowered
+    assert not any(t.endswith(".") for t in terms)
+
+
+def test_extract_listing_keywords_skips_url_plumbing() -> None:
+    """Domains, URL paths, and job-key hex ids must not rank as listing
+    language (observed live on an Indeed posting)."""
+    from services.resumes.structured import extract_listing_keywords
+
+    desc = (
+        "Apply at ca.indeed.com/viewjob key af3732d8e7f6a952 today. "
+        "Apply at ca.indeed.com/viewjob key af3732d8e7f6a952 today. "
+        "Apply at ca.indeed.com/viewjob key af3732d8e7f6a952 today. "
+        "Kubernetes deployment and Kubernetes monitoring with Kubernetes."
+    )
+    terms = [t.lower() for t in extract_listing_keywords(desc, (), max_keywords=10)]
+    assert "kubernetes" in terms
+    assert not any("indeed" in t or "/" in t for t in terms)
+    assert "af3732d8e7f6a952" not in terms

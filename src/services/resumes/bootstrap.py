@@ -1,18 +1,17 @@
 """Bootstrap a freeform resume profile into a structured-pipeline profile.
 
 Converts an untagged ``template.tex`` + ``baseinfo.txt`` pair into the format
-the structured pipeline requires (``% [category]`` entry tags, a
-``== ROLE TYPE SELECTION GUIDE ==`` block, ``== SKILL ANCHORS ==``,
-``structured_config.json``) using the same "LLM proposes, Python disposes"
-philosophy as the pipeline itself:
+the structured pipeline requires (``% [category]`` entry tags,
+``== SKILL ANCHORS ==``, ``structured_config.json``) using the same "LLM
+proposes, Python disposes" philosophy as the pipeline itself:
 
   1. The LLM only *points* at existing template lines (exact copies of entry
-     header lines) and proposes category slugs, role families, and skill
-     anchors as a small JSON object. It never rewrites template content.
-  2. Python inserts the tags, renders the guide/anchors sections in the exact
-     format the parsers expect, and merges them into baseinfo.
+     header lines) and proposes category slugs and skill anchors as a small
+     JSON object. It never rewrites template content.
+  2. Python inserts the tags, renders the anchors section in the exact
+     format the parsers expect, and merges it into baseinfo.
   3. Nothing is accepted until the candidate files round-trip through the
-     REAL ``load_structured_profile`` and every proposed family renders with
+     REAL ``load_structured_profile`` and a baseline render completes with
      zero fidelity findings.
   4. On validation failure the LLM gets one retry with the exact errors.
 
@@ -40,7 +39,6 @@ from .structured import (
 MAX_BOOTSTRAP_ATTEMPTS = 2
 
 CATEGORY_SLUG_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
-FAMILY_NAME_PATTERN = re.compile(r"^[A-Z][A-Z /&-]+$")
 
 DEFAULT_STRUCTURED_CONFIG = {
     "rewrite_scope": "limited",
@@ -53,9 +51,7 @@ class BootstrapProposal:
     """LLM-proposed structure, parsed and shape-checked (not yet applied)."""
 
     entries: list[tuple[str, str]]  # (header_snippet, category_slug)
-    families: list[dict[str, Any]]
     skill_anchors: dict[str, list[str]]
-    family_skill_priority: dict[str, list[str]]
 
 
 @dataclass(slots=True)
@@ -67,7 +63,6 @@ class BootstrapResult:
     structured_config: dict[str, Any] | None = None
     provider: str | None = None
     attempts: int = 0
-    families: list[str] = field(default_factory=list)
     categories: list[str] = field(default_factory=list)
 
 
@@ -91,9 +86,7 @@ def build_bootstrap_prompt(template_text: str, baseinfo_text: str, feedback: lis
         "   heading line introducing one job, project, volunteer role, or similar,\n"
         "   followed by its bullet items. Do NOT include section headers, the\n"
         "   candidate's name/contact block, skills lines, or education lines.\n"
-        "2. 2-4 role families covering the kinds of job listings this candidate\n"
-        "   would realistically apply to, with visibility rules over your categories.\n"
-        "3. The candidate's skill anchors: named tools, systems, software,\n"
+        "2. The candidate's skill anchors: named tools, systems, software,\n"
         "   equipment, methods, and certifications that appear in the resume.\n"
         "This works for ANY field - engineering, healthcare, trades, retail,\n"
         "research, administration - use vocabulary from the resume itself.\n"
@@ -114,28 +107,14 @@ def build_bootstrap_prompt(template_text: str, baseinfo_text: str, feedback: lis
         '     "category": "<short lowercase slug, e.g. clinical, machining, sales>"},\n'
         "    ...\n"
         "  ],\n"
-        '  "families": [\n'
-        '    {"name": "<UPPERCASE name, e.g. CLINICAL / BEDSIDE>",\n'
-        '     "keywords": ["listing words that identify this kind of job"],\n'
-        '     "must_show": ["categories that must always render for this family"],\n'
-        '     "show": ["categories to include when relevant"],\n'
-        '     "hide": ["categories to hide for this family"]},\n'
-        "    ...\n"
-        "  ],\n"
-        '  "skill_anchors": {"<Label>": ["item", ...], ...},\n'
-        '  "family_skill_priority": {"<FAMILY KEY>": ["skills-section items in\n'
-        '      the order they should lead for this family"], ...}\n'
+        '  "skill_anchors": {"<Label>": ["item", ...], ...}\n'
         "}\n"
         "Rules:\n"
         "1. header_snippet must be an EXACT copy of one existing template line -\n"
         "   no paraphrasing, no added/removed characters. One per entry.\n"
         "2. Category slugs: lowercase letters/digits/underscores only. Reuse the\n"
         "   same slug for entries of the same kind.\n"
-        "3. Every category you assign must be classified by EVERY family into\n"
-        "   exactly one of must_show/show/hide. must_show must not be empty.\n"
-        "4. Family name: uppercase words, optionally separated by ' / '. The first\n"
-        "   word becomes the family key.\n"
-        "5. skill_anchors must only contain items that appear in the resume -\n"
+        "3. skill_anchors must only contain items that appear in the resume -\n"
         "   never add skills the candidate does not claim.\n"
         "</output_format>"
     )
@@ -171,60 +150,6 @@ def parse_bootstrap_response(text: str) -> tuple[BootstrapProposal | None, list[
                 continue
             entries.append((snippet, category))
 
-    families: list[dict[str, Any]] = []
-    raw_families = payload.get("families")
-    if not isinstance(raw_families, list) or not raw_families:
-        errors.append("'families' must be a non-empty list")
-    else:
-        seen_keys: set[str] = set()
-        for index, item in enumerate(raw_families):
-            if not isinstance(item, dict):
-                errors.append(f"families[{index}] is not an object")
-                continue
-            name = str(item.get("name") or "").strip().upper()
-            name = re.sub(r"\s+ROLES$", "", name).strip()
-            if not FAMILY_NAME_PATTERN.match(name):
-                errors.append(
-                    f"families[{index}] name {name!r} is invalid (uppercase words, "
-                    "optionally separated by ' / ')"
-                )
-                continue
-            key = name.split("/")[0].strip().split()[0]
-            if key in seen_keys:
-                errors.append(f"duplicate family key {key!r}")
-                continue
-            seen_keys.add(key)
-
-            def _str_list(field_name: str) -> list[str]:
-                values = item.get(field_name)
-                if not isinstance(values, list):
-                    return []
-                return [str(v).strip() for v in values if str(v).strip()]
-
-            must_show = [c.lower() for c in _str_list("must_show")]
-            if not must_show:
-                errors.append(f"family {key}: must_show must not be empty")
-                continue
-            families.append(
-                {
-                    "name": name,
-                    "key": key,
-                    "keywords": _str_list("keywords"),
-                    "must_show": must_show,
-                    "show": [c.lower() for c in _str_list("show")],
-                    "hide": [c.lower() for c in _str_list("hide")],
-                }
-            )
-
-    proposed_categories = {category for _, category in entries}
-    for family in families:
-        for bucket in ("must_show", "show", "hide"):
-            for category in family[bucket]:
-                if category not in proposed_categories:
-                    errors.append(
-                        f"family {family['key']}: {bucket} references unknown category {category!r}"
-                    )
-
     skill_anchors: dict[str, list[str]] = {}
     raw_anchors = payload.get("skill_anchors")
     if isinstance(raw_anchors, dict):
@@ -234,25 +159,12 @@ def parse_bootstrap_response(text: str) -> tuple[BootstrapProposal | None, list[
                 if items:
                     skill_anchors[str(label).strip()] = items
 
-    family_skill_priority: dict[str, list[str]] = {}
-    raw_priority = payload.get("family_skill_priority")
-    if isinstance(raw_priority, dict):
-        valid_keys = {f["key"] for f in families}
-        for key, values in raw_priority.items():
-            normalized = str(key).strip().upper()
-            if normalized in valid_keys and isinstance(values, list):
-                items = [str(v).strip() for v in values if str(v).strip()]
-                if items:
-                    family_skill_priority[normalized] = items
-
     if errors:
         return None, errors
     return (
         BootstrapProposal(
             entries=entries,
-            families=families,
             skill_anchors=skill_anchors,
-            family_skill_priority=family_skill_priority,
         ),
         [],
     )
@@ -304,19 +216,6 @@ def apply_tags_to_template(template_text: str, entries: list[tuple[str, str]]) -
     return tagged, []
 
 
-def render_role_guide(families: list[dict[str, Any]]) -> str:
-    blocks: list[str] = ["== ROLE TYPE SELECTION GUIDE ==", ""]
-    for family in families:
-        blocks.append(f"{family['name']} roles")
-        if family["keywords"]:
-            blocks.append(f"  Keywords: {', '.join(family['keywords'])}")
-        blocks.append(f"  MUST SHOW: {', '.join(family['must_show'])}")
-        blocks.append(f"  SHOW:      {', '.join(family['show']) if family['show'] else 'none'}")
-        blocks.append(f"  HIDE:      {', '.join(family['hide']) if family['hide'] else 'none'}")
-        blocks.append("")
-    return "\n".join(blocks).rstrip() + "\n"
-
-
 def render_skill_anchors(skill_anchors: dict[str, list[str]]) -> str:
     lines = ["== SKILL ANCHORS =="]
     for label, items in skill_anchors.items():
@@ -340,7 +239,6 @@ def merge_baseinfo_sections(baseinfo_text: str, proposal: BootstrapProposal) -> 
     merged = baseinfo_text or ""
     if proposal.skill_anchors:
         merged = _replace_or_append_section(merged, "SKILL ANCHORS", render_skill_anchors(proposal.skill_anchors))
-    merged = _replace_or_append_section(merged, "ROLE TYPE SELECTION GUIDE", render_role_guide(proposal.families))
     return merged
 
 
@@ -348,8 +246,6 @@ def build_structured_config(proposal: BootstrapProposal, existing: dict[str, Any
     config = dict(existing or {})
     for key, value in DEFAULT_STRUCTURED_CONFIG.items():
         config.setdefault(key, value)
-    if proposal.family_skill_priority:
-        config["family_skill_priority"] = proposal.family_skill_priority
     return config
 
 
@@ -361,7 +257,7 @@ def validate_bootstrap_output(
     work_dir: Path,
 ) -> list[str]:
     """Round-trip the candidate files through the real structured loader and
-    render every family. Returns a list of errors (empty = valid)."""
+    run a baseline render. Returns a list of errors (empty = valid)."""
     work_dir.mkdir(parents=True, exist_ok=True)
     template_path = work_dir / "template.tex"
     baseinfo_path = work_dir / "baseinfo.txt"
@@ -371,10 +267,9 @@ def validate_bootstrap_output(
         json.dumps(structured_config, indent=2), encoding="utf-8"
     )
 
-    loaded = load_structured_profile(template_path, baseinfo_path)
-    if loaded is None:
+    catalog = load_structured_profile(template_path, baseinfo_path)
+    if catalog is None:
         return ["tagged template + baseinfo did not load as a structured profile"]
-    catalog, families = loaded
 
     errors: list[str] = []
     if len(catalog.entries) != len(proposal.entries):
@@ -383,27 +278,16 @@ def validate_bootstrap_output(
             "an entry's structure was not recognised (header + itemize bullets expected)"
         )
 
-    parsed_keys = {family.key for family in families}
-    proposed_keys = {family["key"] for family in proposal.families}
-    if parsed_keys != proposed_keys:
-        errors.append(
-            f"role guide parsed families {sorted(parsed_keys)} but {sorted(proposed_keys)} were proposed"
-        )
-
-    for family in families:
-        try:
-            document, report = render_structured_resume(
-                catalog, families, StructuredSelection(role_family_key=family.key)
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            errors.append(f"family {family.key}: render raised {exc!r}")
-            continue
-        if report.fidelity_findings:
-            errors.append(f"family {family.key}: fidelity findings {report.fidelity_findings}")
-        if document.count("\\begin{itemize}") != document.count("\\end{itemize}"):
-            errors.append(f"family {family.key}: unbalanced itemize environments in render")
-        if report.visible_bullet_count == 0:
-            errors.append(f"family {family.key}: renders zero bullets")
+    try:
+        document, report = render_structured_resume(catalog, StructuredSelection())
+    except Exception as exc:  # pragma: no cover - defensive
+        return errors + [f"baseline render raised {exc!r}"]
+    if report.fidelity_findings:
+        errors.append(f"baseline render: fidelity findings {report.fidelity_findings}")
+    if document.count("\\begin{itemize}") != document.count("\\end{itemize}"):
+        errors.append("baseline render: unbalanced itemize environments")
+    if report.visible_bullet_count == 0:
+        errors.append("baseline render: renders zero bullets")
 
     return errors
 
@@ -494,7 +378,6 @@ def bootstrap_structured_profile(
             structured_config=structured_config,
             provider=provider,
             attempts=attempt,
-            families=[family["key"] for family in proposal.families],
             categories=sorted({category for _, category in proposal.entries}),
         )
 
