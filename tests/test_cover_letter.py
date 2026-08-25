@@ -47,6 +47,18 @@ def _isolate_state(tmp_path, monkeypatch):
 
 
 PROFILE_DIR = Path(__file__).resolve().parents[1] / "src" / "services" / "resumes" / "resumes_cache" / "xboxsignout._"
+
+# resumes_cache/ is gitignored: it holds Ernest's real profile (template.tex,
+# baseinfo.txt), which is personal data and deliberately not in the repo. These
+# tests read it at import time, so on a clean checkout -- every CI runner -- the
+# read raises during COLLECTION, and a collection error aborts the entire pytest
+# run rather than just this file. Skip at module level instead.
+if not (PROFILE_DIR / "template.tex").exists():
+    pytest.skip(
+        "resumes_cache profile data not present (gitignored); "
+        "these tests require the local profile.",
+        allow_module_level=True,
+    )
 TEMPLATE_PATH = PROFILE_DIR / "template.tex"
 BASEINFO_PATH = PROFILE_DIR / "baseinfo.txt"
 
