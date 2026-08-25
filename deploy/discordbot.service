@@ -1,0 +1,122 @@
+# systemd unit for the Discord job bot.
+#
+#   sudo cp deploy/discordbot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now discordbot
+#   journalctl -u discordbot -f
+#
+# EDIT User / WorkingDirectory / ExecStart / ExecStartPre to match the
+# deployment before enabling — the paths below are examples, not defaults.
+
+[Unit]
+Description=Discord job bot
+After=network-online.target
+Wants=network-online.target
+
+# Archiving is date-keyed (data/jba/jobs/YYYY-MM-DD) and the freshness filters
+# are clock-sensitive, so a boot that beats NTP sync can mis-key a day's data.
+After=time-sync.target
+
+[Service]
+Type=simple
+User=botuser
+WorkingDirectory=/opt/discordbot
+
+# Foreground, so systemd owns the process and journald owns the logs. This is
+# why run.py defaults to foreground rather than detaching. run.py forwards
+# SIGTERM to the bot and waits for it, so it is safe as MainPID.
+ExecStart=/opt/discordbot/.venv/bin/python run.py
+
+# Fail visibly rather than restart-looping when the token file is missing.
+ExecStartPre=/usr/bin/test -f /opt/discordbot/.env
+
+# Daily restart, matching what run.bat did on Windows: shed accumulated
+# Chrome/Playwright state. RuntimeMaxSec stops the unit normally (SIGTERM), so
+# the drain below runs and the runtime lock is released.
+RuntimeMaxSec=86400
+
+# on-failure, NOT always: app.py exits 0 when another instance already holds the
+# runtime lock, and 1 on a missing token. Under Restart=always each of those
+# becomes a silent 10-second forever-loop that `systemctl status` still reports
+# as healthy. RestartPreventExitStatus=1 stops a config error dead, visibly.
+Restart=on-failure
+RestartPreventExitStatus=1
+RestartSec=10
+
+# app.py drains scrapes (120s) then watcher sends (30s), then shuts down the
+# scheduler -- and that join is serial, up to 5s per worker with the pool sized
+# to available cores. 150s + 5s x n_workers exceeds 180s on a large host, and a
+# SIGKILL landing during release_runtime_lock re-strands .bot.lock/.bot.pid.
+# This budget only means anything because app.py installs a SIGTERM handler;
+# without it the default disposition kills the process before any of it runs.
+TimeoutStopSec=300
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=discordbot
+
+# systemd passes no locale, so subprocess(text=True) would decode LaTeX logs and
+# JobSpy output with whatever locale.getpreferredencoding() falls back to.
+# Pin UTF-8 rather than relying on PEP 538 C-locale coercion.
+Environment=LANG=C.UTF-8
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONFAULTHANDLER=1
+
+# Playwright installs browsers under the *installing* user's ~/.cache by
+# default, which a service account cannot see. Pin a shared path and install
+# with the same value set:
+#   PLAYWRIGHT_BROWSERS_PATH=/opt/discordbot/.playwright playwright install chromium
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/discordbot/.playwright
+
+# Point at a non-standard browser install if needed.
+# Environment=CHROME_EXECUTABLE=/usr/bin/google-chrome-stable
+# Environment=CHROME_USER_DATA_DIR=/home/botuser/.config/google-chrome
+
+# Chrome's setuid sandbox cannot initialise as an unprivileged container PID 1.
+# Set this ONLY when actually containerised -- dropping the sandbox on a normal
+# host is a real security regression.
+# Environment=CHROME_NO_SANDBOX=1
+
+# The bot commits job archives into its own working tree, once a UTC day, from
+# the ATS scrape loop. Off by default: a service account with a writable .git is
+# a liability, and the commit conflicts with pull-based deploys. Enable only if
+# you want that behaviour.
+# Environment=JBA_ARCHIVE_GIT_COMMIT=1
+# Environment=JBA_GIT_AUTHOR_NAME=discordbot
+# Environment=JBA_GIT_AUTHOR_EMAIL=discordbot@localhost
+#
+# Pushing is gated separately -- committing is local, pushing publishes -- and
+# needs credentials this account can use non-interactively. Use a credential
+# helper or an SSH remote; there is no prompt to answer under systemd, so a
+# password-protected key or an https remote without a helper simply hangs until
+# the 180s timeout and logs a rejected push.
+# Environment=JBA_ARCHIVE_GIT_PUSH=1
+#
+# The remote to push to. Unset means: the only remote if there is exactly one
+# (this repo's is named DiscordBot, not origin), otherwise origin.
+# Environment=JBA_GIT_REMOTE=DiscordBot
+
+# Chrome plus a per-core worker pool plus aiohttp will pass the 1024 default.
+LimitNOFILE=65536
+
+# NoNewPrivileges makes a setuid bit a no-op process-wide. Chrome prefers its
+# namespace sandbox, but where unprivileged user namespaces are restricted
+# (stock Ubuntu 24.04+) it falls back to the SUID helper, which this then breaks
+# with "SUID sandbox helper binary was found, but is not configured correctly".
+# Host-dependent: verify on the target box. If Chrome refuses to launch, drop
+# this line rather than reaching for CHROME_NO_SANDBOX.
+NoNewPrivileges=true
+
+# Isolates /tmp and /var/tmp. Note this does NOT cover /dev/shm, which Chrome
+# also uses -- that would be PrivateDevices=, deliberately not set.
+PrivateTmp=true
+
+# Deliberately NOT set: ProtectSystem=strict / StateDirectory=. config.py
+# resolves every writable path (.bot.lock, .bot.pid, data/, logs/,
+# chrome_profile*/, dedup_listings/) from the install directory, so strict
+# protection would require ReadWritePaths=/opt/discordbot -- which makes it
+# nearly pointless. Real hardening needs a state-dir override in config.py
+# first; this omission is a known trade-off, not an oversight.
+
+[Install]
+WantedBy=multi-user.target

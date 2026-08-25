@@ -1,0 +1,132 @@
+name: Archive health
+
+# Watches the committed job archives and fails loudly when they stop arriving.
+#
+# Deliberately NOT a job that produces or commits archives. The archives are
+# built by the bot from live ATS scraping on its own host; a runner checks out
+# the repo and sees only what has already been pushed, so it has nothing to add.
+# A workflow that tried to commit them here would be a permanent no-op.
+#
+# What it can do is notice silence. The bot commits archives once a UTC day
+# (merge_data.commit_archives_daily, gated on JBA_ARCHIVE_GIT_COMMIT) and pushes
+# when JBA_ARCHIVE_GIT_PUSH is set. If the host dies, the credential expires, or
+# the push is rejected every night, nothing else reports it -- the repo just
+# quietly stops gaining data.
+
+on:
+  schedule:
+    # 08:00 UTC, an hour after the nightly scrape cycles have landed.
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+    inputs:
+      max_age_days:
+        description: "Days without an archive commit before this fails"
+        required: false
+        default: "9"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: archive-health
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history, no blobs. The staleness check reads commit metadata only,
+      # and the archive blobs are the bulk of this repo (~250MB of .git) -- a
+      # normal full clone would download all of them to read a date.
+      - name: Checkout history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Check archive freshness
+        shell: bash
+        env:
+          # Archives materialise on weekly rollover, not daily: the current
+          # week lives in jobs.db, which is gitignored. So the daily commit is
+          # a no-op most days and the real cadence is weekly. 9 days is one
+          # week plus slack -- a daily threshold would fail 6 days in 7.
+          MAX_AGE_DAYS: ${{ github.event.inputs.max_age_days || '9' }}
+        run: |
+          set -euo pipefail
+
+          last_commit=$(git log -1 --format=%cI -- data/jba/jobs || true)
+          if [ -z "$last_commit" ]; then
+            echo "::error::No archive commits found under data/jba/jobs at all."
+            exit 1
+          fi
+
+          age_days=$(( ( $(date -u +%s) - $(date -u -d "$last_commit" +%s) ) / 86400 ))
+          subject=$(git log -1 --format=%s -- data/jba/jobs)
+
+          {
+            echo "## Job archive health"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Last archive commit | $last_commit |"
+            echo "| Age | ${age_days} days |"
+            echo "| Subject | $subject |"
+            echo "| Threshold | ${MAX_AGE_DAYS} days |"
+            echo
+            echo '### Archives in the repo'
+            echo
+            echo '```'
+            git ls-tree -r --long HEAD --name-only -- data/jba/jobs | sort
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$age_days" -gt "$MAX_AGE_DAYS" ]; then
+            echo "::error::No job archive has been committed for ${age_days} days" \
+                 "(threshold ${MAX_AGE_DAYS}). The bot is not pushing:" \
+                 "check JBA_ARCHIVE_GIT_COMMIT / JBA_ARCHIVE_GIT_PUSH on the host," \
+                 "the push credentials, and whether the push is being rejected."
+            exit 1
+          fi
+
+          echo "Last archive commit is ${age_days} days old; within threshold."
+
+      # Fetches only the blobs this step actually opens, thanks to the blobless
+      # clone above. A truncated or half-pushed zip is worse than a missing one:
+      # archive_index would index whatever it could parse and silently dedup
+      # against an incomplete history.
+      - name: Verify archives are readable
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib
+          import sys
+          import zipfile
+
+          jobs = pathlib.Path("data/jba/jobs")
+          archives = sorted(jobs.glob("*/*.zip"))
+          if not archives:
+              print("::error::No archive zips present in the checkout.")
+              sys.exit(1)
+
+          failed = False
+          for path in archives:
+              try:
+                  with zipfile.ZipFile(path) as zf:
+                      bad = zf.testzip()
+                      entries = len(zf.namelist())
+                  if bad is not None:
+                      print(f"::error::{path}: corrupt entry {bad}")
+                      failed = True
+                  elif entries == 0:
+                      print(f"::error::{path}: archive is empty")
+                      failed = True
+                  else:
+                      print(f"{path}: OK ({entries} entries)")
+              except (zipfile.BadZipFile, OSError) as exc:
+                  print(f"::error::{path}: unreadable ({exc})")
+                  failed = True
+
+          sys.exit(1 if failed else 0)
+          PY

@@ -125,7 +125,9 @@ data/ats_companies/
 
 # Large archives / dataset dumps
 *.zip
-# Allow monthly job archive zips (committed by the bot)
+# Allow job archive zips -- weekly and consolidated monthly alike. The bot
+# commits these itself (merge_data.commit_archives), gated on
+# JBA_ARCHIVE_GIT_COMMIT.
 !data/jba/jobs/*/*.zip
 *.7z
 *.tar
@@ -133,3 +135,8 @@ data/ats_companies/
 *.tgz
 *.bz2
 *.xz
+
+# Derived index rebuilt from data/jba/jobs/**/*.zip on demand; not source of truth.
+data/jba/jobs/archive_index.db
+data/jba/jobs/archive_index.db-shm
+data/jba/jobs/archive_index.db-wal

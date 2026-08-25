@@ -440,7 +440,6 @@ class WatcherManager:
                     str(settings.get("country_indeed") or "AUTO"),
                     f"channel:{channel_id}",
                     bool(settings.get("allow_north_america", False)),
-                    job_service.effective_jobbank_native_query(str(settings.get("jobbank_native_query") or "")),
                     label=scheduler_labels.job_scrape_label(channel_id),
                 )
                 raw_count = len(items)
@@ -586,7 +585,7 @@ class WatcherManager:
 
     async def _run_ats_scrape_loop(self) -> None:
         ATS_PLATFORMS, BAMBOOHR, scrape_ats_platform = _ATS_PLATFORMS, _BAMBOOHR, _scrape_ats_platform
-        from services.jba.merge_data import log_jobs
+        from services.jba.merge_data import commit_archives_daily, log_jobs
 
         ATS_SCRAPES_PER_DAY = 4
         ATS_SCRAPE_INTERVAL = 86400 // ATS_SCRAPES_PER_DAY  # 6 hours
@@ -677,6 +676,16 @@ class WatcherManager:
                 last_scrape_ts = datetime.now(timezone.utc).timestamp()
                 self.health.record_ats_scrape_complete(len(all_results), scrapes_today, ATS_SCRAPES_PER_DAY)
                 print(f"[ats-scrape] Scrape {scrapes_today}/{ATS_SCRAPES_PER_DAY} complete for {today}")
+
+                # Publish whatever archive zips have landed since yesterday.
+                # Self-limiting to once a UTC day, and a no-op on the days when
+                # no weekly rollover or monthly consolidation produced a zip.
+                # Off unless JBA_ARCHIVE_GIT_COMMIT is set; push additionally
+                # needs JBA_ARCHIVE_GIT_PUSH. git shells out and can block on a
+                # network push, so it goes to a thread rather than the loop.
+                await self._tracked_to_thread(
+                    commit_archives_daily, label=scheduler_labels.ATS_SCRAPE
+                )
             except Exception as exc:
                 print(f"[ats-scrape] Scrape cycle error: {exc}")
 

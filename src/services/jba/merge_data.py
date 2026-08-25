@@ -4,11 +4,12 @@ Current week's data lives in data/jba/jobs/jobs.db for fast lookups.
 When a new week begins, the previous week's jobs are exported to a
 weekly zip and purged from the DB.  When a new month begins, all
 weekly zips are consolidated into a single YYYY-MM.zip containing
-per-day JSON entries + seen_urls.json, and the result is git-committed.
+per-day JSON entries, and the result is git-committed.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -65,11 +66,6 @@ def _get_conn() -> sqlite3.Connection:
 
 def _init_tables(conn: sqlite3.Connection) -> None:
     conn.executescript("""
-        CREATE TABLE IF NOT EXISTS seen_urls (
-            url       TEXT PRIMARY KEY,
-            first_seen TEXT NOT NULL
-        );
-
         CREATE TABLE IF NOT EXISTS jobs (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             date_key   TEXT    NOT NULL,
@@ -80,6 +76,16 @@ def _init_tables(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_jobs_date_key  ON jobs (date_key);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_dedup_date ON jobs (date_key, dedup_key);
+
+        -- Dedup lookups are by key alone ("logged on ANY day?"). The composite
+        -- index above is keyed on date_key first, so it cannot serve them.
+        CREATE INDEX IF NOT EXISTS idx_jobs_dedup_key ON jobs (dedup_key);
+
+        -- seen_urls is gone: it stored only a URL and a first_seen, so it could
+        -- not answer anything about date_posted, and its 30-day TTL made it a
+        -- narrower memory than the job records themselves. The jobs table (and
+        -- the archives built from it) are now the single source of truth.
+        DROP TABLE IF EXISTS seen_urls;
     """)
     conn.commit()
 
@@ -154,13 +160,13 @@ def _archive_old_weeks(today: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Monthly consolidation — merge weekly zips + seen_urls into one archive
+# Monthly consolidation — merge weekly zips into one archive
 # ---------------------------------------------------------------------------
 
 def _consolidate_old_months(today: str) -> None:
     """If *today* is in a new month, consolidate the previous month's weekly
-    zips into a single YYYY-MM.zip with per-day entries + seen_urls.json,
-    then git-commit the result."""
+    zips into a single YYYY-MM.zip with per-day entries, then git-commit
+    the result."""
     global _last_consolidate_month
     current_month = today[:7]
 
@@ -209,13 +215,12 @@ def _consolidate_old_months(today: str) -> None:
                 _last_consolidate_month = None
                 return
 
-        seen_urls = [
-            {"url": r[0], "first_seen": r[1]}
-            for r in conn.execute("SELECT url, first_seen FROM seen_urls ORDER BY url")
-        ]
-
         job_count = 0
         try:
+            # Per-day job records only. seen_urls.json is no longer written: it
+            # duplicated the URLs already present in those records while
+            # carrying no date_posted, so it could not answer any dedup question
+            # the job records cannot answer better.
             with zipfile.ZipFile(monthly_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
                 for name in sorted(day_entries):
                     zf.writestr(name, day_entries[name])
@@ -223,36 +228,271 @@ def _consolidate_old_months(today: str) -> None:
                         job_count += len(json.loads(day_entries[name]))
                     except Exception:
                         pass
-                zf.writestr("seen_urls.json", json.dumps(seen_urls, default=str))
 
             for wz in weekly_zips:
                 wz.unlink()
 
             conn.execute("VACUUM")
-            _git_commit_monthly(monthly_zip, month, job_count, len(seen_urls))
-            print(f"[jba-log] Consolidated {month}: {job_count:,} jobs + "
-                  f"{len(seen_urls):,} seen URLs -> {monthly_zip.name}")
+            committed = _git_commit_monthly(monthly_zip, month, job_count)
+            state = "committed" if committed else "on disk, uncommitted"
+            print(f"[jba-log] Consolidated {month}: {job_count:,} jobs -> "
+                  f"{monthly_zip.name} ({state})")
         except Exception as exc:
             _last_consolidate_month = None
             print(f"[jba-log] Failed to consolidate {month}: {exc}")
 
 
-def _git_commit_monthly(zip_path: Path, month: str, job_count: int, url_count: int) -> None:
-    """Stage and commit a monthly archive zip."""
-    repo_root = _JOBS_DIR.parent.parent.parent
-    rel_path = zip_path.relative_to(repo_root)
+_TRUTHY = {"1", "true", "yes"}
+
+
+def _archive_commit_enabled() -> bool:
+    return (os.getenv("JBA_ARCHIVE_GIT_COMMIT") or "").strip().lower() in _TRUTHY
+
+
+def _archive_push_enabled() -> bool:
+    """Pushing is gated separately from committing, and stays off by default.
+
+    Committing touches only the local tree; pushing publishes to a shared remote
+    and needs credentials the service account may not have. Someone who wants
+    local archive commits has not thereby asked for automatic publication.
+    """
+    return (os.getenv("JBA_ARCHIVE_GIT_PUSH") or "").strip().lower() in _TRUTHY
+
+
+def _repo_root() -> Path:
+    return _JOBS_DIR.parent.parent.parent
+
+
+def _git_identity() -> list[str]:
+    """Identity via -c, not GIT_AUTHOR_*.
+
+    The env-var route needs all four of AUTHOR/COMMITTER name and email, and
+    setting only the author pair still fails on the committer. Under systemd the
+    service account usually has no ~/.gitconfig, so without this `git commit`
+    exits 128 with "Please tell me who you are".
+    """
+    name = os.getenv("JBA_GIT_AUTHOR_NAME", "discordbot")
+    email = os.getenv("JBA_GIT_AUTHOR_EMAIL", "discordbot@localhost")
+    return ["-c", f"user.name={name}", "-c", f"user.email={email}"]
+
+
+def _run_git(argv: list[str], *, context: str, timeout: int = 30) -> tuple[int, str]:
+    """Run a git command in the repo root. Returns (returncode, output).
+
+    Return codes are checked and stderr surfaced by every caller. An earlier
+    version did neither: capture_output swallowed git's complaint and
+    `except Exception` never fired, because a non-zero exit is not an exception.
+    """
     try:
-        subprocess.run(
-            ["git", "add", "-f", str(rel_path)],
-            cwd=str(repo_root), capture_output=True, timeout=30,
-        )
-        subprocess.run(
-            ["git", "commit", "-m",
-             f"archive: {month} job data ({job_count:,} jobs, {url_count:,} seen URLs)"],
-            cwd=str(repo_root), capture_output=True, timeout=30,
+        result = subprocess.run(
+            ["git", *argv], cwd=str(_repo_root()),
+            capture_output=True, text=True, timeout=timeout,
         )
     except Exception as exc:
-        print(f"[jba-log] Git commit failed for {month}: {exc}")
+        print(f"[jba-log] git {argv[0]} failed for {context}: {exc}")
+        return 1, str(exc)
+    output = (result.stderr or result.stdout or "").strip()
+    if result.returncode != 0:
+        print(f"[jba-log] git {argv[0]} failed for {context} "
+              f"(rc={result.returncode}): {output}")
+    return result.returncode, output
+
+
+_ARCHIVE_PATHSPEC = "data/jba/jobs"
+
+_last_archive_commit_day: str | None = None
+
+
+def _current_branch() -> str | None:
+    """Checked-out branch name, or None on a detached HEAD.
+
+    Pushing from a detached HEAD has no sensible target -- `git push origin HEAD`
+    would either be rejected or, worse, land on whatever the remote's default
+    happens to be. Refuse instead of guessing.
+    """
+    rc, out = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], context="branch lookup")
+    if rc != 0 or not out or out == "HEAD":
+        return None
+    return out
+
+
+def _archive_changes_staged() -> bool:
+    """Whether staging produced anything to commit under the archive pathspec."""
+    rc, out = _run_git(
+        ["diff", "--cached", "--name-only", "--", _ARCHIVE_PATHSPEC],
+        context="staged archive check",
+    )
+    return rc == 0 and bool(out)
+
+
+def commit_archives(*, push: bool | None = None) -> bool:
+    """Commit (and optionally push) every job archive zip. Returns True if a
+    commit was made.
+
+    Scoped to data/jba/jobs throughout -- `git add -A -- <pathspec>` and a
+    pathspec-scoped `git commit`. The bot's working tree routinely holds
+    unrelated edits, and an unscoped commit here would sweep them into an
+    archive commit.
+
+    No -f on the add, ever. The zips are already un-ignored by the
+    `!data/jba/jobs/*/*.zip` negation, so -f buys nothing -- and applied to a
+    directory pathspec it overrides .gitignore for everything underneath,
+    which force-adds jobs.db (137MB), archive_index.db (294MB) and their WAL
+    sidecars. GitHub's 100MB limit rejects that push; a self-hosted remote
+    would simply accept it.
+
+    Covers weekly zips as well as the consolidated monthly ones. Only the
+    monthly zip was ever committed before, so a week's archive sat untracked
+    until month-end consolidation folded it in -- and if the host was lost in
+    between, that data was gone.
+
+    Push failures are reported and left alone rather than retried with a
+    rebase: --autostash on a tree carrying the operator's own uncommitted work
+    is not a risk worth taking unattended. The next run tries again.
+    """
+    if not _archive_commit_enabled():
+        return False
+
+    if _run_git(["rev-parse", "--git-dir"], context="repo check")[0] != 0:
+        return False
+
+    if _run_git(["add", "-A", "--", _ARCHIVE_PATHSPEC], context="archive staging")[0] != 0:
+        return False
+
+    if not _archive_changes_staged():
+        return False
+
+    rc, _ = _run_git(
+        [*_git_identity(), "commit", "-m", _archive_commit_message(), "--", _ARCHIVE_PATHSPEC],
+        context="archive commit",
+    )
+    if rc != 0:
+        return False
+    print("[jba-log] Committed job archives.")
+
+    if push is None:
+        push = _archive_push_enabled()
+    if push:
+        _push_archives()
+    return True
+
+
+def _archive_commit_message() -> str:
+    """Summarise the staged archive change, e.g. 'archive: 2026-08 job data'."""
+    _, out = _run_git(
+        ["diff", "--cached", "--name-only", "--", _ARCHIVE_PATHSPEC],
+        context="archive commit message",
+    )
+    months = sorted({
+        Path(line).parent.name
+        for line in out.splitlines()
+        if line.strip()
+    })
+    if not months:
+        return "archive: job data"
+    if len(months) == 1:
+        return f"archive: {months[0]} job data"
+    return f"archive: job data ({months[0]}..{months[-1]})"
+
+
+def _resolve_remote() -> str | None:
+    """The remote to push to: JBA_GIT_REMOTE, else the only one, else origin.
+
+    Not hardcoded to "origin": this repo's remote is named DiscordBot, and a
+    hardcoded default would have made the push fail on the one machine the
+    feature exists for. A single remote is unambiguous whatever it is called;
+    with several, "origin" is the sane convention and an explicit setting is
+    available for the rest.
+    """
+    explicit = (os.getenv("JBA_GIT_REMOTE") or "").strip()
+    if explicit:
+        return explicit
+    rc, out = _run_git(["remote"], context="remote lookup")
+    if rc != 0:
+        return None
+    remotes = [line.strip() for line in out.splitlines() if line.strip()]
+    if not remotes:
+        return None
+    if len(remotes) == 1:
+        return remotes[0]
+    return "origin" if "origin" in remotes else remotes[0]
+
+
+def _push_archives() -> bool:
+    branch = _current_branch()
+    if branch is None:
+        print("[jba-log] Detached HEAD; skipping archive push.")
+        return False
+    remote = _resolve_remote()
+    if remote is None:
+        print("[jba-log] No git remote configured; archive commit stays local.")
+        return False
+    rc, out = _run_git(["push", remote, branch], context="archive push", timeout=180)
+    if rc != 0:
+        print(f"[jba-log] Archive push rejected; the commit is local and the "
+              f"next run will retry. ({out.splitlines()[-1] if out else 'no detail'})")
+        return False
+    print(f"[jba-log] Pushed job archives to {remote}/{branch}.")
+    return True
+
+
+def commit_archives_daily() -> bool:
+    """Commit archives at most once per UTC day. Returns True if it committed.
+
+    The current week lives in jobs.db, which is gitignored, so most days there
+    is nothing new to commit and this is a cheap no-op; a weekly rollover or a
+    monthly consolidation is what actually produces a committable zip. Running
+    daily means the archive reaches the remote within a day of being written
+    rather than waiting for month-end.
+    """
+    global _last_archive_commit_day
+    if not _archive_commit_enabled():
+        return False
+    today = _today_str()
+    if _last_archive_commit_day == today:
+        return False
+    _last_archive_commit_day = today
+    try:
+        return commit_archives()
+    except Exception as exc:
+        # Never let archive bookkeeping take down the caller's loop.
+        print(f"[jba-log] Daily archive commit failed: {exc}")
+        return False
+
+
+def _git_commit_monthly(zip_path: Path, month: str, job_count: int) -> bool:
+    """Commit a freshly consolidated monthly archive. Returns whether it did.
+
+    Opt-in via JBA_ARCHIVE_GIT_COMMIT. A service account with a writable .git is
+    a liability, and a local auto-commit collides with pull-based deploys, so
+    this stays off unless explicitly asked for.
+
+    Consolidation deletes the weekly zips it folded in, so this stages the whole
+    archive pathspec rather than just the new zip -- committing the addition
+    while leaving those deletions unstaged would leave the tree permanently
+    dirty. The commit message keeps the month and job count, which the generic
+    daily path cannot know.
+    """
+    if not _archive_commit_enabled():
+        return False
+
+    if _run_git(["add", "-A", "--", _ARCHIVE_PATHSPEC], context=month)[0] != 0:
+        return False
+    if not _archive_changes_staged():
+        return False
+
+    rc, _ = _run_git(
+        [*_git_identity(), "commit",
+         "-m", f"archive: {month} job data ({job_count:,} jobs)",
+         "--", _ARCHIVE_PATHSPEC],
+        context=month,
+    )
+    if rc != 0:
+        return False
+
+    if _archive_push_enabled():
+        _push_archives()
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -275,8 +515,104 @@ def _today_str() -> str:
 
 _WRITE_FRESHNESS_SECONDS = 7 * 86_400  # 7 days
 _DATELESS_PLATFORMS = frozenset({"bamboohr", "ashby"})
-_SEEN_URL_TTL_DAYS = 30
-_last_seen_purge_date: str | None = None
+
+
+# seen_urls.json entries carried over from the pre-timestamp era record this
+# instead of a date. It means "seen, date unknown" -- never a real ordering.
+_MIGRATED_SENTINEL = "migrated"
+
+
+def _posted_key(value: Any) -> str:
+    """Normalized date_posted. '' means the listing carried no usable date."""
+    text = str(value or "").strip()
+    return "" if not text or text == _MIGRATED_SENTINEL else text
+
+
+def _identity(job: dict[str, Any]) -> tuple[str, str]:
+    """(base_key, date_posted) for a listing. date_posted is '' when absent."""
+    return _dedup_key(job) or "", _posted_key(job.get("date_posted"))
+
+
+def _collides(posted: str, seen_dates: set[str]) -> bool:
+    """Is a listing dated *posted* a duplicate of any sighting in *seen_dates*?
+
+    Asymmetric, deliberately, and keyed on the INCOMING listing:
+
+      * No date_posted  -> collides with ANY prior sighting of this job. It
+        carries no evidence of being a new posting, so it is not allowed to
+        masquerade as one.
+      * Has date_posted -> collides only with a sighting carrying the SAME date.
+        A different date is a genuine re-post and is kept.
+
+    Defined here rather than in archive_index because log_jobs must apply the
+    rule even when the archive index is unavailable, and because two copies of
+    this rule is exactly how the write path drifted out of step with the scrape
+    path in the first place. archive_index.collides delegates to this.
+    """
+    if not seen_dates:
+        return False
+    if posted == "":
+        return True
+    return posted in seen_dates
+
+
+def _merge_sightings(into: dict[str, set[str]], other: dict[str, set[str]]) -> dict[str, set[str]]:
+    for base, dates in other.items():
+        into.setdefault(base, set()).update(dates)
+    return into
+
+
+def _already_logged(conn: sqlite3.Connection, keys: list[str]) -> dict[str, set[str]]:
+    """base_key -> date_posted values already in the jobs table, on ANY day.
+
+    Replaces the old seen_urls lookup. The jobs table holds only the current
+    week -- previous weeks are exported to zips and purged -- so this covers the
+    same ground seen_urls did for recent data, without a second table to keep in
+    step. Older weeks are covered by the archive index (see _already_archived).
+
+    Returns sightings rather than a bare key set: suppressing on the key alone
+    would drop a genuine re-post (same URL, new date_posted), and because the
+    drop happens before the insert nothing would ever record the re-post -- so
+    the scrape path, which does apply the date rule, would surface it again on
+    every cycle. The date must survive to the collision check.
+    """
+    if not keys:
+        return {}
+    found: dict[str, set[str]] = {}
+    for i in range(0, len(keys), 500):
+        batch = keys[i:i + 500]
+        placeholders = ",".join("?" for _ in batch)
+        rows = conn.execute(
+            f"SELECT dedup_key, data FROM jobs WHERE dedup_key IN ({placeholders})", batch
+        )
+        for base, payload in rows:
+            try:
+                record = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                record = {}
+            posted = _posted_key(record.get("date_posted") if isinstance(record, dict) else "")
+            found.setdefault(base, set()).add(posted)
+    return found
+
+
+def _already_archived(jobs: list[dict[str, Any]]) -> dict[str, set[str]]:
+    """base_key -> date_posted values sighted in the zip archives, in-window.
+
+    Imported locally: archive_index imports _dedup_key from this module, so a
+    module-level import would be circular. Failures are swallowed -- the archive
+    is an optimisation and must never break logging.
+
+    Returns recent_sightings unchanged. It previously returned `set(sightings)`,
+    which keeps the dict's KEYS and discards the dates, collapsing the date rule
+    into "seen this URL at all" and permanently rejecting every re-post.
+    """
+    try:
+        from services.jba import archive_index
+
+        archive_index.ensure_index()
+        return archive_index.recent_sightings(_dedup_key(job) for job in jobs)
+    except Exception:
+        return {}
 
 
 def _is_fresh_enough(job: dict[str, Any], now_iso: str) -> bool:
@@ -294,57 +630,6 @@ def _is_fresh_enough(job: dict[str, Any], now_iso: str) -> bool:
         return False
 
 
-def _purge_old_seen_urls(conn: sqlite3.Connection, today: str) -> int:
-    """Stamp 'migrated' entries with today so they age out in TTL days, then
-    delete entries older than TTL. Runs at most once per day. Returns count removed."""
-    global _last_seen_purge_date
-    if _last_seen_purge_date == today:
-        return 0
-    _last_seen_purge_date = today
-    # Give migrated entries a real date so the TTL clock starts now
-    stamped = conn.execute(
-        "UPDATE seen_urls SET first_seen = ? WHERE first_seen = 'migrated'",
-        (today,),
-    ).rowcount
-    if stamped:
-        print(f"[jba-log] Stamped {stamped:,} migrated seen_urls entries with {today} (retry in {_SEEN_URL_TTL_DAYS}d)")
-    cutoff = (
-        datetime.now(timezone.utc) - timedelta(days=_SEEN_URL_TTL_DAYS)
-    ).strftime("%Y-%m-%d")
-    removed = conn.execute(
-        "DELETE FROM seen_urls WHERE first_seen < ?",
-        (cutoff,),
-    ).rowcount
-    if stamped or removed:
-        conn.commit()
-    if removed:
-        print(f"[jba-log] Purged {removed:,} seen_urls entries older than {_SEEN_URL_TTL_DAYS}d")
-    return removed
-
-
-def _bulk_check_seen(conn: sqlite3.Connection, keys: list[str]) -> set[str]:
-    """Return the subset of *keys* that are already in seen_urls."""
-    if not keys:
-        return set()
-    seen: set[str] = set()
-    batch_size = 500
-    for i in range(0, len(keys), batch_size):
-        batch = keys[i:i + batch_size]
-        placeholders = ",".join("?" for _ in batch)
-        rows = conn.execute(
-            f"SELECT url FROM seen_urls WHERE url IN ({placeholders})", batch
-        ).fetchall()
-        seen.update(r[0] for r in rows)
-    return seen
-
-
-def _mark_seen(conn: sqlite3.Connection, keys: list[str], now: str) -> None:
-    conn.executemany(
-        "INSERT OR IGNORE INTO seen_urls (url, first_seen) VALUES (?, ?)",
-        [(k, now) for k in keys],
-    )
-
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -352,7 +637,9 @@ def _mark_seen(conn: sqlite3.Connection, keys: list[str], now: str) -> None:
 def log_jobs(jobs: list[dict[str, Any]], date_str: str | None = None) -> int:
     """Merge *jobs* into today's (or *date_str*'s) daily log.
 
-    Deduplicates by job URL globally via seen_urls.
+    Deduplicates by dedup key against the jobs table (current week) and the zip
+    archives (older weeks), so a job is logged once rather than re-appearing
+    each day it stays open.
     Archives previous weeks' data to zip before writing.
     Returns the number of **new** entries added.
     """
@@ -366,8 +653,10 @@ def log_jobs(jobs: list[dict[str, Any]], date_str: str | None = None) -> int:
         conn = _get_conn()
         _archive_old_weeks(date_str)
         _consolidate_old_months(date_str)
-        _purge_old_seen_urls(conn, date_str)
 
+        # Key-only, deliberately: UNIQUE(date_key, dedup_key) means one row per
+        # key per day regardless of date_posted, so a same-day repeat cannot be
+        # stored even if the date rule would call it new.
         existing_keys: set[str] = {
             row[0]
             for row in conn.execute(
@@ -375,37 +664,43 @@ def log_jobs(jobs: list[dict[str, Any]], date_str: str | None = None) -> int:
             )
         }
 
-        candidates: list[tuple[str, dict[str, Any]]] = []
+        candidates: list[tuple[str, str, dict[str, Any]]] = []
         for job in jobs:
-            key = _dedup_key(job)
+            key, posted = _identity(job)
             if not key or key in existing_keys:
                 continue
             if not _is_fresh_enough(job, now):
                 continue
-            candidates.append((key, job))
+            candidates.append((key, posted, job))
 
         if not candidates:
             return 0
 
-        candidate_keys = [k for k, _ in candidates]
-        already_seen = _bulk_check_seen(conn, candidate_keys)
+        candidate_keys = [k for k, _, _ in candidates]
+        # Current week (jobs table) + older weeks (zip archives), as
+        # base_key -> {date_posted}. Both layers apply the same date rule, so a
+        # genuine re-post survives to be written; suppressing on the key alone
+        # would drop it here forever while the scrape path kept re-surfacing it.
+        sightings = _already_logged(conn, candidate_keys)
+        _merge_sightings(sightings, _already_archived([job for _, _, job in candidates]))
 
         new_rows: list[tuple[str, str, str, str]] = []
-        new_keys: list[str] = []
-        for key, job in candidates:
-            if key in already_seen:
+        for key, posted, job in candidates:
+            if _collides(posted, sightings.get(key, set())):
                 continue
             job.setdefault("scraped_at", now)
             new_rows.append((date_str, key, job.get("scraped_at", now), json.dumps(job, default=str)))
-            new_keys.append(key)
             existing_keys.add(key)
+            # Two copies of one identity in a single batch: the first wins.
+            sightings.setdefault(key, set()).add(posted)
 
         if new_rows:
+            # The jobs row IS the record of having seen this key; there is no
+            # longer a separate table to mark.
             conn.executemany(
                 "INSERT OR IGNORE INTO jobs (date_key, dedup_key, scraped_at, data) VALUES (?, ?, ?, ?)",
                 new_rows,
             )
-            _mark_seen(conn, new_keys, now)
             conn.commit()
 
     added = len(new_rows)
@@ -521,10 +816,3 @@ def list_log_dates() -> list[str]:
                     pass
 
     return sorted(dates, reverse=True)
-
-
-def seen_url_count() -> int:
-    """Return total number of seen URLs."""
-    conn = _get_conn()
-    row = conn.execute("SELECT COUNT(*) FROM seen_urls").fetchone()
-    return row[0] if row else 0
