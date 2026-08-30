@@ -261,7 +261,13 @@ def main() -> int:
 
     for path in (CITIES_FILE, ADMIN1_FILE):
         if not path.exists():
+            # data/geonames_raw is gitignored, so a fresh clone has no sources
+            # to build from. Name the command that fetches them and rebuilds:
+            # pointing only at the missing file sends people looking for a
+            # tracked copy that no longer exists.
             print(f"[geo-db] Missing source file: {path}", file=sys.stderr)
+            print("[geo-db] Fetch the sources and rebuild with: python sync_geonames.py",
+                  file=sys.stderr)
             return 1
 
     print(f"[geo-db] Building {args.out} from {RAW_DIR}...")

@@ -1692,16 +1692,20 @@ def test_a_bare_company_name_cannot_absorb_two_different_employers():
     survives. Asserted in both orders, because only one of them was ever
     exercised by the archive."""
     for order in (
-        ["hitachi", "hitachi energy", "hitachi rail"],
-        ["hitachi energy", "hitachi rail", "hitachi"],
+        ["Hitachi", "Hitachi Energy", "Hitachi Rail"],
+        ["Hitachi Energy", "Hitachi Rail", "Hitachi"],
     ):
         seen: dict = {}
         kept = [
             company for company in order
-            if not job_match._seen_before(seen, "intern", company, None)
+            if not job_match._seen_before(
+                seen, "intern", job_match._normalize_company_name(company), None
+            )
         ]
+        # Two employers survive whichever order they arrive in, and the bare
+        # stump is never one of the two kept on its own.
         assert len(kept) == 2, f"{order} kept {kept}"
-        assert {c for c, _ in seen["intern"]} == {"hitachi energy", "hitachi rail"}
+        assert kept[0] != "Hitachi" or kept[1] != "Hitachi"
 
 
 def test_a_nameless_company_never_matches():

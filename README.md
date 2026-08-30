@@ -223,8 +223,7 @@ python -m pip install -r requirements.txt
 # Neither of these is in git. Without them the bot starts but silently does
 # nothing useful: no companies to scrape, and no city/region matching.
 python sync_ats_companies.py                   # clones the company-slug lists
-python sync_geonames.py                        # pulls the GeoNames export, rebuilds geo.db
-python scripts/build_geo_db.py                 # builds data/geo.db (~96 MB)
+python sync_geonames.py                        # pulls the GeoNames export, builds data/geo.db (~101 MB)
 
 # Secrets. config.py exits if discordtoken is missing, so create this first.
 install -m 600 -o botuser -g botuser /dev/null /opt/discordbot/.env
@@ -279,8 +278,10 @@ loudly if you skip them:
 - `data/ats_companies/` — gitignored (it has its own history). `sync_ats_companies.py`
   clones it on first run. Without it `load_company_lists()` returns nothing and
   ATS scraping finds zero jobs, which looks identical to "nothing matched".
-- `data/geo.db` — ~96 MB, gitignored, rebuilt by `scripts/build_geo_db.py` from
-  the tracked GeoNames sources in `data/geonames_raw/`. Without it city and
+- `data/geo.db` — ~101 MB, gitignored, built by `scripts/build_geo_db.py` from
+  the GeoNames sources in `data/geonames_raw/`. Those are gitignored too, so on
+  a fresh clone run `sync_geonames.py`, which fetches them and rebuilds in one
+  step; `build_geo_db.py` alone has nothing to read. Without it city and
   region matching is disabled (the bot logs this and falls back to country-only
   matching rather than failing).
 
@@ -1175,7 +1176,7 @@ run.py                      cross-platform launcher (Windows/Linux)
 src/services/platform_support.py  all OS-specific decisions live here
 src/services/capacity.py    hardware-aware pool scaling
 src/services/jba/archive_index.py  archive dedup index (4-month window)
-scripts/build_geo_db.py     rebuilds data/geo.db from data/geonames_raw/
+scripts/build_geo_db.py     rebuilds data/geo.db from data/geonames_raw/ (sources come from sync_geonames.py)
 scripts/compute_metrics.py  operating metrics from the job archives
 run.bat                     supervised Windows launcher (legacy)
 deploy/discordbot.service   systemd unit for Linux deployment

@@ -883,7 +883,7 @@ def _job_country(job: ArchivedJob) -> str | None:
 
 
 def _seen_before(
-    seen_titles: dict[str, list[tuple[str, set[str | None]]]],
+    seen_titles: dict[str, dict[str, list[tuple[str, set[str | None]]]]],
     title: str,
     company: str,
     country: str | None,
@@ -892,14 +892,26 @@ def _seen_before(
 
     Employers under a title are scanned rather than looked up, because boards
     abbreviate the same name and `_company_matches` decides what counts as the
-    same one. The scan is over the handful of employers sharing one exact job
-    title, so it stays cheap.
+    same one.
+
+    The scan is bucketed by the company's first word, which costs nothing in
+    accuracy: `_company_matches` is a leading-token prefix, so two names that
+    match necessarily share a first token, and names in other buckets could
+    never have matched anyway. Without it the scan is linear in the employers
+    sharing a title and the whole pass is quadratic in them -- 20,000 employers
+    under one title took a minute. Real data peaks at four, but the archive cap
+    is 120,000 records and nothing structurally prevents a common title from
+    drawing a long list.
 
     A known company in a new country is kept and its country remembered against
     the same employer, so a third record with an unresolved country still
     recognises both.
     """
-    employers = seen_titles.setdefault(title, [])
+    # A nameless company cannot reach here -- `_job_identity` withholds the
+    # title -- but an IndexError would take the whole command down, so the
+    # bucket key degrades instead of indexing an empty split.
+    bucket = (company.split() or [""])[0]
+    employers = seen_titles.setdefault(title, {}).setdefault(bucket, [])
     for index, (known_company, countries) in enumerate(employers):
         if not _company_matches(known_company, company):
             continue
@@ -959,9 +971,11 @@ def load_window_jobs(
     #: URL identities. A shared URL is the same posting whatever the location
     #: says, so these stay exact.
     seen_urls: set[str] = set()
-    #: title -> [(company, countries kept under it)]. A list rather than a dict
-    #: because companies are matched by `_company_matches`, not by equality.
-    seen_titles: dict[str, list[tuple[str, set[str | None]]]] = {}
+    #: title -> first company word -> [(company, countries kept under it)].
+    #: Lists rather than a dict of companies because they are matched by
+    #: `_company_matches`, not by equality; bucketed by first word because a
+    #: prefix match always shares one.
+    seen_titles: dict[str, dict[str, list[tuple[str, set[str | None]]]]] = {}
     jobs: list[ArchivedJob] = []
 
     for date_key in dates:
