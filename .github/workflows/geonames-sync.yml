@@ -1,0 +1,132 @@
+name: GeoNames data
+
+# Republishes the GeoNames source files the geo database is built from.
+#
+# data/geonames_raw/ was frozen at whatever was fetched by hand -- two months
+# stale by the time anyone noticed -- and every bot host had to update it
+# itself. This fetches from the canonical export on a schedule and publishes to
+# an orphan `geonames-data` branch that hosts pull from.
+#
+# Why an orphan branch, force-pushed to a single commit: cities500.zip is ~12MB
+# and this runs weekly. Committed to main it would add ~600MB a year to a
+# history everyone clones. A one-commit orphan branch keeps exactly one copy on
+# the remote, and rewriting it costs nothing because nothing builds on it.
+#
+# The .zip is published rather than the 40MB .txt for the same reason -- and
+# because it is the artifact GeoNames actually serves, so republishing it
+# unpacked would mean trusting this workflow's unzip over theirs.
+
+on:
+  schedule:
+    # Weekly, Sundays 04:17 UTC. GeoNames regenerates daily, but the dump grew
+    # 0.6% over two months, so daily runs would republish 12MB to say nothing
+    # changed. The odd minute avoids the top-of-hour spike when GitHub delays
+    # scheduled jobs.
+    - cron: "17 4 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: geonames-sync
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Download the GeoNames export
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -o out/cities500.zip \
+            https://download.geonames.org/export/dump/cities500.zip
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -o out/admin1CodesASCII.txt \
+            https://download.geonames.org/export/dump/admin1CodesASCII.txt
+          ls -l out
+
+      - name: Verify the download before publishing it
+        # A truncated or HTML error page would otherwise be published as data,
+        # and consumers would rebuild geo.db from it -- sqlite would happily
+        # build a database with most of the world missing and no error.
+        run: |
+          set -euo pipefail
+          unzip -p out/cities500.zip cities500.txt > out/cities500.txt
+          lines=$(wc -l < out/cities500.txt)
+          echo "cities500.txt lines: $lines"
+          # The dump has held ~234k rows and grows slowly; anything far below
+          # that is a bad download, not a real shrink.
+          if [ "$lines" -lt 200000 ]; then
+            echo "::error::cities500.txt has only $lines lines - refusing to publish"
+            exit 1
+          fi
+          admin=$(wc -l < out/admin1CodesASCII.txt)
+          echo "admin1CodesASCII.txt lines: $admin"
+          if [ "$admin" -lt 3000 ]; then
+            echo "::error::admin1CodesASCII.txt has only $admin lines - refusing to publish"
+            exit 1
+          fi
+          rm out/cities500.txt
+
+      - name: Build the manifest
+        # Consumers fetch this first: it is a few hundred bytes, so a bot can
+        # check for new data as often as it likes and only pull the 12MB when
+        # a checksum actually changes.
+        run: |
+          set -euo pipefail
+          cd out
+          {
+            echo "{"
+            echo "  \"updated\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
+            echo "  \"source\": \"https://download.geonames.org/export/dump\","
+            echo "  \"files\": {"
+            echo "    \"cities500.zip\": \"$(sha256sum cities500.zip | cut -d' ' -f1)\","
+            echo "    \"admin1CodesASCII.txt\": \"$(sha256sum admin1CodesASCII.txt | cut -d' ' -f1)\""
+            echo "  }"
+            echo "}"
+          } > manifest.json
+          cat manifest.json
+
+      - name: Skip when the data is unchanged
+        id: changed
+        # Republishing identical bytes would still move the branch and make
+        # every consumer re-download. Compare against what is already there.
+        run: |
+          set -euo pipefail
+          new=$(sha256sum out/cities500.zip | cut -d' ' -f1)
+          url="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/geonames-data/manifest.json"
+          old=$(curl -fsSL "$url" 2>/dev/null | grep -o '"cities500.zip": *"[a-f0-9]*"' | grep -o '[a-f0-9]\{64\}' || true)
+          echo "published: ${old:-<none>}"
+          echo "fetched  : $new"
+          if [ "$new" = "$old" ]; then
+            echo "unchanged - nothing to publish"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to the geonames-data branch
+        if: steps.changed.outputs.publish == 'true'
+        # The token goes through the environment, not the command line: a
+        # secret interpolated into `run:` lands in the process arguments, where
+        # a shell trace or a crash dump would carry it.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd out
+          git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q --orphan geonames-data
+          git add cities500.zip admin1CodesASCII.txt manifest.json
+          git commit -q -m "GeoNames export $(date -u +%Y-%m-%d)"
+          git push -q --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            geonames-data
+          echo "published to geonames-data"

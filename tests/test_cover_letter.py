@@ -70,7 +70,7 @@ assert CATALOG is not None
 # material. Mirrors what a real ML-listing selection looks like.
 ML_FLAVOURED_RANKING = [
     next(e.entry_id for e in CATALOG.entries if fragment in e.entry_id)
-    for fragment in ("goopter", "markham", "frontend", "obotz")
+    for fragment in ("goopter", "markham", "mcg3d", "obotz")
 ]
 
 KEYLESS_SETTINGS = GeminiSettings(api_key=None, model="gemini-3.5-flash")
@@ -287,7 +287,10 @@ def test_deterministic_letter_pairs_requirements_with_omitted_facts() -> None:
     points = extract_listing_points(scraped, inventory.keywords)
     paragraphs = deterministic_cover_paragraphs(JOB, scraped, inventory, points)
 
-    assert paragraphs[0].startswith("I am writing to apply")
+    # The opener names what the letter ADDS rather than announcing itself;
+    # "I am writing to apply" is the most-cited cover-letter cliche.
+    assert not paragraphs[0].startswith("I am writing to apply")
+    assert "could not fit" in paragraphs[0]
     assert "Example Co" in paragraphs[0]
     # The embedded-firmware ask must be answered by the hidden embedded entry.
     assert any("Where the posting asks for" in p for p in paragraphs)
@@ -496,3 +499,157 @@ def test_prompt_carries_ownership_scope_rule_and_baseinfo_facts() -> None:
     assert eebot is not None
     assert "full firmware stack" in eebot.extra_facts
     assert "full firmware stack" in prompt
+
+
+def test_prompt_carries_the_candidates_owned_skill_list() -> None:
+    """Recall (2026-08-24): the writer used to see skill_anchors nowhere, so a
+    tool the candidate genuinely owns could only be named if some omitted
+    entry's bullets happened to mention it — the listing's central requirement
+    went unsaid. The audit already refuses to flag these (grounding_audit_prompt
+    takes the same list), so showing them costs no safety."""
+    selection = StructuredSelection(ranking=ML_FLAVOURED_RANKING, keywords=["python"])
+    inventory = build_cover_inventory(CATALOG, selection, "deterministic")
+    scraped = _scraped()
+    identity = parse_candidate_identity(BASEINFO_PATH.read_text(encoding="utf-8"))
+    points = extract_listing_points(scraped, inventory.keywords)
+
+    prompt = build_cover_letter_prompt(JOB, scraped, inventory, identity, points)
+
+    assert inventory.skill_anchors, "fixture profile must declare SKILL ANCHORS"
+    assert "<skills>" + chr(10) in prompt
+    skills_block = prompt.split("<skills>", 1)[1].split("</skills>", 1)[0]
+    for anchor in inventory.skill_anchors:
+        assert anchor in skills_block
+    # Precision half: <job> may supply the role and employer, never a toolset.
+    assert "never the candidate's own toolset" in prompt
+    assert "appears ONLY in <job> must not be claimed" in prompt
+
+
+def test_prompt_omits_the_skills_block_when_the_profile_declares_no_anchors() -> None:
+    """Legacy/untagged profiles carry no SKILL ANCHORS; an empty block would
+    read as "the candidate owns nothing" and suppress truthful mentions."""
+    inventory = build_legacy_inventory("Ernest Choi\n\n- Built a thing in Python.\n")
+    scraped = _scraped()
+    identity = parse_candidate_identity(BASEINFO_PATH.read_text(encoding="utf-8"))
+
+    prompt = build_cover_letter_prompt(JOB, scraped, inventory, identity, ["python"])
+
+    assert inventory.skill_anchors == ()
+    # Rule 1 names the tag; what must be absent is the block itself.
+    assert "<skills>" + chr(10) not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Deterministic-fallback pairing (2026-08-25)
+#
+# 3 of 8 letters in a real run fell through to the deterministic path (Gemini
+# 429s) and it paired unrelated things: a Paid Search posting asking for "SEM,
+# SEO or Digital Media" was answered with a General-Purpose Processor (ALU)
+# bullet, because _best_omitted_match accepted ANY single shared token and the
+# two texts both contain "digital".
+# ---------------------------------------------------------------------------
+
+from services.resumes.cover import (
+    CoverInventory,
+    OmittedEntry,
+    _best_omitted_match,
+    _point_tokens,
+    deterministic_cover_paragraphs,
+)
+
+_ALU = OmittedEntry(
+    title="General-Purpose Processor (ALU)",
+    bullets=[
+        "Applied RTL design practice - timing analysis, modular integration, "
+        "bitwise operations - to build and test digital logic."
+    ],
+)
+
+
+def _inventory(*entries: OmittedEntry) -> CoverInventory:
+    return CoverInventory(
+        omitted=list(entries), visible_titles=[], selection_source="deterministic"
+    )
+
+
+def test_point_tokens_drop_generic_words() -> None:
+    """Overlap on ordinary prose is not evidence of a match."""
+    tokens = _point_tokens("Experience with data and the ability to work with teams")
+    assert "experience" not in tokens
+    assert "ability" not in tokens
+    assert "teams" not in tokens
+
+
+def test_unrelated_requirement_is_not_paired() -> None:
+    """The exact live failure: one shared word ("digital") is not enough."""
+    point = "0-1 years experience in SEM, SEO or Digital Media preferred."
+    assert _best_omitted_match(point, _inventory(_ALU)) is None
+
+
+def test_genuinely_related_requirement_still_pairs() -> None:
+    point = "Experience with RTL design, timing analysis and digital logic verification."
+    match = _best_omitted_match(point, _inventory(_ALU))
+    assert match is not None
+    entry, bullet = match
+    assert entry.title.startswith("General-Purpose Processor")
+    assert "RTL design" in bullet
+
+
+def test_unmatched_points_are_skipped_not_forced(monkeypatch) -> None:
+    """A letter covering fewer requirements beats one asserting a connection
+    the reader can see is not there."""
+    job = JobContext(
+        title="Paid Search Intern",
+        posting_url="https://example.com/job",
+        apply_url="https://example.com/job",
+        source_message="[LinkedIn] Paid Search Intern",
+    )
+    scraped = ScrapedJobPosting(
+        title="Paid Search Intern",
+        company="Example Agency",
+        location="Toronto, ON",
+        description="We need SEM, SEO and Digital Media campaign management.",
+        highlights=[],
+        source_url="https://example.com/job",
+    )
+    paragraphs = deterministic_cover_paragraphs(
+        job,
+        scraped,
+        _inventory(_ALU),
+        ["0-1 years experience in SEM, SEO or Digital Media preferred."],
+    )
+    body = " ".join(paragraphs)
+    # The false pairing is gone: nothing claims the ALU work answers a
+    # SEM/SEO requirement.
+    assert "Where the posting asks for" not in body
+    # Surfacing the material generically is fine and deliberate — the
+    # "Beyond my resume" fallback asserts no relevance it cannot support.
+    if "RTL design practice" in body:
+        assert "Beyond my resume" in body
+
+
+def test_self_regard_openers_are_swapped_not_rejected() -> None:
+    """Every LLM letter in a measured run closed with "I am eager to ...".
+    The closing sentence is otherwise fine, so the phrase is swapped; all of
+    these are followed by an infinitive, so the replacement is grammatically
+    interchangeable."""
+    grounding = "Ernest built pipelines in Python and Kafka for the analytics team."
+    for opener in ("I am eager to", "I am excited to", "I am thrilled to"):
+        text, reason = validate_cover_paragraph(
+            opener + " discuss how this background supports the goals in the posting.",
+            grounding,
+        )
+        assert reason == "" and text is not None, opener
+        assert text.startswith("I would welcome the chance to"), opener
+
+
+def test_self_regard_swap_does_not_touch_ordinary_prose() -> None:
+    """"The team was eager to adopt" is a fact about other people, not a
+    self-assessment — the pattern is anchored to "I am"."""
+    grounding = "Ernest built pipelines in Python and Kafka for the analytics team."
+    original = (
+        "The team was eager to adopt the new pipeline once it proved stable in test."
+    )
+    text, reason = validate_cover_paragraph(original, grounding)
+    assert reason == ""
+    assert text == original

@@ -33,8 +33,10 @@ from .listing import (
 )
 from .structured import (
     StructuredSelection,
+    _build_user_request_block,
     TemplateCatalog,
     extract_json_object,
+    _LISTING_STOPWORDS,
     extract_listing_keywords,
     grounding_audit_prompt,
     load_structured_profile,
@@ -266,6 +268,7 @@ def build_cover_letter_prompt(
     inventory: CoverInventory,
     identity: dict[str, str],
     listing_points: list[str],
+    user_directive: str = "",
 ) -> str:
     omitted_lines: list[str] = []
     for entry in inventory.omitted:
@@ -276,6 +279,29 @@ def build_cover_letter_prompt(
     omitted_text = "\n".join(omitted_lines) or "(nothing was omitted; draw on the resume material)"
     on_resume_text = "\n".join(f"* {title}" for title in inventory.visible_titles) or "(unknown)"
     points_text = "\n".join(f"{i}. {point}" for i, point in enumerate(listing_points, 1)) or "(none parsed)"
+
+    # The candidate's verified toolset. Without this block the writer could
+    # only name a tool that happened to appear in an omitted entry's bullets,
+    # so a listing's central requirement the candidate genuinely owns went
+    # unmentioned — while rule 1's inclusion of <job> as a fact source let it
+    # claim tools that existed only in the posting. Both directions are fixed
+    # here: the owned list is shown, and rule 9 scopes what <job> may supply.
+    # This is the same list the grounding audit refuses to flag
+    # (_audit_cover_paragraphs -> grounding_audit_prompt), so anything the
+    # writer takes from it survives the audit instead of being cut.
+    skills_section = (
+        "<skills>\n"
+        "Tools, languages, and systems the candidate genuinely has. Naming any\n"
+        "of these is always truthful; prefer the ones this listing asks for.\n"
+        f"{', '.join(inventory.skill_anchors)}\n"
+        "</skills>\n\n"
+        if inventory.skill_anchors
+        else ""
+    )
+
+    # Free-form ``(...)`` steer from the command. Rule 1 below still owns
+    # truth, so this can reorder and reframe but never widen what may be said.
+    directive_section = _build_user_request_block(user_directive, "<rules>")
 
     return (
         "<task>\n"
@@ -297,12 +323,14 @@ def build_cover_letter_prompt(
         "<on_resume>\n"
         f"{on_resume_text}\n"
         "</on_resume>\n\n"
+        f"{skills_section}"
         "<candidate>\n"
         f"Name: {identity.get('name') or 'The candidate'}\n"
         f"{inventory.profile_facts}\n"
         "</candidate>\n\n"
+        f"{directive_section}"
         "<rules>\n"
-        "1. Use ONLY facts present in <omitted>, <on_resume>, <candidate>, or <job>. Never invent employers, tools, metrics, certifications, or dates.\n"
+        "1. Use ONLY facts present in <omitted>, <on_resume>, <candidate>, <skills>, or <job>. Never invent employers, tools, metrics, certifications, or dates.\n"
         "2. Every number you write must appear verbatim in the provided material.\n"
         "3. Plain text only: no LaTeX, HTML, markdown, bullet lists, or headings.\n"
         f"4. {MIN_BODY_PARAGRAPHS}-{MAX_BODY_PARAGRAPHS} body paragraphs, 50-110 words each. Do NOT write a greeting or sign-off; those are added separately.\n"
@@ -310,6 +338,7 @@ def build_cover_letter_prompt(
         "6. Organize by the listing's own priorities: cover the highest-numbered-relevance requirements first, using the listing's vocabulary as plain text. Work the listing's own terminology into every paragraph where it truthfully applies to the candidate's material.\n"
         "7. Specific and factual; no clichés (passionate, team player, fast learner), no filler.\n"
         "8. Where the material states ownership or scope (sole developer, team size, user base, live operation), open the relevant paragraph with that framing — scope and ownership before tool names. Never claim leadership or solo credit the material does not state.\n"
+        "9. SKILLS. A tool, language, platform, or certification may be named as the candidate's own ONLY if it appears in <skills>, <omitted>, <on_resume>, or <candidate>. <job> supplies the role, company, and what the employer wants — never the candidate's own toolset, so a technology that appears ONLY in <job> must not be claimed. In the other direction, do not leave a <skills> item unsaid when the listing asks for it and the candidate's material shows where it was used: name it, in the listing's own wording where that wording is accurate.\n"
         "</rules>\n\n"
         "<output_format>\n"
         'Return ONLY a JSON object: {"body_paragraphs": ["...", "..."], "closing_sentence": "..."}\n'
@@ -405,6 +434,17 @@ def _audit_cover_paragraphs(
     return set(), []
 
 
+#: Self-regard openers that assert enthusiasm instead of evidence. Every LLM
+#: letter in a measured run closed with "I am eager to ...", once each. Swapped
+#: rather than rejected: the closing sentence is otherwise fine, and all of
+#: these are followed by an infinitive, so the replacement is grammatically
+#: interchangeable and cannot mangle the sentence.
+_SELF_REGARD_SWAPS = re.compile(
+    r"\bI\s+am\s+(?:eager|excited|thrilled|keen|delighted)\s+to\b", re.IGNORECASE
+)
+_SELF_REGARD_REPLACEMENT = "I would welcome the chance to"
+
+
 def validate_cover_paragraph(
     text: str,
     grounding: str,
@@ -417,6 +457,7 @@ def validate_cover_paragraph(
     pipeline uses, run once over all surviving paragraphs together.
     """
     candidate = re.sub(r"\s+", " ", str(text or "")).strip()
+    candidate = _SELF_REGARD_SWAPS.sub(_SELF_REGARD_REPLACEMENT, candidate)
     if not candidate or len(candidate) < 40:
         return None, "too short"
     if len(candidate) > MAX_PARAGRAPH_CHARS:
@@ -436,19 +477,39 @@ def validate_cover_paragraph(
     return candidate, ""
 
 
+#: Minimum distinctive words shared before a requirement and a resume bullet
+#: are claimed to answer each other. One was enough before, and one generic
+#: word is all it takes: a Paid Search posting asking for "SEM, SEO or Digital
+#: Media" was paired with a General-Purpose Processor (ALU) bullet because both
+#: contain "digital". A letter that pairs unrelated things reads worse than one
+#: that says less.
+MIN_POINT_OVERLAP = 2
+
+
 def _point_tokens(text: str) -> set[str]:
-    return {token for token in re.findall(r"[a-z0-9+#.]{3,}", text.lower())}
+    """Distinctive words only — generic prose carries no evidence of a match."""
+    return {
+        token
+        for token in re.findall(r"[a-z0-9+#.]{3,}", text.lower())
+        if token not in _LISTING_STOPWORDS and not token.isdigit()
+    }
 
 
 def _best_omitted_match(point: str, inventory: CoverInventory) -> tuple[OmittedEntry, str] | None:
-    """The omitted bullet with the strongest token overlap against a listing
-    requirement; None when nothing overlaps at all."""
+    """The omitted bullet that genuinely answers a listing requirement, or None.
+
+    Returning None is a good outcome: the caller skips the point, and the
+    letter covers fewer requirements rather than asserting a connection the
+    reader can see is not there.
+    """
     point_tokens = _point_tokens(point)
+    if len(point_tokens) < MIN_POINT_OVERLAP:
+        return None
     best: tuple[int, OmittedEntry, str] | None = None
     for entry in inventory.omitted:
         for bullet in entry.bullets:
             overlap = len(point_tokens & _point_tokens(f"{entry.title} {bullet}"))
-            if overlap and (best is None or overlap > best[0]):
+            if overlap >= MIN_POINT_OVERLAP and (best is None or overlap > best[0]):
                 best = (overlap, entry, bullet)
     if best is None:
         return None
@@ -470,9 +531,12 @@ def deterministic_cover_paragraphs(
 
     paragraphs = [
         (
-            f"I am writing to apply for the {job.title} position at {company}. "
-            f"Alongside the attached resume, I want to address the posting's requirements directly, "
-            f"including experience the one-page format could not accommodate, particularly {focus}."
+            # "I am writing to apply for" is the most-cited cover-letter
+            # cliche there is, and it was hardcoded into every letter this
+            # fallback produced. Opening on what the letter ADDS costs the
+            # same number of words and says something.
+            f"The attached resume covers one page; this letter adds the {focus} "
+            f"work it could not fit, against the {job.title} posting at {company}."
         )
     ]
 
@@ -574,6 +638,8 @@ def generate_cover_letter(
     baseinfo_path: Path,
     scraper: Callable[[str], ScrapedJobPosting] | None = None,
     client_factory: Callable[[str], Any] | None = None,
+    user_directive: str = "",
+    allowance: Any = None,
 ) -> CoverLetterResult:
     scrape = scraper or scrape_job_posting
     try:
@@ -600,7 +666,9 @@ def generate_cover_letter(
         inventory.keywords = extract_listing_keywords(job_text, ())
 
     listing_points = extract_listing_points(scraped_job, inventory.keywords)
-    prompt = build_cover_letter_prompt(job, scraped_job, inventory, identity, listing_points)
+    prompt = build_cover_letter_prompt(
+        job, scraped_job, inventory, identity, listing_points, user_directive
+    )
     grounding = _grounding_text(inventory, scraped_job, identity)
     candidate_grounding = _candidate_grounding_text(inventory, identity)
 
@@ -643,7 +711,10 @@ def generate_cover_letter(
         closing_index = len(audit_input) if closing_sentence else None
         if closing_sentence:
             audit_input.append(closing_sentence)
-        if audit_input:
+        # The paragraph audit is an extra model call, so a reduced quota share
+        # drops it the same way the resume pipeline drops its own audits. The
+        # deterministic grounding checks around it still run.
+        if audit_input and (allowance is None or allowance.permits("grounding_audit")):
             flagged, audit_reasons = _audit_cover_paragraphs(
                 settings, audit_input, candidate_grounding, inventory.skill_anchors, client_factory
             )

@@ -17,6 +17,7 @@ never become a source of circular imports between them.
 JOB_SCRAPE = "job_scrape"
 SEMANTIC_FILTER = "semantic_filter"
 ATS_SCRAPE = "ats_scrape"
+GEONAMES_SYNC = "geonames_sync"
 REDDIT_SCRAPE = "reddit_scrape"
 
 # -- Resume commands --
@@ -37,9 +38,11 @@ RESUME_COVER_REWRITE = "resume_cover_rewrite"
 RESUME_COVER_COMPILE_LATEX = "resume_cover_compile_latex"
 
 # -- Job-board test/debug commands --
-JOBBANK_TEST_SCRAPE = "jobbank_test_scrape"
 JOB_PIPELINE_TEST_SCRAPE = "job_pipeline_test_scrape"
 JOB_PIPELINE_TEST_SEMANTIC_FILTER = "job_pipeline_test_semantic_filter"
+
+# -- Archive ranking --
+BEST_JOBS_RANK = "best_jobs_rank"
 
 # -- .scrape command --
 SCRAPE_COMMAND_JOBSITE = "scrape_command_jobsite"

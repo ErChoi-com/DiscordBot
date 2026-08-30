@@ -239,3 +239,48 @@ def resolve_glassdoor_location(
         pass
 
     return ("0", "C")
+
+
+#: How much bigger the top city match must be than the runner-up before its
+#: country is trusted. "London" is 21x London, Ontario and resolves to GB;
+#: a city name whose two largest claimants are comparable resolves to nothing,
+#: because a wrong country is worse than an unknown one -- unknown still merges
+#: duplicates, wrong splits them apart.
+_CITY_DOMINANCE = 3.0
+
+_country_lock = threading.Lock()
+_country_conn: sqlite3.Connection | None = None
+
+
+def country_for_city(city: str, db_path: Path = GEO_DB_PATH) -> str | None:
+    """ISO country code for a bare city name, or None when it is not decisive.
+
+    For locations that name only a city -- "Basingstoke", "Dublin", "New York"
+    -- which the string parser cannot place because they carry no country or
+    admin token. Picks the most populous claimant, and only when it dominates
+    the runner-up by `_CITY_DOMINANCE`.
+    """
+    global _country_conn
+
+    key = (city or "").strip().lower()
+    if not key:
+        return None
+    try:
+        with _country_lock:
+            if _country_conn is None:
+                if not db_path.exists():
+                    return None
+                _country_conn = _open(db_path)
+            rows = _country_conn.execute(
+                "SELECT country, population FROM locations WHERE city_norm = ? "
+                "ORDER BY population DESC LIMIT 2",
+                (key,),
+            ).fetchall()
+    except Exception:  # a geo-db problem must not take a caller down
+        return None
+
+    if not rows:
+        return None
+    if len(rows) > 1 and rows[1][1] and rows[0][1] < rows[1][1] * _CITY_DOMINANCE:
+        return None
+    return rows[0][0] or None

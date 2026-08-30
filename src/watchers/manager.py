@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import math
+import os
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TypeVar
@@ -26,6 +29,37 @@ def _safe_float(value: Any, default: float) -> float:
         return result if math.isfinite(result) else default
     except (TypeError, ValueError):
         return default
+
+
+def _sync_geonames() -> bool:
+    """Refresh data/geonames_raw and rebuild geo.db when new data is published.
+
+    A no-op on the vast majority of runs: the script compares the published
+    manifest against the local one and exits immediately when they match.
+
+    Off when GEONAMES_AUTO_SYNC is set to 0/false -- a host on a metered link,
+    or one that manages data/ itself, should be able to opt out. Never raises:
+    stale geo data degrades location matching, it does not break the scrape,
+    and this must not be able to kill the loop that calls it.
+    """
+    if os.environ.get("GEONAMES_AUTO_SYNC", "1").strip().lower() in {"0", "false", "no"}:
+        return False
+    script = Path(__file__).resolve().parents[2] / "sync_geonames.py"
+    if not script.exists():
+        return False
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script)],
+            capture_output=True, text=True, timeout=900,
+        )
+    except Exception as exc:
+        print(f"[geonames-sync] skipped: {exc}")
+        return False
+    # The script prefixes its own lines, so echo the last one verbatim.
+    tail = (result.stdout or result.stderr or "").strip().splitlines()
+    if tail:
+        print(tail[-1])
+    return result.returncode == 0
 
 
 class WatcherManager:
@@ -685,6 +719,18 @@ class WatcherManager:
                 # network push, so it goes to a thread rather than the loop.
                 await self._tracked_to_thread(
                     commit_archives_daily, label=scheduler_labels.ATS_SCRAPE
+                )
+
+                # Pick up republished GeoNames data. Checked every scrape
+                # cycle rather than daily because the check itself is a few
+                # hundred bytes of manifest -- the 12MB archive is only
+                # fetched when a checksum actually moves, which the publishing
+                # workflow does about weekly. Subprocess rather than an import
+                # because the sync lives in scripts/, which is not on the
+                # package path, and a geo.db rebuild in-process would hold the
+                # GIL for several seconds.
+                await self._tracked_to_thread(
+                    _sync_geonames, label=scheduler_labels.GEONAMES_SYNC
                 )
             except Exception as exc:
                 print(f"[ats-scrape] Scrape cycle error: {exc}")

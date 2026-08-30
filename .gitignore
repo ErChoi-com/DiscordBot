@@ -123,6 +123,13 @@ models/**/*.gguf
 # Nested ATS company list repo (has its own git history)
 data/ats_companies/
 
+# GeoNames sources. Published weekly to the `geonames-data` branch by
+# .github/workflows/geonames-sync.yml and pulled by sync_geonames.py,
+# so main does not carry them -- cities500.txt is 40MB and would otherwise add
+# that to history on every refresh. Untrack an existing checkout with:
+#   git rm --cached data/geonames_raw/cities500.txt data/geonames_raw/admin1CodesASCII.txt
+data/geonames_raw/
+
 # Large archives / dataset dumps
 *.zip
 # Allow job archive zips -- weekly and consolidated monthly alike. The bot
@@ -140,3 +147,10 @@ data/ats_companies/
 data/jba/jobs/archive_index.db
 data/jba/jobs/archive_index.db-shm
 data/jba/jobs/archive_index.db-wal
+
+# Resume-quality lab: harness, frozen JD corpus, scored build outputs and PDFs.
+# Contains scraped posting text and generated resumes — working data, not source.
+.resume_lab/
+
+# ATS validation run reports (baseline in data/ats_baseline.json is tracked)
+.ats_validation/
