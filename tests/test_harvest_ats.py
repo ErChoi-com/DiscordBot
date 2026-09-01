@@ -1006,3 +1006,70 @@ def test_paylocity_has_explicit_collapse_depths():
     depths = hc.wayback_collapse_depths(query)
     # Must clear "com,paylocity,recruiting)/recruiting/jobs/all/".
     assert min(depths) >= 46, depths
+
+
+# --------------------------------------------------------------------------
+# Retroactive prune
+# --------------------------------------------------------------------------
+
+def test_prune_rewrites_rather_than_drops_when_rules_changed(tmp_path):
+    """Harvest output is cumulative and published, so a slug written by an
+    older revision of the filters stays forever. "al-" predates trailing
+    punctuation being trimmed; a fresh harvest of the same capture now yields
+    "al", so prune should converge on that rather than discard the company.
+    """
+    hc.write_slugs(tmp_path / "lever.json", {"acme", "al-", "beta"})
+    report = hc.prune_existing(tmp_path, [hc.PLATFORM_BY_NAME["lever"]],
+                               log=lambda m: None)
+    kept = hc.load_existing(tmp_path / "lever.json")
+    assert kept == {"acme", "al", "beta"}
+    assert report["lever"]["rewritten"] == 1
+    assert report["lever"]["dropped"] == 0
+
+
+def test_prune_drops_what_the_rules_now_reject(tmp_path):
+    hc.write_slugs(tmp_path / "workday.json",
+                   {"acme|wd1|careers", "acme|wd1|assets", "acme|wd1|ads.txt"})
+    hc.prune_existing(tmp_path, [hc.PLATFORM_BY_NAME["workday"]],
+                      log=lambda m: None)
+    assert hc.load_existing(tmp_path / "workday.json") == {"acme|wd1|careers"}
+
+
+def test_prune_never_removes_what_a_fresh_harvest_would_keep(tmp_path):
+    """The safety property: pruning uses the same extractor as harvesting, so
+    it cannot disagree with it."""
+    good = {"acme", "10up-2", "affinity.co", "harrison&star", "0x"}
+    hc.write_slugs(tmp_path / "greenhouse.json", good)
+    hc.prune_existing(tmp_path, [hc.PLATFORM_BY_NAME["greenhouse"]],
+                      log=lambda m: None)
+    assert hc.load_existing(tmp_path / "greenhouse.json") == good
+
+
+def test_prune_leaves_a_clean_file_untouched(tmp_path):
+    path = tmp_path / "bamboohr.json"
+    hc.write_slugs(path, {"acme", "beta"})
+    stamp = path.read_bytes()
+    hc.prune_existing(tmp_path, [hc.PLATFORM_BY_NAME["bamboohr"]],
+                      log=lambda m: None)
+    assert path.read_bytes() == stamp
+
+
+def test_prune_ignores_absent_files(tmp_path):
+    assert hc.prune_existing(tmp_path, list(hc.PLATFORMS), log=lambda m: None) == {}
+
+
+def test_prune_covers_every_platform():
+    """A platform with no identifier probe would silently pass everything."""
+    for platform in hc.PLATFORMS:
+        assert platform.name in hc._IDENTIFIER_PROBES, platform.name
+
+
+def test_prune_is_offline(tmp_path, monkeypatch):
+    """Pruning must never touch an index -- it is a rules replay, and liveness
+    is the dead-slug machinery's business, not its own."""
+    def explode(url):
+        raise AssertionError("prune made a network request")
+
+    monkeypatch.setattr(hc, "_http_get", explode)
+    hc.write_slugs(tmp_path / "lever.json", {"acme", "al-"})
+    hc.prune_existing(tmp_path, [hc.PLATFORM_BY_NAME["lever"]], log=lambda m: None)

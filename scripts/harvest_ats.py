@@ -941,6 +941,101 @@ def write_slugs(path: Path, slugs: Iterable[str]) -> None:
     tmp.replace(path)
 
 
+def prune_existing(out_dir: Path, platforms: Iterable[Platform], *,
+                   log: Callable[[str], None] = print) -> dict[str, dict[str, int]]:
+    """Re-apply the current extraction rules to already-harvested files.
+
+    Harvest output is cumulative and published, so a slug written by an older
+    revision of the filters stays there forever. Every tightening since the
+    first sweep -- Workday asset paths, root.<uuid> debris, version strings,
+    numbered infrastructure hosts -- had to be applied to the existing files by
+    hand, which is both easy to forget and impossible to review.
+
+    The check is the same one extraction uses, so pruning can never remove a
+    slug a fresh harvest would keep. It runs offline: no index, no probing.
+    Liveness is not its business -- a dead company is still a company, and the
+    dead-slug machinery owns that decision.
+    """
+    report: dict[str, dict[str, int]] = {}
+    for platform in platforms:
+        path = out_dir / f"{platform.name}.json"
+        before = load_existing(path)
+        if not before:
+            continue
+        kept: set[str] = set()
+        dropped: set[str] = set()
+        rewritten: dict[str, str] = {}
+        for slug in before:
+            current = _current_identifier(platform, slug)
+            if current is None:
+                dropped.add(slug)
+            elif current == slug:
+                kept.add(slug)
+            else:
+                # The current rules would produce a different identifier from
+                # the same URL -- "al-" became "al" once trailing punctuation
+                # started being trimmed. Converging on it beats dropping: that
+                # is what a fresh harvest of the same capture yields.
+                rewritten[slug] = current
+                kept.add(current)
+        report[platform.name] = {
+            "before": len(before), "kept": len(kept), "dropped": len(dropped),
+            "rewritten": len(rewritten),
+            "examples": sorted(dropped)[:5],
+        }
+        if dropped or rewritten:
+            detail = []
+            if dropped:
+                detail.append(f"dropped {len(dropped)}: "
+                              f"{', '.join(sorted(dropped)[:4])}")
+            if rewritten:
+                pairs = list(sorted(rewritten.items()))[:3]
+                detail.append("rewrote " + str(len(rewritten)) + ": "
+                              + ", ".join(f"{a}->{b}" for a, b in pairs))
+            log(f"[prune] {platform.name}: {len(before)} -> {len(kept)} "
+                f"({'; '.join(detail)})")
+            write_slugs(path, kept)
+        else:
+            log(f"[prune] {platform.name}: {len(before)} clean")
+    return report
+
+
+def _current_identifier(platform: Platform, slug: str) -> str | None:
+    """What the current extractor makes of a stored identifier, or None.
+
+    Rebuilding a representative URL and re-extracting is the only check that
+    stays honest as the rules change -- re-implementing them here would let the
+    two drift apart, which is exactly the bug this exists to prevent.
+    """
+    probe = _IDENTIFIER_PROBES.get(platform.name)
+    if probe is None:
+        return slug
+    url = probe(slug)
+    if url is None:
+        return None
+    return platform.extract(url)
+
+
+def _workday_probe_url(slug: str) -> str | None:
+    parts = slug.split("|")
+    if len(parts) != 3:
+        return None
+    tenant, host, site = parts
+    return f"https://{tenant}.{host}.myworkdayjobs.com/en-US/{site}/job/x"
+
+
+_IDENTIFIER_PROBES: dict[str, Callable[[str], str | None]] = {
+    "greenhouse": lambda s: f"https://job-boards.greenhouse.io/{s}/jobs/1",
+    "lever": lambda s: f"https://jobs.lever.co/{s}/abc",
+    "ashby": lambda s: f"https://jobs.ashbyhq.com/{s}/abc",
+    "icims": lambda s: f"https://{s}.icims.com/jobs/1",
+    "bamboohr": lambda s: f"https://{s}.bamboohr.com/careers/list",
+    "workday": _workday_probe_url,
+    "paylocity": lambda s: (
+        f"https://recruiting.paylocity.com/recruiting/jobs/All/{s}/X"),
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--crawl", action="append", dest="crawls_explicit",
@@ -958,6 +1053,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true",
                         help="harvest and report, write nothing")
     parser.add_argument("--json", action="store_true", help="summary as JSON to stdout")
+    parser.add_argument("--prune", action="store_true",
+                        help="re-apply current extraction rules to the existing "
+                             "harvest files and exit; makes filter fixes "
+                             "retroactive. Offline, no probing.")
     parser.add_argument("--index", action="append", dest="indexes",
                         choices=["commoncrawl", "wayback"],
                         help="which archive(s) to sweep (repeatable; "
@@ -973,6 +1072,14 @@ def main(argv: list[str] | None = None) -> int:
     log: Callable[[str], None] = (
         (lambda msg: print(msg, file=sys.stderr)) if args.json else print
     )
+
+    selected = [PLATFORM_BY_NAME[n] for n in args.platforms] if args.platforms         else list(PLATFORMS)
+
+    if args.prune:
+        report = prune_existing(args.out, selected, log=log)
+        if args.json:
+            print(json.dumps({"pruned": report}, indent=2))
+        return 0
 
     crawls: list[str] = []
     if "commoncrawl" in indexes:

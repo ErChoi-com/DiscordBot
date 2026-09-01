@@ -114,6 +114,20 @@ jobs:
             echo "no ats-harvest branch yet - first run"
           fi
 
+      - name: Re-apply current rules to the seeded harvest
+        # Harvest output is cumulative and published, so a slug written by an
+        # older revision of the extraction rules survives forever unless
+        # something replays them. Every tightening so far -- Workday asset
+        # paths, root.<uuid> debris, version strings, numbered infrastructure
+        # hosts, trailing punctuation -- had to be applied to the existing
+        # files by hand. This makes those fixes retroactive automatically.
+        #
+        # Offline and idempotent: it replays the same extractor used to
+        # harvest, so it cannot remove anything a fresh sweep would keep.
+        run: |
+          set -euo pipefail
+          python scripts/harvest_ats.py --prune --out data/ats_harvest
+
       - name: Collect
         # Inputs reach the shell as environment variables rather than being
         # interpolated into the script text: a ${{ }} expansion is pasted in
