@@ -221,7 +221,7 @@ jobs:
           # freshly harvested slugs, so 5% sits comfortably below anything real
           # while still catching an endpoint that broke entirely.
           MIN_LIVE_RATE = 5.0
-          # Below this many probes the rate is noise, not signal.
+          # Below this many *definitive* answers the rate is noise, not signal.
           MIN_SAMPLE = 50
 
           platforms = json.load(open("validate.json")).get("platforms", {})
@@ -236,12 +236,21 @@ jobs:
               rate = d.get("live_rate", 0.0)
               print(f"{name:11} probed={probed:6} live={live:6} dead={dead:6} "
                     f"unknown={unknown:5} live_rate={rate:5.1f}%")
-              if probed >= MIN_SAMPLE and rate < MIN_LIVE_RATE:
+              # Measure over answers, not attempts. A platform that was simply
+              # unreachable has live == dead == 0, which reads as a 0% live
+              # rate while telling us nothing at all -- failing on that would
+              # let a transient outage break the weekly run and block the
+              # collection half from publishing too. It changed no marks, so
+              # there is nothing unsafe to publish; warn instead.
+              decided = live + dead
+              if decided >= MIN_SAMPLE and rate < MIN_LIVE_RATE:
                   failed.append(f"{name}: live rate {rate}% below {MIN_LIVE_RATE}%")
-              # Everything timing out means we learned nothing. Publishing the
-              # unchanged map is fine, but it should be visible.
               if probed and unknown == probed:
-                  print(f"::warning::{name}: every probe was unreachable")
+                  print(f"::warning::{name}: every probe was unreachable - "
+                        "no marks changed")
+              elif probed and decided < MIN_SAMPLE:
+                  print(f"::warning::{name}: only {decided} definitive answers "
+                        f"from {probed} probes - live rate not checked")
 
           if failed:
               print("::error::validation looks broken: " + "; ".join(failed))
