@@ -48,6 +48,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Iterable
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import harvest_ats as _harvest  # noqa: E402  (same directory)
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = REPO_ROOT / "data"
 COMPANY_DIR = DATA_DIR / "ats_companies"
@@ -403,6 +406,36 @@ def select_targets(platform: str, dead: dict[str, str], *, recheck_dead: bool,
     return ordered
 
 
+def partition_unscrapeable(platform: str, slugs: Iterable[str]) -> tuple[list[str], list[str]]:
+    """Split slugs into (unscrapeable, worth probing).
+
+    Some identifiers cannot correspond to a board whatever the network says.
+    The clearest case is a Workday host label in the tenant slot -- wd1|wd1|
+    careers would have to resolve wd1.wd1.myworkdayjobs.com, which does not
+    exist -- and upstream ships 6,068 of those, 47% of its Workday list.
+    Spending a request to discover that is waste twice over: once here, and
+    again in the bot for every scrape cycle until a mark lands.
+
+    The test is the harvester's own: would its extractor produce this
+    identifier? Reusing it rather than restating the rules keeps the two from
+    drifting, and it is deliberately conservative -- an identifier the
+    extractor would merely *normalise* (iCIMS "careers-2u" -> "2u", 3,255 of
+    them) is left alone, because ats_service probes both host forms and those
+    boards are reachable.
+    """
+    plat = _harvest.PLATFORM_BY_NAME.get(platform)
+    if plat is None:
+        return [], list(slugs)
+    unscrapeable: list[str] = []
+    probe_me: list[str] = []
+    for slug in slugs:
+        if _harvest._current_identifier(plat, slug) is None:
+            unscrapeable.append(slug)
+        else:
+            probe_me.append(slug)
+    return unscrapeable, probe_me
+
+
 def validate_platform(platform: str, slugs: Iterable[str], *,
                       probe: Callable[[str], bool] | None = None,
                       workers: int | None = None,
@@ -596,10 +629,27 @@ def main(argv: list[str] | None = None) -> int:
                 save_dead(platform, fresh)
             continue
 
+        # Retire the structurally impossible without asking the network. These
+        # cost a request here and one per scrape cycle in the bot until a mark
+        # lands, for an answer their shape already gives.
+        unscrapeable, targets = partition_unscrapeable(platform, targets)
+        if unscrapeable:
+            log(f"[validate] {platform}: {len(unscrapeable)} unscrapeable by "
+                "shape, marked without probing")
+
         result = validate_platform(
             platform, targets, workers=args.workers,
             budget_seconds=args.budget_seconds or None, log=log)
+        # Marked, but deliberately kept out of the live/dead counts. The rate
+        # those feed is what the CI gate reads to detect an endpoint that broke,
+        # and it should measure what the network said. Folding in 6,068 Workday
+        # entries that were never asked would drive that platform's rate toward
+        # zero on the first run and fail the build for a cleanup.
+        result["_dead"] = list(result["_dead"]) + unscrapeable
+        result["unscrapeable"] = len(unscrapeable)
         if result["probed"] and result["unknown"] < result["probed"]:
+            any_probed = True
+        elif unscrapeable:
             any_probed = True
         if args.dry_run:
             changes = apply_results(dict(dead_map), result, today)

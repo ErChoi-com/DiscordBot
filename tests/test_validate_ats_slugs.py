@@ -574,3 +574,55 @@ def test_unchecked_still_outrank_stale_dead_marks(tmp_path, monkeypatch):
     targets = v.select_targets("lever", v.load_dead("lever"), recheck_dead=False,
                                limit=1, sample=None, today=TODAY)
     assert targets == ["fresh"]
+
+
+# --------------------------------------------------------------------------
+# Structurally unscrapeable identifiers
+# --------------------------------------------------------------------------
+
+def test_impossible_identifiers_are_not_probed():
+    """wd1|wd1|careers would have to resolve wd1.wd1.myworkdayjobs.com, which
+    does not exist. Upstream ships 6,068 of that shape -- 47% of its Workday
+    list -- and each costs a request here and one per scrape cycle in the bot
+    until a mark lands."""
+    bad, keep = v.partition_unscrapeable(
+        "workday", ["wd1|wd1|careers", "acme|wd1|external", "alcon|wd5|job"])
+    assert bad == ["wd1|wd1|careers", "alcon|wd5|job"]
+    assert keep == ["acme|wd1|external"]
+
+
+def test_normalizable_identifiers_are_still_probed():
+    """The conservative half. iCIMS "careers-2u" is not broken -- the extractor
+    would merely rewrite it to "2u", and ats_service probes both host forms, so
+    the board is reachable. Treating 3,255 of those as impossible would retire
+    live companies."""
+    bad, keep = v.partition_unscrapeable("icims", ["careers-2u", "theharrispoll"])
+    assert bad == []
+    assert keep == ["careers-2u", "theharrispoll"]
+
+
+def test_unknown_platform_partitions_nothing():
+    bad, keep = v.partition_unscrapeable("nosuchplatform", ["a", "b"])
+    assert bad == [] and keep == ["a", "b"]
+
+
+def test_unscrapeable_slugs_are_marked_dead(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch, "workday", ["wd1|wd1|careers", "acme|wd1|external"])
+    monkeypatch.setitem(v.PROBES, "workday", lambda s: True)
+    assert v.main(["--platform", "workday"]) == 0
+    dead = v.load_dead("workday")
+    assert "wd1|wd1|careers" in dead
+    assert "acme|wd1|external" not in dead
+
+
+def test_unscrapeable_slugs_stay_out_of_the_live_rate(tmp_path, monkeypatch, capsys):
+    """The rate feeds the CI gate that detects a broken endpoint, so it has to
+    measure what the network said. Folding in entries that were never asked
+    would drive Workday's rate to near zero on the first run and fail the build
+    for a cleanup."""
+    _seed(tmp_path, monkeypatch, "workday",
+          ["wd1|wd1|careers", "wd3|wd1|x", "acme|wd1|external"])
+    monkeypatch.setitem(v.PROBES, "workday", lambda s: True)
+    v.main(["--platform", "workday"])
+    out = capsys.readouterr().out
+    assert "live rate 100.0%" in out
