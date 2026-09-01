@@ -626,3 +626,39 @@ def test_unscrapeable_slugs_stay_out_of_the_live_rate(tmp_path, monkeypatch, cap
     v.main(["--platform", "workday"])
     out = capsys.readouterr().out
     assert "live rate 100.0%" in out
+
+
+# --------------------------------------------------------------------------
+# Concurrency lock
+# --------------------------------------------------------------------------
+
+def test_a_second_validation_run_is_refused(tmp_path, monkeypatch):
+    """Two runs both read the dead map, probe for minutes, then write back.
+
+    save_dead_merged re-reads immediately before writing, which narrows the
+    window to a single write, but narrowing a race is not closing it. The
+    harvester learned this the hard way when four sweeps ran at once.
+    """
+    _seed(tmp_path, monkeypatch, "lever", ["a"])
+    monkeypatch.setitem(v.PROBES, "lever", lambda s: True)
+    dead_dir = tmp_path / "dead_slugs"
+    (dead_dir / v._harvest.LOCK_NAME).write_text("99999")
+    assert v.main(["--platform", "lever"]) == 2
+
+
+def test_a_dry_run_takes_no_lock(tmp_path, monkeypatch):
+    """It writes nothing, so it has nothing to serialise against -- and being
+    blocked from measuring because a real run is in progress would be
+    gratuitous."""
+    _seed(tmp_path, monkeypatch, "lever", ["a"])
+    monkeypatch.setitem(v.PROBES, "lever", lambda s: True)
+    dead_dir = tmp_path / "dead_slugs"
+    (dead_dir / v._harvest.LOCK_NAME).write_text("99999")
+    assert v.main(["--platform", "lever", "--dry-run"]) == 0
+
+
+def test_lock_is_released_after_a_normal_run(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch, "lever", ["a"])
+    monkeypatch.setitem(v.PROBES, "lever", lambda s: True)
+    assert v.main(["--platform", "lever"]) == 0
+    assert not (tmp_path / "dead_slugs" / v._harvest.LOCK_NAME).exists()

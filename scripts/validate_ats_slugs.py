@@ -35,6 +35,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import json
 import os
@@ -600,6 +601,30 @@ def main(argv: list[str] | None = None) -> int:
     log: Callable[[str], None] = (
         (lambda m: print(m, file=sys.stderr)) if args.json else print
     )
+
+    # Same exclusion the harvester takes, for the same reason. Two validation
+    # runs both read the dead map, probe for minutes, and write back; the later
+    # writer loses whatever the earlier recorded in between. save_dead_merged
+    # re-reads immediately before writing, which narrows that to the width of a
+    # single write, but narrowing a race is not closing it -- and a dry run
+    # takes no lock at all, since it writes nothing.
+    if args.dry_run:
+        lock_ctx = contextlib.nullcontext()
+    else:
+        try:
+            lock_ctx = _harvest.output_lock(DEAD_DIR)
+            lock_ctx.__enter__()
+        except _harvest.HarvestLocked as exc:
+            print(f"[validate] {exc}", file=sys.stderr)
+            return 2
+    try:
+        return _run(args, log, lock_ctx)
+    finally:
+        if not args.dry_run:
+            lock_ctx.__exit__(None, None, None)
+
+
+def _run(args, log: Callable[[str], None], _lock) -> int:
     today = _dt.date.today()
     platforms = args.platforms or list(PLATFORMS)
     summary: dict[str, dict] = {}
