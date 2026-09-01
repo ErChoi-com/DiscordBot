@@ -605,9 +605,19 @@ def test_lever_is_wayback_only_in_practice():
     assert "jobs.lever.co/*" in hc.WAYBACK_QUERIES["lever"]
 
 
-def test_every_platform_has_a_wayback_query():
+def test_every_platform_has_a_wayback_query_except_icims():
+    """iCIMS is deliberately empty: Wayback sorts "com,icims)" (the www
+    marketing site) ahead of every "com,icims,<tenant>)", so a wildcard sweep
+    pages through tens of thousands of www asset URLs and stalls before
+    reaching a tenant. A real run harvested 856 entries and 0 new companies.
+    Common Crawl covers the platform, so the query only burned time."""
     for platform in hc.PLATFORMS:
-        assert hc.WAYBACK_QUERIES.get(platform.name), platform.name
+        queries = hc.WAYBACK_QUERIES.get(platform.name)
+        assert queries is not None, platform.name
+        if platform.name == "icims":
+            assert queries == ()
+        else:
+            assert queries, platform.name
 
 
 def test_wayback_query_stops_when_its_time_budget_is_spent():
@@ -858,3 +868,28 @@ def test_ashby_root_uuid_noise_is_dropped():
     """1,301 of 6,304 harvested Ashby entries were root.<uuid> and similar."""
     assert hc.PLATFORM_BY_NAME["ashby"].extract(
         "https://jobs.ashbyhq.com/root.00598075_84d8_48d8_bad7_5db9ef0b9e4b/x") is None
+
+
+@pytest.mark.parametrize("url", [
+    # www4.icims.com is real infrastructure and was harvested as a company
+    # called "www4" -- the bare-name check missed every numbered variant.
+    "https://www4.icims.com/jobs/1",
+    "https://www.icims.com/",
+    "https://api2.bamboohr.com/x",
+    "https://staging.icims.com/x",
+    "https://cdn3.bamboohr.com/x",
+])
+def test_numbered_infrastructure_subdomains_are_not_companies(url):
+    platform = "icims" if "icims" in url else "bamboohr"
+    assert hc.PLATFORM_BY_NAME[platform].extract(url) is None
+
+
+def test_real_tenants_survive_the_infrastructure_filter():
+    """Guards the widened filter: these must not be caught by it."""
+    assert hc.PLATFORM_BY_NAME["icims"].extract(
+        "https://careers-gbrx.icims.com/jobs/1") == "gbrx"
+    assert hc.PLATFORM_BY_NAME["bamboohr"].extract(
+        "https://acme.bamboohr.com/careers/list") == "acme"
+    # A company whose name merely starts with an infrastructure word is fine.
+    assert hc.PLATFORM_BY_NAME["bamboohr"].extract(
+        "https://appleseed.bamboohr.com/careers/list") == "appleseed"

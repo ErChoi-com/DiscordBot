@@ -89,6 +89,14 @@ RESERVED_SEGMENTS = frozenset({
 # into a list that would probe them forever.
 _WORKDAY_HOST_RE = re.compile(r"^wd\d+$")
 
+# Infrastructure subdomains that are never a customer tenant. Numbered variants
+# are included because hosts like www4.icims.com exist and were otherwise
+# harvested as companies.
+_INFRA_SUBDOMAIN_RE = re.compile(
+    r"^(?:www|api|static|cdn|help|support|app|mail|smtp|ns|mx|ftp|dev|test"
+    r"|staging|stage|demo|admin|assets|media|img|images|cms|vpn|portal)\d*$"
+)
+
 
 def _normalise_slug(slug: str) -> str:
     """Trim trailing punctuation a URL picked up from surrounding text.
@@ -190,7 +198,10 @@ def _subdomain_extractor(
         if not m:
             return None
         slug = _normalise_slug(m.group(1).strip().lower())
-        if slug in ("www", "api", "static", "cdn", "help", "support", "app"):
+        # Numbered variants matter as much as the bare names: www4.icims.com is
+        # real infrastructure and was being harvested as a company called
+        # "www4".
+        if _INFRA_SUBDOMAIN_RE.fullmatch(slug):
             return None
         if strip_prefix and slug.startswith(strip_prefix):
             # ats_service builds the host as f"careers-{slug}.icims.com", so the
@@ -615,7 +626,15 @@ WAYBACK_QUERIES: dict[str, tuple[str, ...]] = {
     "lever": ("jobs.lever.co/*", "jobs.eu.lever.co/*"),
     "ashby": ("jobs.ashbyhq.com/*",),
     "workday": ("*.myworkdayjobs.com/*", "*.myworkdaysite.com/*"),
-    "icims": ("*.icims.com/*",),
+    # No iCIMS query on purpose. Wayback sorts by urlkey, and "com,icims)"
+    # (the www marketing site) sorts ahead of every "com,icims,<tenant>)", so a
+    # wildcard sweep pages through tens of thousands of www asset URLs -- its
+    # versioned JS bundles resist collapsing at any depth -- and hits the stall
+    # cutoff before reaching a single tenant. A real run harvested 856 entries
+    # and 0 new companies. Server-side filters to skip the bare host all time
+    # out (504), and a path-scoped url= is ignored when the host is wildcarded.
+    # Common Crawl covers iCIMS fine, so the query only burned a time budget.
+    "icims": (),
     "bamboohr": ("*.bamboohr.com/*",),
 }
 
