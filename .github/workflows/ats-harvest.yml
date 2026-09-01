@@ -335,7 +335,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -q --orphan ats-harvest
-          git add ./*.json ./_*.json dead/*.json 2>/dev/null || git add ./*.json dead/*.json
+          # ./*.json already covers _crawls.json -- a bash glob matches a
+          # leading underscore, unlike a leading dot.
+          git add ./*.json dead/*.json
           git commit -q -m "ATS harvest + validation $(date -u +%Y-%m-%d)"
           git push -q --force \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
