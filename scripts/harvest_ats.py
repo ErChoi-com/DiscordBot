@@ -308,19 +308,24 @@ def _extract_workday(url: str) -> str | None:
         return _extract_workday_site(url)
     tenant, host = m.group(1), m.group(2)
 
-    # Walk past any leading locale segments to the first real one.
-    site = None
-    for raw in m.group(3).split("?")[0].split("#")[0].split("/"):
-        segment = urllib.parse.unquote(raw).strip()
-        if not segment:
-            continue
-        if _WORKDAY_LOCALE_RE.fullmatch(segment):
-            continue
-        site = segment
-        break
-    if not site:
+    # Skip at most ONE leading locale, then take the next segment.
+    #
+    # Consuming every locale-shaped segment loses real boards, because site
+    # names look like locales too: abinbev|wd1|py and abinbev|wd1|hn-es are
+    # both live, and both would be skipped on the way to whatever followed
+    # (typically "job", which is not a board at all). A URL carries at most one
+    # locale prefix, so one is all that should ever be skipped.
+    segments = [
+        seg for seg in (
+            urllib.parse.unquote(raw).strip()
+            for raw in m.group(3).split("?")[0].split("#")[0].split("/")
+        ) if seg
+    ]
+    if segments and _WORKDAY_LOCALE_RE.fullmatch(segments[0]) and len(segments) > 1:
+        segments = segments[1:]
+    if not segments:
         return None
-    return _workday_triple(tenant, host, site)
+    return _workday_triple(tenant, host, segments[0])
 
 
 # Paylocity identifies a company by GUID rather than a name slug, and the board
@@ -1363,7 +1368,13 @@ def _workday_probe_url(slug: str) -> str | None:
     if len(parts) != 3:
         return None
     tenant, host, site = parts
-    return f"https://{tenant}.{host}.myworkdayjobs.com/en-US/{site}/job/x"
+    # The site is the only path segment, deliberately. Anything after it would
+    # let a locale-shaped site name be mistaken for a locale prefix and
+    # skipped -- "/en-US/py/job/x" reads as site "job", and that rewrote four
+    # live abinbev boards to a dead identifier. With one segment there is
+    # nothing for the locale rule to skip to, so the round trip is exact for
+    # every site name including py and hn-es.
+    return f"https://{tenant}.{host}.myworkdayjobs.com/{site}"
 
 
 _IDENTIFIER_PROBES: dict[str, Callable[[str], str | None]] = {

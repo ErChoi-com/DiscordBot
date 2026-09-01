@@ -91,7 +91,11 @@ def test_ashby_extraction(url, expected):
     # Locale must not be mistaken for the site name: upstream has no |en entries.
     ("https://3m.wd1.myworkdayjobs.com/en/Search", "3m|wd1|search"),
     ("https://3m.wd1.myworkdayjobs.com/es/Careers", "3m|wd1|careers"),
-    ("https://acme.wd5.myworkdayjobs.com/en-US/en-GB/Careers", "acme|wd5|careers"),
+    # Only the first locale is skipped, so a second locale-shaped segment is
+    # taken as the site. That is the deliberate trade: two locales in a row is
+    # an invented shape, while locale-shaped site names are real and live
+    # (abinbev|wd1|py, abinbev|wd1|hn-es), and consuming them lost the boards.
+    ("https://acme.wd5.myworkdayjobs.com/en-US/en-GB/Careers", "acme|wd5|en-gb"),
     ("https://acme.wd1.myworkdayjobs.com/robots.txt", None),
     ("https://acme.wd1.myworkdayjobs.com/", None),
 ])
@@ -1391,3 +1395,59 @@ def test_bulk_extra_boundary_blocks_do_not_leak_foreign_slugs():
     ])
     assert list(hc.iter_bulk_urls(text, "co,lever,jobs)/")) == \
         ["https://jobs.lever.co/acme/1"]
+
+
+@pytest.mark.parametrize("url,expected", [
+    # A site name can look exactly like a locale. Both of these are live
+    # boards, and consuming every locale-shaped segment walked past them to
+    # "job", which is not a board at all.
+    ("https://abinbev.wd1.myworkdayjobs.com/en-US/py/job/x", "abinbev|wd1|py"),
+    ("https://abinbev.wd1.myworkdayjobs.com/en-US/hn-es/job/x", "abinbev|wd1|hn-es"),
+    # A URL carries at most one locale prefix, so one is all that is skipped.
+    ("https://3m.wd1.myworkdayjobs.com/en/Search", "3m|wd1|search"),
+    ("https://2020companies.wd1.myworkdayjobs.com/en-US/External_Careers/job/X",
+     "2020companies|wd1|external_careers"),
+    ("https://medtronic.wd1.myworkdayjobs.com/MedtronicCareers/job/x",
+     "medtronic|wd1|medtroniccareers"),
+])
+def test_workday_skips_at_most_one_locale(url, expected):
+    assert hc.PLATFORM_BY_NAME["workday"].extract(url) == expected
+
+
+@pytest.mark.parametrize("slug", [
+    "abinbev|wd1|py", "abinbev|wd1|hn-es", "abinbev|wd1|hn_es",
+    "2020companies|wd1|external_careers", "acme|wd3|jobs",
+    "cromwell|wd3|01", "23andme|wd5|23", "medtronic|wd1|medtroniccareers",
+])
+def test_prune_round_trip_is_identity_for_valid_workday_ids(slug):
+    """Pruning must never change an identifier a fresh harvest would produce.
+
+    It did: the probe URL carried a locale prefix, so a locale-shaped site was
+    skipped along with it and four live abinbev boards were rewritten to
+    abinbev|wd1|job, which is dead. Rewriting to something wrong is worse than
+    leaving an entry alone, so the round trip is asserted directly.
+    """
+    assert hc._current_identifier(hc.PLATFORM_BY_NAME["workday"], slug) == slug
+
+
+def test_workday_probe_url_has_a_single_path_segment():
+    """Anything after the site lets a locale-shaped site be mistaken for a
+    locale prefix; with one segment there is nothing to skip to."""
+    url = hc._workday_probe_url("acme|wd1|py")
+    assert url.endswith("/py")
+
+
+def test_underscore_hostnames_are_rejected():
+    """vhr_fhlbdm|wd5|careers came out of the index but cannot exist: a DNS
+    label has no underscore, and the host does not resolve."""
+    assert hc._current_identifier(
+        hc.PLATFORM_BY_NAME["workday"], "vhr_fhlbdm|wd5|careers") is None
+
+
+def test_underscores_are_fine_in_a_path_slug():
+    """Only hostnames are restricted. Upstream ships live Greenhouse boards
+    like 2026_summer_intern_program."""
+    assert hc._looks_like_company("2026_summer_intern_program") is True
+    assert hc.PLATFORM_BY_NAME["greenhouse"].extract(
+        "https://job-boards.greenhouse.io/2026_summer_intern_program/jobs/1"
+    ) == "2026_summer_intern_program"
