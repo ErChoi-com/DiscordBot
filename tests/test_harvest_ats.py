@@ -784,3 +784,40 @@ def test_query_string_is_still_not_treated_as_slug():
     """Widening the charset must not let a ?a&b= tail become part of the slug."""
     assert hc.PLATFORM_BY_NAME["greenhouse"].extract(
         "https://job-boards.greenhouse.io/acme?utm=x&gh_src=y") == "acme"
+
+
+@pytest.mark.parametrize("url", [
+    # /wday/ is the API path prefix, not a board.
+    "https://acme.wd1.myworkdayjobs.com/wday/cxs/acme/careers/jobs",
+    "https://acme.wd1.myworkdayjobs.com/assets/logo.png",
+    "https://acme.wd1.myworkdayjobs.com/cdn-cgi/challenge",
+    "https://acme.wd1.myworkdayjobs.com/ads.txt",
+    "https://acme.wd1.myworkdayjobs.com/app-ads.txt",
+    "https://acme.wd1.myworkdayjobs.com/shared-vendors.min.js",
+    "https://acme.wd1.myworkdayjobs.com/refreshFacet",
+])
+def test_workday_asset_paths_are_not_sites(url):
+    """These sit where a site name would but never name a board.
+
+    They surfaced once a deeper collapse depth exposed more URL variety per
+    tenant: a 200-slug sample of newly harvested Workday entries was 23% live,
+    and the misses were almost entirely these. Filtering them took the same
+    sample to 71.5% and removed 2,161 of 8,368 harvested entries.
+    """
+    assert hc.PLATFORM_BY_NAME["workday"].extract(url) is None
+
+
+def test_workday_site_segment_never_contains_a_dot():
+    """Zero of upstream's 12,884 Workday entries have a dot in the site
+    position, while every static-asset path does -- so the dot is the reliable
+    discriminator, not an ever-growing blacklist."""
+    assert hc._workday_triple("acme", "wd1", "foo.txt") is None
+    assert hc._workday_triple("acme", "wd1", "a.min.js") is None
+    assert hc._workday_triple("acme", "wd1", "careers") == "acme|wd1|careers"
+
+
+@pytest.mark.parametrize("site", ["01", "a1", "f1", "23", "jobs", "external_careers"])
+def test_real_upstream_site_shapes_still_pass(site):
+    """Guards the tightening: these are all real upstream site segments, and
+    the short numeric ones are the easiest to reject by accident."""
+    assert hc._workday_triple("acme", "wd3", site) == f"acme|wd3|{site}"

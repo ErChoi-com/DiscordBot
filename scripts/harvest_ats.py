@@ -196,8 +196,15 @@ _WORKDAY_LOCALE_RE = re.compile(r"^[a-z]{2}(?:[-_][a-z]{2})?$", re.IGNORECASE)
 # is a legitimate site name for 33 upstream tenants, so the general
 # RESERVED_SEGMENTS set would throw away real boards here.  Only reject the
 # things that are never a site.
+# Segments that sit where a site name would but never name a board. "wday" is
+# the API path prefix (/wday/cxs/...), the rest are static-asset and CDN roots.
+# These surfaced once a deeper collapse depth exposed more URL variety per
+# tenant: a 200-slug sample of newly harvested Workday entries was only 23%
+# live, and the misses were almost entirely these.
 _WORKDAY_SITE_REJECT = frozenset({
     "robots.txt", "sitemap.xml", "favicon.ico", "index.html",
+    "wday", "assets", "cdn-cgi", "static", "refreshfacet", "images", "img",
+    "css", "js", "fonts", "media", "api", "wday-assets",
 })
 
 # Workday's other public domain, with the host and tenant the other way round:
@@ -226,7 +233,11 @@ def _workday_triple(tenant: str, host: str, site: str) -> str | None:
         return None
     if not site or site in _WORKDAY_SITE_REJECT:
         return None
-    if len(site) > 100 or not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", site):
+    # No dot: a site segment never has one, while ads.txt, app-ads.txt and
+    # shared-vendors.min.js all do. Verified against upstream -- zero of its
+    # 12,884 Workday entries carry a dot in the site position -- so this cannot
+    # reject a shape the bot is known to scrape.
+    if len(site) > 100 or not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", site):
         return None
     return f"{tenant}|{host}|{site}"
 
