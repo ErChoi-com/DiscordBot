@@ -110,6 +110,12 @@ jobs:
               git show "FETCH_HEAD:dead/$p.json" > "data/dead_slugs/$p.json" 2>/dev/null \
                 && echo "seeded dead $p" || echo "no published dead/$p.json yet"
             done
+            # The crawl-listing cache has to come back too. CI checks out fresh
+            # every run, so a cache that is published but never restored is
+            # never actually read -- which is precisely the run where
+            # collinfo.json is down and it was meant to help.
+            git show "FETCH_HEAD:_crawls.json" > "data/ats_harvest/_crawls.json" 2>/dev/null \
+              && echo "seeded crawl cache" || echo "no published _crawls.json yet"
           else
             echo "no ats-harvest branch yet - first run"
           fi
