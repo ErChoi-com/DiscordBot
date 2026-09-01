@@ -1226,3 +1226,62 @@ def test_bulk_one_bad_block_does_not_lose_the_platform():
         log=lambda m: None)
     assert r.slugs == {"acme"}
     assert r.errors
+
+
+def test_crawl_discovery_uses_the_bulk_host_not_the_api():
+    """collinfo.json is the only part of a bulk run that needs the query
+    service, and it is exactly the piece that goes down. Probing cluster.idx
+    settles which crawls exist directly: a real one answers 206, a
+    nonexistent one 404."""
+    real = {"CC-MAIN-2026-34", "CC-MAIN-2026-30"}
+
+    def head(url):
+        return 206 if any(c in url for c in real) else 404
+
+    got = hc.discover_crawls_bulk([2026], head=head, workers=2)
+    assert got == ["CC-MAIN-2026-34", "CC-MAIN-2026-30"]
+
+
+def test_crawl_discovery_sorts_newest_first_across_years():
+    real = {"CC-MAIN-2025-51", "CC-MAIN-2026-04"}
+
+    def head(url):
+        return 206 if any(c in url for c in real) else 404
+
+    got = hc.discover_crawls_bulk([2025, 2026], head=head, workers=2)
+    assert got == ["CC-MAIN-2026-04", "CC-MAIN-2025-51"]
+
+
+def test_probe_failure_is_not_read_as_absent():
+    """A network error while probing means unknown, not 'this crawl does not
+    exist' -- treating it as absence would silently shrink the sweep."""
+    def head(url):
+        raise urllib.error.URLError("flaky")
+
+    assert hc.discover_crawls_bulk([2026], head=head, workers=2) == []
+
+
+def test_latest_crawls_falls_back_to_discovery(tmp_path, monkeypatch):
+    """Listing down and no cache: discovery is the last resort before failing."""
+    def dead(url):
+        raise urllib.error.URLError("collinfo down")
+
+    monkeypatch.setattr(hc, "discover_crawls_bulk",
+                        lambda years, **kw: ["CC-MAIN-2026-34", "CC-MAIN-2026-30"])
+    cache = tmp_path / "_crawls.json"
+    got = hc.latest_crawls(1, fetch=dead, sleep=lambda s: None,
+                           cache_path=cache, discover_years=[2026])
+    assert got == ["CC-MAIN-2026-34"]
+    # and the discovery is cached so the next run does not repeat it
+    assert hc._load_crawl_cache(cache) == ["CC-MAIN-2026-34", "CC-MAIN-2026-30"]
+
+
+def test_discovery_is_not_attempted_when_not_asked_for(tmp_path, monkeypatch):
+    def dead(url):
+        raise urllib.error.URLError("collinfo down")
+
+    monkeypatch.setattr(hc, "discover_crawls_bulk",
+                        lambda *a, **k: pytest.fail("should not probe"))
+    with pytest.raises(hc.HarvestError):
+        hc.latest_crawls(1, fetch=dead, sleep=lambda s: None,
+                         cache_path=tmp_path / "absent.json", discover_years=None)

@@ -45,6 +45,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Iterator
@@ -628,8 +629,9 @@ def latest_crawls(
     count: int, *, fetch: Fetcher | None = None,
     sleep: Callable[[float], None] = time.sleep,
     cache_path: Path | None = None,
+    discover_years: Iterable[int] | None = None,
 ) -> list[str]:
-    """The N most recent crawl ids, newest first, with a cached fallback.
+    """The N most recent crawl ids, newest first, with two fallbacks.
 
     collinfo.json is genuinely unreliable -- two requests seconds apart returned
     200 in 0.23s and then timed out. Losing it means losing the entire Common
@@ -649,9 +651,65 @@ def latest_crawls(
         cached = _load_crawl_cache(cache_path)
         if cached:
             return cached[:count]
+        # Last resort: ask the bulk host which crawls exist. collinfo.json is
+        # the only part of a bulk run that needs the query service at all, so
+        # falling back here removes the last dependency on it.
+        if discover_years:
+            discovered = discover_crawls_bulk(discover_years)
+            if discovered:
+                _save_crawl_cache(cache_path, discovered)
+                return discovered[:count]
         raise
     _save_crawl_cache(cache_path, ids)
     return ids[:count]
+
+
+def _crawl_exists(crawl: str, *, head: Callable[[str], int] | None = None) -> bool:
+    if head is None:
+        head = _http_status
+    try:
+        return head(_cluster_url(crawl)) in (200, 206)
+    except Exception:  # noqa: BLE001 - a probe failure is "unknown", not "absent"
+        return False
+
+
+def _http_status(url: str) -> int:
+    request = urllib.request.Request(
+        url, headers={"User-Agent": USER_AGENT, "Range": "bytes=0-10"})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+
+
+def discover_crawls_bulk(
+    years: Iterable[int], *, head: Callable[[str], int] | None = None,
+    workers: int = 8,
+) -> list[str]:
+    """Find which crawls exist by asking the bulk host, not the API.
+
+    collinfo.json is the only thing that ever needed index.commoncrawl.org for
+    a bulk run, and it is exactly the piece that has been unavailable. Crawl
+    ids are CC-MAIN-<year>-<week>, so probing cluster.idx for each candidate
+    settles the question directly: a real crawl answers 206 and a nonexistent
+    one 404.
+
+    Probing every week of a year is 52 cheap range requests and finds the
+    roughly monthly schedule without having to know it.
+    """
+    candidates = [f"CC-MAIN-{year}-{week:02d}"
+                  for year in years for week in range(1, 53)]
+    found: list[str] = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for crawl, exists in zip(candidates,
+                                 pool.map(lambda c: _crawl_exists(c, head=head),
+                                          candidates)):
+            if exists:
+                found.append(crawl)
+    found.sort(key=lambda cid: tuple(int(x) for x in cid.split("-")[2:]),
+               reverse=True)
+    return found
 
 
 def _load_crawl_cache(cache_path: Path | None) -> list[str]:
@@ -1283,6 +1341,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true",
                         help="harvest and report, write nothing")
     parser.add_argument("--json", action="store_true", help="summary as JSON to stdout")
+    parser.add_argument("--discover-years", type=int, nargs="*", default=None,
+                        metavar="YEAR",
+                        help="if the crawl listing and its cache are both "
+                             "unavailable, probe the bulk host for crawls in "
+                             "these years")
     parser.add_argument("--prune", action="store_true",
                         help="re-apply current extraction rules to the existing "
                              "harvest files and exit; makes filter fixes "
@@ -1318,7 +1381,8 @@ def main(argv: list[str] | None = None) -> int:
     if "commoncrawl" in indexes or "ccbulk" in indexes:
         try:
             crawls = args.crawls_explicit or latest_crawls(
-                args.crawls, cache_path=args.out / CRAWL_CACHE_NAME)
+                args.crawls, cache_path=args.out / CRAWL_CACHE_NAME,
+                discover_years=args.discover_years)
         except HarvestError as exc:
             # Losing Common Crawl must not cancel the Wayback sweep: they are
             # independent archives, and Wayback is the only source for Lever.
