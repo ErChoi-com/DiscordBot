@@ -662,3 +662,48 @@ def test_lock_is_released_after_a_normal_run(tmp_path, monkeypatch):
     monkeypatch.setitem(v.PROBES, "lever", lambda s: True)
     assert v.main(["--platform", "lever"]) == 0
     assert not (tmp_path / "dead_slugs" / v._harvest.LOCK_NAME).exists()
+
+
+def test_paylocity_reads_the_redirect_rather_than_the_body(monkeypatch):
+    """A missing Paylocity board 302s to a "Job Not Found" shell; a real one
+    answers 200. Following redirects collapses both to 200 and forces reading
+    the body to tell them apart. Not following makes the status the answer --
+    0.2s against 1.4s for a dead board, and a redirect is structural where a
+    page title can be reworded."""
+    seen = {}
+
+    def fake(url, *, method="GET", payload=None, timeout=None,
+             follow_redirects=True):
+        seen["follow"] = follow_redirects
+        return 302, b"", url
+
+    monkeypatch.setattr(v, "_request", fake)
+    assert v.live_paylocity("00000000-0000-0000-0000-000000000000") is False
+    assert seen["follow"] is False, "redirects must not be followed"
+
+
+def test_paylocity_two_hundred_is_a_live_board(monkeypatch):
+    monkeypatch.setattr(v, "_request",
+                        lambda url, **k: (200, b"", url))
+    assert v.live_paylocity("2eba1a0a-d60f-4fd8-95ab-90b070f1d9f2") is True
+
+
+def test_paylocity_server_error_is_unknown(monkeypatch):
+    """A 5xx says nothing about the company, same as everywhere else."""
+    monkeypatch.setattr(v, "_request", lambda url, **k: (503, b"", url))
+    with pytest.raises(v.Unreachable):
+        v.live_paylocity("2eba1a0a-d60f-4fd8-95ab-90b070f1d9f2")
+
+
+def test_other_probes_still_follow_redirects(monkeypatch):
+    """BambooHR depends on following one: an unknown tenant redirects to the
+    marketing site, and the final URL is what gives it away."""
+    seen = {}
+
+    def fake(url, **kwargs):
+        seen["follow"] = kwargs.get("follow_redirects", True)
+        return 200, b'{"meta":{}}', "https://acme.bamboohr.com/careers/list"
+
+    monkeypatch.setattr(v, "_request", fake)
+    assert v.live_bamboohr("acme") is True
+    assert seen["follow"] is True
