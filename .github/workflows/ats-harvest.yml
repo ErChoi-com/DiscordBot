@@ -131,11 +131,24 @@ jobs:
       - name: Collect
         # Six crawls rather than one. That default dates from when every crawl
         # meant paging the rate-limited query service; reading the published
-        # index files made a multi-crawl sweep cheap, and recent crawls turn
-        # out to be the best-quality source there is. A sweep of the 12 most
-        # recent produced 2,535 companies at 90.7% live, against 38.8% for the
-        # net-new slugs harvested from deep Wayback history -- recency of the
-        # evidence, not the archive it came from, is what predicts a live board.
+        # index files made a multi-crawl sweep cheap.
+        #
+        # Six rather than thirty, though, and that bound is deliberate. Two
+        # matched sweeps differing only in the age of the crawls:
+        #
+        #   12 recent  (CC-MAIN-2025-38 .. 2026-34)  +5,378 at 90.7% live
+        #   18 archival (CC-MAIN-2024-10 .. 2025-33) +2,475 at 32.2% live
+        #
+        # Reaching further back keeps finding companies, but two thirds of them
+        # are gone, and every dead slug costs a request per scrape cycle until
+        # the TTL evicts it. Raising this number looks like more coverage and
+        # is mostly more work for the bot. The age of the evidence, not the
+        # archive it came from, is what predicts a live board.
+        #
+        # Lever is the one reason to sweep archival crawls at all: it blocks
+        # CCBot, so it left Common Crawl after CC-MAIN-2025-38 and older crawls
+        # are its only CC source. Use the extra_crawls input for that rather
+        # than raising this.
         #
         # Inputs reach the shell as environment variables rather than being
         # interpolated into the script text: a ${{ }} expansion is pasted in
