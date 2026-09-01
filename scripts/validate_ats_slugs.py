@@ -367,22 +367,31 @@ def select_targets(platform: str, dead: dict[str, str], *, recheck_dead: bool,
     nobody has ever probed beats re-confirming what we already believe.
     """
     candidates = load_candidates(platform)
-    # Uncorroborated slugs first among the unchecked ones. Whether a slug also
-    # appears in the upstream list turns out to predict liveness strongly --
-    # measured on Lever, where the two lists overlap heavily:
+    # Uncorroborated slugs first among the unchecked ones. What predicts a live
+    # board is appearing in BOTH lists, not appearing in either one:
     #
-    #   in both upstream and our harvest   4,267 slugs   41.7% live
-    #   our harvest only                   3,426 slugs   11.7% live
-    #   upstream only                        101 slugs    1.7% live
+    #                        both    harvest-only   upstream-only
+    #     greenhouse        72.0%          42.0%           44.0%
+    #     bamboohr          79.2%          51.0%           50.0%
+    #     workday           81.6%          62.0%    0.0% (n=6,213)
+    #     lever             41.7%          11.7%            1.7%
     #
-    # The point of a bounded run is to retire dead slugs before the bot spends
-    # a request on each of them every cycle, so probing the ~88%-dead group
-    # first buys several times more dead marks per probe than probing the
-    # corroborated ones. It changes the order, never the set: everything is
-    # still reached, just sooner or later.
+    # Two independent harvests finding the same slug means something still
+    # links to that board. Either list alone is mostly captures of boards that
+    # have since closed -- and Workday shows how sharp that can be: every one
+    # of a 50-slug sample from its 6,213 upstream-only entries was dead.
+    #
+    # A bounded run exists to retire dead slugs before the bot spends a request
+    # on each every scrape cycle, so it is worth the most probing the group
+    # that is mostly dead. Ordering on membership in a single list gets this
+    # backwards for exactly the Workday case above, which is why the key is
+    # corroboration rather than "is it upstream".
+    #
+    # This changes the order, never the set.
     upstream = set(_read_list(COMPANY_DIR / COMPANY_FILES[platform]))
+    harvested = set(_read_list(HARVEST_DIR / f"{platform}.json"))
     fresh = [s for s in candidates if s not in dead]
-    fresh.sort(key=lambda s: s in upstream)
+    fresh.sort(key=lambda s: s in upstream and s in harvested)
     stale = [s for s in candidates
              if s in dead and (recheck_dead or _stale(dead[s], today, recheck_days))]
     ordered = fresh + stale

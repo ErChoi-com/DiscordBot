@@ -524,12 +524,16 @@ def test_every_platform_has_a_worker_count():
 
 
 def test_uncorroborated_slugs_are_probed_first(tmp_path, monkeypatch):
-    """Whether a slug also appears upstream predicts liveness strongly.
+    """Appearing in BOTH lists predicts liveness; either alone does not.
 
-    Measured on Lever: slugs in both lists are 41.7% live, harvest-only 11.7%,
-    upstream-only 1.7%. A bounded run exists to retire dead slugs before the
-    bot spends a request on each every cycle, so probing the ~88%-dead group
-    first buys several times more dead marks per probe.
+        platform     both   harvest-only   upstream-only
+        greenhouse  72.0%          42.0%           44.0%
+        bamboohr    79.2%          51.0%           50.0%
+        workday     81.6%          62.0%    0.0% (n=6,213)
+        lever       41.7%          11.7%            1.7%
+
+    A bounded run retires dead slugs before the bot spends a request on each
+    every cycle, so it should start with the mostly-dead group.
     """
     _seed(tmp_path, monkeypatch, "lever",
           ["corroborated"], harvest=["corroborated", "harvest-only"])
@@ -537,6 +541,21 @@ def test_uncorroborated_slugs_are_probed_first(tmp_path, monkeypatch):
                                sample=None, today=TODAY)
     assert targets[0] == "harvest-only"
     assert set(targets) == {"corroborated", "harvest-only"}
+
+
+def test_upstream_only_slugs_are_not_treated_as_corroborated(tmp_path, monkeypatch):
+    """Ordering on "is it upstream" gets this exactly backwards.
+
+    Workday carries 6,213 slugs that upstream has and our harvest does not, and
+    a 50-slug sample of them was 0% live -- the deadest group on any platform.
+    A key of "in upstream" sorts them last, behind corroborated slugs that are
+    81.6% live, which is the opposite of what a bounded run should probe.
+    """
+    _seed(tmp_path, monkeypatch, "workday",
+          ["corroborated", "upstream-only"], harvest=["corroborated"])
+    targets = v.select_targets("workday", {}, recheck_dead=False, limit=1,
+                               sample=None, today=TODAY)
+    assert targets == ["upstream-only"]
 
 
 def test_ordering_changes_the_order_not_the_set(tmp_path, monkeypatch):
