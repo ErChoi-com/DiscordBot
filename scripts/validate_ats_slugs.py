@@ -69,6 +69,11 @@ RECHECK_DAYS = 7
 
 REQUEST_TIMEOUT = 25
 
+# Wall-clock ceiling for one platform's audit sample. The audit is a
+# measurement, not work: a partial sample still estimates the rate, while an
+# unbounded one can outlast the run it annotates.
+AUDIT_BUDGET_SECONDS = 240.0
+
 # Per-platform concurrency. These hit real ATS endpoints, so they stay at or
 # below what ats_service already uses for the same host.
 WORKERS = {"greenhouse": 16, "lever": 16, "ashby": 8, "workday": 12,
@@ -467,6 +472,7 @@ def audit_live_rate(platform: str, sample: int, *,
                      probe: Callable[[str], bool] | None = None,
                      workers: int | None = None,
                      seed: int = 0,
+                     budget_seconds: float | None = AUDIT_BUDGET_SECONDS,
                      log: Callable[[str], None] = print) -> dict[str, int]:
     """Estimate a platform's true live rate from a uniform random sample.
 
@@ -486,12 +492,18 @@ def audit_live_rate(platform: str, sample: int, *,
         return {"sampled": 0, "live": 0, "dead": 0, "unknown": 0, "rate": 0.0}
     picks = (candidates if len(candidates) <= sample
              else random.Random(seed).sample(candidates, sample))
+    # Budgeted like the working pass. Without this the audit is the one
+    # unbounded network loop in the run: Paylocity probes at two workers and
+    # refuses connections under load, so an audit there can outlast everything
+    # it was meant to annotate. A short sample is worth less than a stalled job.
     result = validate_platform(platform, picks, probe=probe, workers=workers,
+                               budget_seconds=budget_seconds,
                                log=lambda _m: None)
     decided = result["live"] + result["dead"]
     rate = round(100.0 * result["live"] / decided, 1) if decided else 0.0
+    short = " (cut short by budget)" if result.get("deferred") else ""
     log(f"[validate] {platform}: audit sample {result['probed']} of "
-        f"{len(candidates)} -> {rate}% live (population estimate)")
+        f"{len(candidates)} -> {rate}% live (population estimate){short}")
     return {"sampled": result["probed"], "live": result["live"],
             "dead": result["dead"], "unknown": result["unknown"],
             "rate": rate, "population": len(candidates)}

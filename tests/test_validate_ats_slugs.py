@@ -476,3 +476,35 @@ def test_audit_rate_ignores_unknowns(tmp_path, monkeypatch):
     out = v.audit_live_rate("lever", 4, probe=probe, workers=2, log=lambda m: None)
     assert out["unknown"] == 2
     assert out["rate"] == 50.0        # 1 live of 2 decided, not of 4 attempted
+
+
+def test_audit_is_time_bounded():
+    """The audit is the one network loop that annotates rather than works, so
+    it must never outlast the run. Paylocity probes at two workers and refuses
+    connections under load, which is exactly where an unbounded sample bites.
+    """
+    clock = {"t": 0.0}
+
+    def probe(slug):
+        clock["t"] += 10.0
+        return True
+
+    result = v.validate_platform("greenhouse", [f"co{i}" for i in range(400)],
+                                 probe=probe, workers=2, budget_seconds=60.0,
+                                 now=lambda: clock["t"], log=lambda m: None)
+    assert result["probed"] < 400 and result["deferred"] > 0
+
+
+def test_audit_passes_a_budget_through(monkeypatch, tmp_path):
+    seen = {}
+    real = v.validate_platform
+
+    def spy(platform, slugs, **kwargs):
+        seen.update(kwargs)
+        return real(platform, slugs, **kwargs)
+
+    _seed(tmp_path, monkeypatch, "lever", ["a", "b"])
+    monkeypatch.setattr(v, "validate_platform", spy)
+    v.audit_live_rate("lever", 2, probe=lambda s: True, workers=1,
+                      log=lambda m: None)
+    assert seen.get("budget_seconds") == v.AUDIT_BUDGET_SECONDS
