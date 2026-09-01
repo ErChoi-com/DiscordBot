@@ -1,0 +1,286 @@
+"""Tests for the ATS slug liveness validator.
+
+Hermetic per pytest.ini: no probe here touches the network. What is being tested
+is the decision logic -- what counts as dead, what a timeout must not do, and
+that the file written is byte-compatible with what ats_service reads.
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+import validate_ats_slugs as v  # noqa: E402
+
+TODAY = _dt.date(2026, 9, 1)
+
+
+# --------------------------------------------------------------------------
+# What a status code means
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("status,expected", [
+    (200, True), (404, False), (410, False), (403, False), (422, False),
+])
+def test_decide_definitive(status, expected):
+    assert v._decide(status) is expected
+
+
+@pytest.mark.parametrize("status", [None, 500, 502, 503, 429])
+def test_decide_treats_ambiguous_as_unreachable(status):
+    """A 5xx or a timeout says nothing about whether the company exists.
+
+    Counting these as dead would suppress live companies for a week every time
+    a platform had a bad minute.
+    """
+    with pytest.raises(v.Unreachable):
+        v._decide(status)
+
+
+# --------------------------------------------------------------------------
+# Verdict handling
+# --------------------------------------------------------------------------
+
+def test_unknown_never_marks_dead():
+    dead: dict[str, str] = {}
+    result = v.validate_platform(
+        "greenhouse", ["a", "b"],
+        probe=lambda s: (_ for _ in ()).throw(v.Unreachable("timeout")),
+        workers=2, log=lambda m: None,
+    )
+    assert result["unknown"] == 2 and result["dead"] == 0
+    changes = v.apply_results(dead, result, TODAY)
+    assert dead == {} and changes["added"] == 0
+
+
+def test_probe_crash_is_unknown_not_dead():
+    """A bug in a probe must not be indistinguishable from 'company is gone'."""
+    result = v.validate_platform(
+        "greenhouse", ["a"],
+        probe=lambda s: (_ for _ in ()).throw(ValueError("boom")),
+        workers=1, log=lambda m: None,
+    )
+    assert result["unknown"] == 1 and result["dead"] == 0
+
+
+def test_live_slug_is_revived():
+    dead = {"acme": "2026-08-01", "gone": "2026-08-01"}
+    result = v.validate_platform("greenhouse", ["acme", "gone"],
+                                 probe=lambda s: s == "acme", workers=2,
+                                 log=lambda m: None)
+    changes = v.apply_results(dead, result, TODAY)
+    assert "acme" not in dead
+    assert dead["gone"] == "2026-09-01"
+    assert changes["revived"] == 1 and changes["redated"] == 1
+
+
+def test_dead_slug_is_dated_today():
+    dead: dict[str, str] = {}
+    result = v.validate_platform("greenhouse", ["gone"], probe=lambda s: False,
+                                 workers=1, log=lambda m: None)
+    v.apply_results(dead, result, TODAY)
+    assert dead == {"gone": "2026-09-01"}
+
+
+# --------------------------------------------------------------------------
+# Target selection
+# --------------------------------------------------------------------------
+
+def _seed(tmp_path, monkeypatch, platform, companies, harvest=(), dead=None):
+    (tmp_path / "ats_companies").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "ats_harvest").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "dead_slugs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "ats_companies" / f"{platform}_companies.json").write_text(
+        json.dumps(list(companies)))
+    (tmp_path / "ats_harvest" / f"{platform}.json").write_text(json.dumps(list(harvest)))
+    if dead is not None:
+        (tmp_path / "dead_slugs" / f"{platform}.json").write_text(json.dumps(dead))
+    monkeypatch.setattr(v, "COMPANY_DIR", tmp_path / "ats_companies")
+    monkeypatch.setattr(v, "HARVEST_DIR", tmp_path / "ats_harvest")
+    monkeypatch.setattr(v, "DEAD_DIR", tmp_path / "dead_slugs")
+
+
+def test_candidates_union_upstream_and_harvest(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch, "lever", ["a", "b"], harvest=["b", "c"])
+    assert v.load_candidates("lever") == ["a", "b", "c"]
+
+
+def test_unchecked_slugs_are_probed_before_known_dead(tmp_path, monkeypatch):
+    """With --limit bounding a CI run, spending the budget on slugs nobody has
+    ever probed beats re-confirming what we already believe."""
+    _seed(tmp_path, monkeypatch, "lever", ["olddead", "fresh"],
+          dead={"olddead": "2026-01-01"})
+    targets = v.select_targets("lever", v.load_dead("lever"), recheck_dead=False,
+                               limit=1, sample=None, today=TODAY)
+    assert targets == ["fresh"]
+
+
+def test_recent_dead_marks_are_skipped(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch, "lever", ["recent"], dead={"recent": "2026-08-30"})
+    targets = v.select_targets("lever", v.load_dead("lever"), recheck_dead=False,
+                               limit=None, sample=None, today=TODAY)
+    assert targets == []
+
+
+def test_stale_dead_marks_are_reprobed(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch, "lever", ["old"], dead={"old": "2026-07-01"})
+    targets = v.select_targets("lever", v.load_dead("lever"), recheck_dead=False,
+                               limit=None, sample=None, today=TODAY)
+    assert targets == ["old"]
+
+
+def test_recheck_dead_overrides_the_window(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch, "lever", ["recent"], dead={"recent": "2026-08-30"})
+    targets = v.select_targets("lever", v.load_dead("lever"), recheck_dead=True,
+                               limit=None, sample=None, today=TODAY)
+    assert targets == ["recent"]
+
+
+def test_corrupt_date_is_reprobed(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch, "lever", ["weird"], dead={"weird": "not-a-date"})
+    targets = v.select_targets("lever", v.load_dead("lever"), recheck_dead=False,
+                               limit=None, sample=None, today=TODAY)
+    assert targets == ["weird"]
+
+
+# --------------------------------------------------------------------------
+# On-disk contract with ats_service
+# --------------------------------------------------------------------------
+
+def test_saved_file_matches_ats_service_format(tmp_path, monkeypatch):
+    """ats_service reads {slug: 'YYYY-MM-DD'}; anything else silently resets
+    the platform's dead marks."""
+    _seed(tmp_path, monkeypatch, "lever", [])
+    v.save_dead("lever", {"b": "2026-09-01", "a": "2026-08-01"})
+    raw = (tmp_path / "dead_slugs" / "lever.json").read_text()
+    parsed = json.loads(raw)
+    assert parsed == {"a": "2026-08-01", "b": "2026-09-01"}
+    assert list(parsed) == ["a", "b"], "must be sorted for stable diffs"
+    assert raw.startswith("{\n"), "must be indented, matching _save_dead_slugs"
+
+
+def test_legacy_list_format_is_read_not_discarded(tmp_path, monkeypatch):
+    """An older revision stored a bare list. Reading it as empty would
+    resurrect every dead slug on the platform at once."""
+    _seed(tmp_path, monkeypatch, "lever", [], dead=["a", "b"])
+    dead = v.load_dead("lever")
+    assert set(dead) == {"a", "b"}
+    assert all(len(x) == 10 for x in dead.values())
+
+
+def test_corrupt_dead_file_reads_as_empty(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch, "lever", [])
+    (tmp_path / "dead_slugs" / "lever.json").write_text("{ not json")
+    assert v.load_dead("lever") == {}
+
+
+def test_save_leaves_no_temp_file(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch, "lever", [])
+    v.save_dead("lever", {"a": "2026-09-01"})
+    assert [p.name for p in (tmp_path / "dead_slugs").iterdir()] == ["lever.json"]
+
+
+def test_purge_drops_only_expired_marks():
+    dead = {"old": "2026-01-01", "recent": "2026-08-25"}
+    removed = v.purge_expired(dead, TODAY, ttl_days=90)
+    assert removed == 1 and dead == {"recent": "2026-08-25"}
+
+
+# --------------------------------------------------------------------------
+# Platform-specific liveness rules, each a bug found by calibration
+# --------------------------------------------------------------------------
+
+def test_bamboohr_redirect_to_marketing_site_is_dead(monkeypatch):
+    """An unknown BambooHR tenant answers 200 and redirects to www."""
+    monkeypatch.setattr(v, "_request",
+                        lambda *a, **k: (200, b"<!DOCTYPE html>", "https://www.bamboohr.com/"))
+    assert v.live_bamboohr("nosuchtenant") is False
+
+
+def test_bamboohr_json_on_tenant_host_is_live(monkeypatch):
+    monkeypatch.setattr(v, "_request",
+                        lambda *a, **k: (200, b'{"meta":{}}',
+                                         "https://acme.bamboohr.com/careers/list"))
+    assert v.live_bamboohr("acme") is True
+
+
+def test_icims_tries_both_host_conventions(monkeypatch):
+    """46 of 120 sampled slugs resolved only prefixed, 34 only bare, none both."""
+    seen = []
+
+    def fake(url, **kwargs):
+        seen.append(url)
+        return (200 if url.startswith("https://acme.icims.com") else 404), b"", url
+
+    monkeypatch.setattr(v, "_request", fake)
+    assert v.live_icims("acme") is True
+    assert any("careers-acme.icims.com" in u for u in seen)
+    assert any("//acme.icims.com" in u for u in seen)
+
+
+def test_icims_already_prefixed_slug_is_not_double_prefixed(monkeypatch):
+    seen = []
+
+    def fake(url, **kwargs):
+        seen.append(url)
+        return 404, b"", url
+
+    monkeypatch.setattr(v, "_request", fake)
+    assert v.live_icims("careers-gbrx") is False
+    assert not any("careers-careers-" in u for u in seen)
+
+
+def test_workday_posts_a_body(monkeypatch):
+    """Without a JSON body a live tenant answers 500 and a dead one 422, so an
+    empty POST cannot tell them apart."""
+    captured = {}
+
+    def fake(url, *, method="GET", payload=None, **kwargs):
+        captured["method"] = method
+        captured["payload"] = payload
+        return 200, b"", url
+
+    monkeypatch.setattr(v, "_request", fake)
+    assert v.live_workday("acme|wd1|external") is True
+    assert captured["method"] == "POST"
+    assert "limit" in captured["payload"]
+
+
+def test_workday_malformed_triple_is_dead(monkeypatch):
+    monkeypatch.setattr(v, "_request", lambda *a, **k: (200, b"", ""))
+    assert v.live_workday("not-a-triple") is False
+
+
+# --------------------------------------------------------------------------
+# Run-level behaviour
+# --------------------------------------------------------------------------
+
+def test_nothing_to_probe_is_success_not_failure(tmp_path, monkeypatch):
+    """Every slug being inside its recheck window is a healthy steady state."""
+    _seed(tmp_path, monkeypatch, "lever", ["a"], dead={"a": "2026-08-30"})
+    monkeypatch.setattr(v._dt, "date", type("D", (), {
+        "today": staticmethod(lambda: TODAY),
+        "fromisoformat": staticmethod(_dt.date.fromisoformat)}))
+    assert v.main(["--platform", "lever"]) == 0
+
+
+def test_dry_run_writes_nothing(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch, "lever", ["gone"])
+    monkeypatch.setitem(v.PROBES, "lever", lambda s: False)
+    assert v.main(["--platform", "lever", "--dry-run"]) == 0
+    assert v.load_dead("lever") == {}
+
+
+def test_results_are_persisted(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch, "lever", ["gone", "alive"])
+    monkeypatch.setitem(v.PROBES, "lever", lambda s: s == "alive")
+    assert v.main(["--platform", "lever"]) == 0
+    dead = v.load_dead("lever")
+    assert "gone" in dead and "alive" not in dead

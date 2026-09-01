@@ -1,61 +1,77 @@
 name: ATS company harvest
 
-# Discovers ATS company slugs from the Common Crawl URL index and publishes them
-# to the `ats-harvest` orphan branch, which sync_ats_companies.py pulls.
+# Weekly discovery and validation of ATS company boards, published to the
+# `ats-harvest` orphan branch that sync_ats_companies.py pulls.
 #
-# Why this exists: the company lists come from Feashliaa/job-board-aggregator,
-# which builds them with a Common Crawl harvester it does not publish. Our lists
-# therefore only grow when that maintainer regenerates theirs. This runs the
-# same discovery ourselves, so a company that opened a board last month is
-# scrapeable without waiting on anyone.
+# Two halves, and both are necessary:
 #
-# Why an orphan branch rather than a commit to main: the same reason as
-# geonames-sync.yml. These files are rewritten on a schedule, and six full slug
-# lists committed weekly would put a large diff in main's history every run for
-# data that is regenerable. The branch is force-pushed to a single commit, so
-# the remote holds exactly one copy.
+#   1. Collect. Sweeps the Common Crawl and Wayback URL indexes for company
+#      slugs. The lists we ship come from Feashliaa/job-board-aggregator, which
+#      builds them with a harvester it does not publish, so without this our
+#      lists only grow when that maintainer regenerates theirs.
 #
-# The output is additive by construction -- the harvester unions onto whatever
-# the branch already holds and never deletes -- which matters because Common
-# Crawl coverage genuinely fluctuates. Lever dropped out of the index entirely
-# after CC-MAIN-2025-38 (recent crawls carry only its robots.txt), so a run that
-# overwrote rather than merged would erase 4,000+ Lever companies the first time
-# it ran against a current crawl.
+#   2. Validate. Asks each platform whether the board actually exists and writes
+#      the misses to dead/ in the same {slug: YYYY-MM-DD} format ats_service
+#      already uses. Collection alone is not enough: measured live rates for
+#      newly harvested slugs run from 87% (BambooHR) down to 11% (iCIMS), so an
+#      append-only list fills with companies that never answer, and each one
+#      costs a request every scrape cycle, forever.
+#
+# Why an orphan branch rather than commits to main: same reasoning as
+# geonames-sync.yml. Both halves rewrite whole files on a schedule, and
+# committing them weekly would put a large diff in main's history every run for
+# data that is entirely regenerable. The branch is force-pushed to one commit.
+#
+# Collection is additive by construction -- the harvester unions onto whatever
+# the branch already holds and never deletes. That matters because archive
+# coverage genuinely fluctuates: Lever blocks CCBot in robots.txt and left
+# Common Crawl after CC-MAIN-2025-38, so a run that overwrote rather than merged
+# would erase thousands of Lever companies the first time it ran.
 
 on:
   schedule:
     # Weekly, Tuesdays 03:41 UTC. Common Crawl publishes roughly monthly, so
-    # this is already several times more often than the data changes; the point
-    # is to pick a new crawl up within days of release rather than to poll. The
-    # odd minute avoids the top-of-hour spike when GitHub delays scheduled jobs.
+    # this is already more often than the source data changes; the point is to
+    # pick up a new crawl within days of release. The odd minute avoids the
+    # top-of-hour spike when GitHub delays scheduled jobs.
     - cron: "41 3 * * 2"
   workflow_dispatch:
     inputs:
       crawls:
-        description: "How many recent crawls to sweep"
+        description: "How many recent Common Crawl snapshots to sweep"
         required: false
         default: "1"
       extra_crawls:
         description: >-
-          Space-separated crawl ids to sweep as well, e.g.
-          "CC-MAIN-2025-38 CC-MAIN-2024-38". Use this to backfill platforms that
-          have dropped out of recent crawls.
+          Space-separated crawl ids to also sweep, e.g.
+          "CC-MAIN-2025-38 CC-MAIN-2024-38". Use to backfill platforms that have
+          dropped out of recent crawls.
         required: false
         default: ""
+      indexes:
+        description: "Which archives to sweep"
+        required: false
+        default: "both"
+        type: choice
+        options: ["both", "commoncrawl", "wayback"]
+      validate_limit:
+        description: "Max slugs to probe per platform (0 disables validation)"
+        required: false
+        default: "6000"
 
 permissions:
   contents: write
 
 concurrency:
-  # Never two harvests at once: both would force-push the branch and the loser's
-  # discoveries would be silently dropped rather than merged.
+  # Never two runs at once: both would force-push the branch and the loser's
+  # discoveries and dead marks would be dropped rather than merged.
   group: ats-harvest
   cancel-in-progress: false
 
 jobs:
   harvest:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 330
 
     steps:
       - name: Checkout
@@ -66,94 +82,96 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Verify the harvester before running it
-        # The harvester parses someone else's URL conventions. If those change,
-        # the extraction tests are what notice -- running a broken harvester
-        # would publish a branch full of garbage slugs that every bot then
-        # probes for 90 days until the dead-slug TTL evicts them.
+      - name: Verify harvester and validator before running them
+        # Both parse someone else's URL conventions and status-code semantics.
+        # When those change, these tests are what notice. Running a broken
+        # harvester publishes garbage slugs that every bot then probes for 90
+        # days; running a broken validator marks live companies dead, which is
+        # worse, because it removes boards that work.
         env:
           PYTHONPATH: src
         run: |
           python -m pip install --upgrade pip
           pip install pytest
-          pytest tests/test_harvest_commoncrawl.py -q
+          pytest tests/test_harvest_ats.py tests/test_validate_ats_slugs.py -q
 
-      - name: Fetch the previously published harvest
-        # The harvester merges into whatever is already in --out, so seeding the
-        # directory from the branch is what makes runs cumulative rather than
-        # each one replacing the last.
+      - name: Fetch the previously published state
+        # The harvester merges into whatever is already in --out, and the
+        # validator merges into existing dead marks. Seeding both from the
+        # branch is what makes runs cumulative rather than each replacing the
+        # last.
         run: |
           set -euo pipefail
-          mkdir -p out
+          mkdir -p data/ats_harvest data/dead_slugs
           if git fetch --depth=1 origin ats-harvest 2>/dev/null; then
             for p in greenhouse lever ashby workday icims bamboohr; do
-              git show "FETCH_HEAD:$p.json" > "out/$p.json" 2>/dev/null \
-                && echo "seeded $p ($(python -c "import json;print(len(json.load(open('out/$p.json'))))") slugs)" \
-                || echo "no published $p.json yet"
+              git show "FETCH_HEAD:$p.json" > "data/ats_harvest/$p.json" 2>/dev/null \
+                && echo "seeded harvest $p" || echo "no published $p.json yet"
+              git show "FETCH_HEAD:dead/$p.json" > "data/dead_slugs/$p.json" 2>/dev/null \
+                && echo "seeded dead $p" || echo "no published dead/$p.json yet"
             done
           else
             echo "no ats-harvest branch yet - first run"
           fi
 
-      - name: Harvest
+      - name: Collect
         # Inputs reach the shell as environment variables rather than being
         # interpolated into the script text: a ${{ }} expansion is pasted in
-        # verbatim before bash parses the line, so a crafted input value would
-        # be executed as part of the command.
+        # verbatim before bash parses the line, so a crafted value would run as
+        # part of the command.
         env:
           CRAWLS: ${{ github.event.inputs.crawls || '1' }}
           EXTRA_CRAWLS: ${{ github.event.inputs.extra_crawls || '' }}
+          INDEXES: ${{ github.event.inputs.indexes || 'both' }}
         run: |
           set -euo pipefail
-          args=(--crawls "$CRAWLS" --out out --json)
+          args=(--crawls "$CRAWLS" --out data/ats_harvest --json)
+          if [ "$INDEXES" != "both" ]; then
+            args+=(--index "$INDEXES")
+          fi
           # Word-split deliberately, and only when non-empty: `for c in ; do` is
-          # a bash syntax error, so an unguarded loop would break every
-          # scheduled run (which never sets this input).
+          # a bash syntax error, which would break every scheduled run (they
+          # never set this input).
           if [ -n "$EXTRA_CRAWLS" ]; then
             for c in $EXTRA_CRAWLS; do
               args+=(--crawl "$c")
             done
           fi
-          echo "running: harvest_commoncrawl.py ${args[*]}"
-          python scripts/harvest_commoncrawl.py "${args[@]}" > summary.json
-          cat summary.json
+          echo "running: harvest_ats.py ${args[*]}"
+          python scripts/harvest_ats.py "${args[@]}" > harvest.json
+          cat harvest.json
 
-      - name: Verify the harvest before publishing it
-        # A harvest that collapses is the failure mode that matters: the index
+      - name: Verify the collection before validating it
+        # A collapsed harvest is the failure mode that rots unnoticed: an index
         # returning empty pages, or a URL convention changing under the
-        # extractors, both produce a technically-valid file with almost nothing
-        # in it. Publishing that would not break the bot -- the merge is a union
-        # -- but it would mean silently harvesting nothing while reporting
-        # success every week, which is how this rots unnoticed.
+        # extractors, both produce a valid file with almost nothing in it. That
+        # would not break the bot -- the merge is a union -- it would just
+        # silently harvest nothing while reporting success every week.
         run: |
           set -euo pipefail
           python - <<'PY'
           import json, sys, pathlib
 
-          # Floors are set well under the counts a single current crawl really
-          # yields (greenhouse ~3,000, ashby ~2,700, bamboohr ~3,300), so normal
+          # Floors sit well under what a single current crawl really yields
+          # (greenhouse ~3,000, ashby ~1,900, bamboohr ~3,300), so ordinary
           # crawl-to-crawl variation never trips them.
           FLOORS = {"greenhouse": 500, "ashby": 300, "workday": 300,
                     "icims": 200, "bamboohr": 300}
 
-          summary = json.load(open("summary.json"))
-          platforms = summary["platforms"]
+          platforms = json.load(open("harvest.json"))["platforms"]
           failed = []
-
           for name, floor in FLOORS.items():
               got = platforms.get(name, {}).get("harvested", 0)
-              status = "ok" if got >= floor else "LOW"
-              print(f"{name:11} harvested={got:6} floor={floor:5} {status}")
+              print(f"{name:11} harvested={got:6} floor={floor:5} "
+                    f"{'ok' if got >= floor else 'LOW'}")
               if got < floor:
                   failed.append(f"{name}: {got} < {floor}")
 
-          # Lever is deliberately absent from FLOORS. It stopped appearing in
-          # Common Crawl after CC-MAIN-2025-38 -- current crawls carry only its
-          # robots.txt -- so a zero there is the expected result of a routine
-          # run, not a regression. Its slugs come from backfilling older crawls
-          # via the extra_crawls input.
+          # Lever has no floor on purpose. It blocks CCBot, so Common Crawl
+          # carries only its robots.txt and a commoncrawl-only run legitimately
+          # finds zero. Its companies come from Wayback.
           lev = platforms.get("lever", {}).get("harvested", 0)
-          print(f"{'lever':11} harvested={lev:6} (no floor - absent from recent crawls)")
+          print(f"{'lever':11} harvested={lev:6} (no floor - blocks CCBot)")
 
           for name, data in platforms.items():
               for err in data.get("errors", []):
@@ -163,59 +181,126 @@ jobs:
               print("::error::harvest below floor: " + "; ".join(failed))
               sys.exit(1)
 
-          for path in pathlib.Path("out").glob("*.json"):
+          for path in pathlib.Path("data/ats_harvest").glob("*.json"):
               payload = json.loads(path.read_text())
               assert isinstance(payload, list), f"{path} is not a list"
               assert payload == sorted(payload), f"{path} is not sorted"
-          print("all output files parse, are lists, and are sorted")
+          print("collection output parses, is a list, and is sorted")
+          PY
+
+      - name: Validate
+        # Bounded per platform so the run stays inside the job timeout. The
+        # validator probes never-checked slugs first and only revisits dead
+        # marks once they age past the recheck window, so successive weekly runs
+        # work through the backlog instead of re-probing the same slugs.
+        env:
+          VALIDATE_LIMIT: ${{ github.event.inputs.validate_limit || '6000' }}
+        run: |
+          set -euo pipefail
+          if [ "$VALIDATE_LIMIT" = "0" ]; then
+            echo "validation disabled by input"
+            echo '{"platforms":{}}' > validate.json
+            exit 0
+          fi
+          python scripts/validate_ats_slugs.py \
+            --limit "$VALIDATE_LIMIT" --json > validate.json
+          cat validate.json
+
+      - name: Verify the validation before publishing it
+        # The dangerous direction is over-marking: a platform that starts
+        # answering 500 for everything, or an endpoint that moves, would mark
+        # thousands of live companies dead and the bot would stop scraping them
+        # for a week. A wholesale collapse in live rate is the signal, so fail
+        # rather than publish it.
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, sys
+
+          # Lowest live rate measured across sources was iCIMS at ~11% for
+          # freshly harvested slugs, so 5% sits comfortably below anything real
+          # while still catching an endpoint that broke entirely.
+          MIN_LIVE_RATE = 5.0
+          # Below this many probes the rate is noise, not signal.
+          MIN_SAMPLE = 50
+
+          platforms = json.load(open("validate.json")).get("platforms", {})
+          if not platforms:
+              print("validation skipped - nothing to check")
+              sys.exit(0)
+
+          failed = []
+          for name, d in sorted(platforms.items()):
+              probed, live = d.get("probed", 0), d.get("live", 0)
+              dead, unknown = d.get("dead", 0), d.get("unknown", 0)
+              rate = d.get("live_rate", 0.0)
+              print(f"{name:11} probed={probed:6} live={live:6} dead={dead:6} "
+                    f"unknown={unknown:5} live_rate={rate:5.1f}%")
+              if probed >= MIN_SAMPLE and rate < MIN_LIVE_RATE:
+                  failed.append(f"{name}: live rate {rate}% below {MIN_LIVE_RATE}%")
+              # Everything timing out means we learned nothing. Publishing the
+              # unchanged map is fine, but it should be visible.
+              if probed and unknown == probed:
+                  print(f"::warning::{name}: every probe was unreachable")
+
+          if failed:
+              print("::error::validation looks broken: " + "; ".join(failed))
+              sys.exit(1)
+          print("validation within expected bounds")
           PY
 
       - name: Build the manifest
-        # Consumers can check this first: a few hundred bytes tells them whether
-        # anything changed before they pull the lists.
+        # Consumers fetch this first: a few hundred bytes says whether anything
+        # changed before they pull the lists.
         run: |
           set -euo pipefail
-          cd out
           python - <<'PY'
           import json, hashlib, pathlib, datetime
+
+          out = pathlib.Path("publish")
+          (out / "dead").mkdir(parents=True, exist_ok=True)
           files = {}
-          for path in sorted(pathlib.Path(".").glob("*.json")):
-              if path.name == "manifest.json":
-                  continue
-              raw = path.read_bytes()
-              files[path.name] = {
-                  "sha256": hashlib.sha256(raw).hexdigest(),
-                  "count": len(json.loads(raw)),
-              }
+          for src, prefix in ((pathlib.Path("data/ats_harvest"), ""),
+                              (pathlib.Path("data/dead_slugs"), "dead/")):
+              for path in sorted(src.glob("*.json")):
+                  raw = path.read_bytes()
+                  (out / f"{prefix}{path.name}").write_bytes(raw)
+                  files[f"{prefix}{path.name}"] = {
+                      "sha256": hashlib.sha256(raw).hexdigest(),
+                      "count": len(json.loads(raw)),
+                  }
           manifest = {
               "updated": datetime.datetime.now(datetime.timezone.utc)
                           .strftime("%Y-%m-%dT%H:%M:%SZ"),
-              "source": "https://index.commoncrawl.org",
-              "generator": "scripts/harvest_commoncrawl.py",
+              "sources": ["https://index.commoncrawl.org",
+                          "http://web.archive.org/cdx"],
+              "generator": "scripts/harvest_ats.py + scripts/validate_ats_slugs.py",
               "files": files,
           }
-          pathlib.Path("manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
           print(json.dumps(manifest, indent=2))
           PY
 
-      - name: Skip when nothing was discovered
+      - name: Skip when nothing changed
         id: changed
         # Force-pushing identical bytes still moves the branch and makes every
-        # bot re-fetch. Compare against what is already published.
+        # bot re-fetch.
         run: |
           set -euo pipefail
           changed=false
           for p in greenhouse lever ashby workday icims bamboohr; do
-            [ -f "out/$p.json" ] || continue
-            new=$(sha256sum "out/$p.json" | cut -d' ' -f1)
-            old=$(git show "FETCH_HEAD:$p.json" 2>/dev/null | sha256sum | cut -d' ' -f1 || echo none)
-            if [ "$new" != "$old" ]; then
-              echo "$p changed"
-              changed=true
-            fi
+            for rel in "$p.json" "dead/$p.json"; do
+              [ -f "publish/$rel" ] || continue
+              new=$(sha256sum "publish/$rel" | cut -d' ' -f1)
+              old=$(git show "FETCH_HEAD:$rel" 2>/dev/null | sha256sum | cut -d' ' -f1 || echo none)
+              if [ "$new" != "$old" ]; then
+                echo "$rel changed"
+                changed=true
+              fi
+            done
           done
           echo "publish=$changed" >> "$GITHUB_OUTPUT"
-          [ "$changed" = true ] || echo "no new companies - nothing to publish"
+          [ "$changed" = true ] || echo "nothing to publish"
 
       - name: Publish to the ats-harvest branch
         if: steps.changed.outputs.publish == 'true'
@@ -226,15 +311,43 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          cd out
-          rm -rf .git
+          cd publish
           git init -q
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -q --orphan ats-harvest
-          git add ./*.json
-          git commit -q -m "ATS harvest $(date -u +%Y-%m-%d)"
+          git add ./*.json dead/*.json
+          git commit -q -m "ATS harvest + validation $(date -u +%Y-%m-%d)"
           git push -q --force \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
             ats-harvest
           echo "published to ats-harvest"
+
+      - name: Summary
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "## ATS harvest"
+            echo
+            echo "| platform | harvested | new | total | probed | live | dead |"
+            echo "|---|---:|---:|---:|---:|---:|---:|"
+            python - <<'PY'
+          import json, pathlib
+          def load(name, key):
+              p = pathlib.Path(name)
+              if not p.exists():
+                  return {}
+              try:
+                  return json.load(open(name)).get(key, {})
+              except Exception:
+                  return {}
+          h = load("harvest.json", "platforms")
+          v = load("validate.json", "platforms")
+          for name in ["greenhouse", "lever", "ashby", "workday", "icims", "bamboohr"]:
+              a, b = h.get(name, {}), v.get(name, {})
+              print(f"| {name} | {a.get('harvested', 0)} | {a.get('new', 0)} | "
+                    f"{a.get('total', 0)} | {b.get('probed', 0)} | "
+                    f"{b.get('live', 0)} | {b.get('dead', 0)} |")
+          PY
+          } >> "$GITHUB_STEP_SUMMARY"

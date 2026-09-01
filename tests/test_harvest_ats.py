@@ -20,7 +20,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-import harvest_commoncrawl as hc  # noqa: E402
+import harvest_ats as hc  # noqa: E402
 
 
 def _http_error(code: int, body: bytes = b"") -> urllib.error.HTTPError:
@@ -438,3 +438,167 @@ def test_total_failure_exits_nonzero(tmp_path, monkeypatch):
     monkeypatch.setattr(hc.time, "sleep", lambda s: None)
     assert hc.main(["--crawl", "CC-MAIN-2026-34", "--out", str(tmp_path / "o"),
                     "--delay", "0"]) == 1
+
+
+def test_page_count_failure_falls_back_to_blind_walk():
+    """A failed count must not cost the platform its data.
+
+    showNumPages on a large domain is the most expensive query the harvester
+    makes: bamboohr.com spans the entire marketing site, and its count query
+    timed out on all five older crawls in a real sweep while the paged fetches
+    for the same query would have worked. That run harvested zero BambooHR
+    companies purely because the count failed.
+    """
+    pages = {"bamboohr.com": ["https://acme.bamboohr.com/careers/list",
+                              "https://beta.bamboohr.com/careers/list"]}
+
+    def fetch(url: str) -> bytes:
+        import urllib.parse as _up
+        query = _up.parse_qs(_up.urlparse(url).query)
+        if "showNumPages" in query:
+            raise _http_error(504)                     # the count times out
+        page = int((query.get("page") or ["0"])[0])
+        if page > 0:
+            raise _http_error(404, b'{"message": "No Captures found"}')
+        return b"\n".join(json.dumps({"url": u}).encode()
+                          for u in pages["bamboohr.com"])
+
+    r = hc.harvest_platform(hc.PLATFORM_BY_NAME["bamboohr"], "CC-MAIN-2026-34",
+                            fetch=fetch, sleep=lambda s: None, delay=0,
+                            log=lambda m: None)
+    assert r.slugs == {"acme", "beta"}
+    assert r.errors                     # the degradation is still reported
+
+
+def test_blind_walk_is_bounded():
+    """An index that never returns an empty page must not loop forever."""
+    def fetch(url: str) -> bytes:
+        import urllib.parse as _up
+        if "showNumPages" in _up.parse_qs(_up.urlparse(url).query):
+            raise _http_error(504)
+        return json.dumps({"url": "https://acme.bamboohr.com/careers/list"}).encode()
+
+    r = hc.harvest_platform(hc.PLATFORM_BY_NAME["bamboohr"], "CC-MAIN-2026-34",
+                            fetch=fetch, sleep=lambda s: None, delay=0,
+                            log=lambda m: None)
+    assert r.pages_fetched == hc.BLIND_PAGE_LIMIT
+
+
+# --------------------------------------------------------------------------
+# Wayback index
+# --------------------------------------------------------------------------
+
+def test_wayback_collapse_depth_leaves_slug_characters():
+    """collapse=urlkey:N groups on the first N chars of `co,lever,jobs)/acme`.
+
+    Too shallow and distinct companies merge; too deep and the collapse stops
+    saving rows. A sweep without any collapse took 200,000 rows to find 853
+    companies; at the right depth 3,000 rows found 2,055.
+    """
+    shallow, deep = hc.wayback_collapse_depths("jobs.lever.co/*")
+    prefix = len("jobs.lever.co") + 2       # `co,lever,jobs)/`
+    assert shallow > prefix and deep > shallow
+
+
+def test_wayback_depths_scale_with_host_length():
+    short = hc.wayback_collapse_depths("jobs.lever.co/*")
+    long = hc.wayback_collapse_depths("job-boards.eu.greenhouse.io/*")
+    assert long[0] > short[0], "a longer host needs a deeper key prefix"
+
+
+def test_wayback_wildcard_host_is_stripped_for_depth():
+    """`*.icims.com/*` must measure icims.com, not the literal asterisk."""
+    assert hc.wayback_collapse_depths("*.icims.com/*") == \
+           hc.wayback_collapse_depths("icims.com/*")
+
+
+def _wb_page(urls, resume=None):
+    lines = [f"{u} co,x)/{i}" for i, u in enumerate(urls)]
+    if resume:
+        lines.append(resume)
+    return ("\n".join(lines)).encode()
+
+
+def test_wayback_salvages_a_truncated_page():
+    """Wayback truncates large responses routinely. Discarding partial bodies
+    loses most of a sweep; text output means every complete line is usable."""
+    body = _wb_page(["https://jobs.lever.co/acme/1",
+                     "https://jobs.lever.co/beta/2"])
+    body += b"\nhttps://jobs.lever.co/trunc"      # half-written final line
+
+    def fetch(url):
+        raise http.client.IncompleteRead(body)
+
+    lines, complete = hc._wayback_fetch_lines("u", fetch=fetch, sleep=lambda s: None)
+    assert complete is False
+    assert len(lines) == 2                        # the partial line is dropped
+
+
+def test_wayback_query_collects_and_stops_at_end():
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        if len(calls) == 1:
+            return _wb_page(["https://jobs.lever.co/acme/1"], resume="KEY2")
+        return _wb_page(["https://jobs.lever.co/beta/2"])   # no resume -> done
+
+    slugs, rows = hc.harvest_wayback_query(
+        "jobs.lever.co/*", hc.PLATFORM_BY_NAME["lever"].extract, 20,
+        fetch=fetch, sleep=lambda s: None, delay=0, log=lambda m: None)
+    assert slugs == {"acme", "beta"}
+    assert rows == 2
+    assert "resumeKey=KEY2" in calls[1]
+
+
+def test_wayback_query_stops_after_repeated_empty_gains():
+    """Paging can run for thousands of rows inside one company's URL space.
+    Without a stall cutoff a sweep spends its whole budget going nowhere."""
+    def fetch(url):
+        return _wb_page(["https://jobs.lever.co/acme/1"], resume="SAME")
+
+    slugs, _ = hc.harvest_wayback_query(
+        "jobs.lever.co/*", hc.PLATFORM_BY_NAME["lever"].extract, 20,
+        fetch=fetch, sleep=lambda s: None, delay=0, max_pages=100,
+        log=lambda m: None)
+    assert slugs == {"acme"}
+
+
+def test_wayback_query_is_bounded_by_max_pages():
+    seen = []
+
+    def fetch(url):
+        seen.append(url)
+        # Every page yields something new, so the stall cutoff never fires.
+        return _wb_page([f"https://jobs.lever.co/co{len(seen)}/1"], resume=f"K{len(seen)}")
+
+    hc.harvest_wayback_query(
+        "jobs.lever.co/*", hc.PLATFORM_BY_NAME["lever"].extract, 20,
+        fetch=fetch, sleep=lambda s: None, delay=0, max_pages=5,
+        log=lambda m: None)
+    assert len(seen) == 5
+
+
+def test_wayback_one_failing_query_does_not_kill_the_platform():
+    def fetch(url):
+        if "job-boards.eu" in url:
+            raise urllib.error.URLError("nope")
+        return _wb_page(["https://boards.greenhouse.io/acme/jobs/1"])
+
+    r = hc.harvest_platform_wayback(hc.PLATFORM_BY_NAME["greenhouse"],
+                                    fetch=fetch, sleep=lambda s: None, delay=0,
+                                    log=lambda m: None)
+    assert "acme" in r.slugs
+
+
+def test_lever_is_wayback_only_in_practice():
+    """Lever blocks CCBot outright (robots.txt: User-agent CCBot / Disallow /),
+    so it left Common Crawl after CC-MAIN-2025-38. Wayback is the only source
+    that still carries it, and dropping that query would silently lose ~4,000
+    companies."""
+    assert "jobs.lever.co/*" in hc.WAYBACK_QUERIES["lever"]
+
+
+def test_every_platform_has_a_wayback_query():
+    for platform in hc.PLATFORMS:
+        assert hc.WAYBACK_QUERIES.get(platform.name), platform.name

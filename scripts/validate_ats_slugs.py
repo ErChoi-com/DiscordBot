@@ -1,0 +1,437 @@
+"""Probe harvested ATS company slugs and record which boards are actually gone.
+
+Harvesting is optimistic: an archived URL proves a board existed when it was
+crawled, not that it exists now. Measured live rates for newly harvested slugs
+run from 87% (BambooHR) down to 11% (iCIMS), so a list that is only ever added
+to fills with companies that will never answer, and every one of them costs a
+request per scrape cycle forever.
+
+This closes that loop. It asks each platform whether a board exists and writes
+the misses into ``data/dead_slugs/<platform>.json`` -- the same file, the same
+``{slug: YYYY-MM-DD}`` shape, and the same meaning that ``ats_service`` already
+uses, so the bot needs no new concept to benefit. Nothing is deleted: a dead
+mark suppresses a slug until ``DEAD_SLUG_RECHECK_DAYS`` elapses and then it is
+probed again, which is what lets a board that was down for a day come back.
+
+Why probe here rather than let the bot discover deadness: the bot only learns a
+slug is dead by scraping it during a real cycle, so a freshly harvested batch
+costs thousands of wasted requests spread over weeks of user-facing runs. Doing
+it once, in CI, in parallel, gets the same answer before the slugs ever reach a
+scrape cycle.
+
+Usage:
+    python scripts/validate_ats_slugs.py                    # everything unchecked
+    python scripts/validate_ats_slugs.py --platform lever
+    python scripts/validate_ats_slugs.py --limit 2000       # bound a CI run
+    python scripts/validate_ats_slugs.py --sample 200 --dry-run
+    python scripts/validate_ats_slugs.py --recheck-dead     # re-probe dead marks
+
+Exit codes:
+    0  validation ran
+    1  every platform failed to probe (network or endpoints changed)
+    2  harness error
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import json
+import os
+import random
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Callable, Iterable
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = REPO_ROOT / "data"
+COMPANY_DIR = DATA_DIR / "ats_companies"
+HARVEST_DIR = DATA_DIR / "ats_harvest"
+DEAD_DIR = DATA_DIR / "dead_slugs"
+
+PLATFORMS = ("greenhouse", "lever", "ashby", "workday", "icims", "bamboohr")
+
+COMPANY_FILES = {p: f"{p}_companies.json" for p in PLATFORMS}
+
+# Mirrors ats_service.DEAD_SLUG_RECHECK_DAYS. A slug marked dead more recently
+# than this is not re-probed, so repeated runs cost nothing for known-dead
+# companies while still letting them back in eventually.
+RECHECK_DAYS = 7
+
+REQUEST_TIMEOUT = 25
+
+# Per-platform concurrency. These hit real ATS endpoints, so they stay at or
+# below what ats_service already uses for the same host.
+WORKERS = {"greenhouse": 16, "lever": 16, "ashby": 8, "workday": 12,
+           "icims": 12, "bamboohr": 12}
+
+USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36")
+
+
+class Unreachable(Exception):
+    """The probe could not reach the platform at all (as opposed to a 404)."""
+
+
+def _request(url: str, *, method: str = "GET", payload: dict | None = None,
+             timeout: int = REQUEST_TIMEOUT) -> tuple[int | None, bytes, str]:
+    """Returns (status, first bytes, final url). None status means no answer.
+
+    The final URL matters: BambooHR answers an unknown tenant with a 200 that
+    redirects to its marketing site, so status alone cannot tell them apart.
+    """
+    data = json.dumps(payload).encode() if payload is not None else None
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json,*/*"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read(2048), resp.geturl()
+    except urllib.error.HTTPError as exc:
+        return exc.code, b"", url
+    except Exception:
+        return None, b"", url
+
+
+# --------------------------------------------------------------------------
+# Per-platform liveness. Each returns True (board exists), False (it does not),
+# or raises Unreachable when the answer is "we could not tell".
+#
+# Every one of these was calibrated against known-live and known-dead slugs;
+# the obvious URL is wrong for four of the six platforms.
+# --------------------------------------------------------------------------
+
+def _decide(status: int | None) -> bool:
+    if status is None:
+        raise Unreachable("no response")
+    if status == 200:
+        return True
+    if status in (301, 302, 403, 404, 410, 422):
+        return False
+    # 5xx and rate limits say nothing about whether the company exists.
+    raise Unreachable(f"HTTP {status}")
+
+
+def live_greenhouse(slug: str) -> bool:
+    status, _, _ = _request(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs")
+    return _decide(status)
+
+
+def live_lever(slug: str) -> bool:
+    status, _, _ = _request(f"https://api.lever.co/v0/postings/{slug}?mode=json")
+    return _decide(status)
+
+
+def live_ashby(slug: str) -> bool:
+    # jobs.ashbyhq.com is a single-page app that answers 200 for every route,
+    # including nonsense, so it cannot distinguish a real board. The posting API
+    # 404s properly.
+    status, _, _ = _request(f"https://api.ashbyhq.com/posting-api/job-board/{slug}")
+    return _decide(status)
+
+
+def live_bamboohr(slug: str) -> bool:
+    # An unknown tenant is also 200: it redirects to www.bamboohr.com. The tells
+    # are the final URL leaving the tenant host and a real board answering JSON
+    # rather than a marketing page.
+    status, body, final = _request(f"https://{slug}.bamboohr.com/careers/list")
+    if status is None:
+        raise Unreachable("no response")
+    if status != 200:
+        return _decide(status)
+    if f"{slug}.bamboohr.com" not in final:
+        return False
+    return body.lstrip()[:1] in (b"{", b"[")
+
+
+def live_icims(slug: str) -> bool:
+    # iCIMS runs two mutually exclusive host conventions. Over a 120-slug
+    # sample, 46 resolved only as careers-<slug>.icims.com, 34 only as
+    # <slug>.icims.com, and zero resolved both ways -- so testing one form
+    # misreports roughly 42% of live boards as dead.
+    forms = [slug] if slug.startswith("careers-") else [f"careers-{slug}", slug]
+    unreachable = 0
+    for host in forms:
+        status, _, _ = _request(f"https://{host}.icims.com/sitemap.xml")
+        try:
+            if _decide(status):
+                return True
+        except Unreachable:
+            unreachable += 1
+    if unreachable == len(forms):
+        raise Unreachable("no form answered")
+    return False
+
+
+def live_workday(slug: str) -> bool:
+    # The CXS endpoint needs a real JSON body: without one a live tenant answers
+    # 500 and a nonexistent one 422, and the plain page GET is an SPA that 200s
+    # for anything. Only a bodied POST separates them.
+    parts = slug.split("|")
+    if len(parts) != 3:
+        return False
+    tenant, host, site = parts
+    status, _, _ = _request(
+        f"https://{tenant}.{host}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs",
+        method="POST",
+        payload={"appliedFacets": {}, "limit": 20, "offset": 0, "searchText": ""},
+    )
+    return _decide(status)
+
+
+PROBES: dict[str, Callable[[str], bool]] = {
+    "greenhouse": live_greenhouse, "lever": live_lever, "ashby": live_ashby,
+    "workday": live_workday, "icims": live_icims, "bamboohr": live_bamboohr,
+}
+
+
+# --------------------------------------------------------------------------
+# Slug and dead-mark storage, matching ats_service's on-disk contract
+# --------------------------------------------------------------------------
+
+def _read_list(path: Path) -> list[str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(x).strip() for x in data if str(x).strip()]
+
+
+def load_candidates(platform: str) -> list[str]:
+    """Every slug the bot would scrape: upstream list plus local harvest."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for path in (COMPANY_DIR / COMPANY_FILES[platform], HARVEST_DIR / f"{platform}.json"):
+        for slug in _read_list(path):
+            if slug not in seen:
+                seen.add(slug)
+                out.append(slug)
+    return out
+
+
+def load_dead(platform: str) -> dict[str, str]:
+    path = DEAD_DIR / f"{platform}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if isinstance(data, dict):
+        return {str(k): str(v) for k, v in data.items()}
+    # Older revisions stored a bare list; treat those as marked today so they
+    # still expire rather than being dropped.
+    if isinstance(data, list):
+        today = _dt.date.today().isoformat()
+        return {str(k): today for k in data}
+    return {}
+
+
+def save_dead(platform: str, dead: dict[str, str]) -> None:
+    """Write atomically, in ats_service's exact format.
+
+    write_text truncates in place, so an interrupted write leaves a half-written
+    file that ats_service parses as empty -- silently resurrecting every dead
+    slug on the platform.
+    """
+    DEAD_DIR.mkdir(parents=True, exist_ok=True)
+    target = DEAD_DIR / f"{platform}.json"
+    tmp = target.with_suffix(f".json.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(dead, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, target)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def _stale(marked: str, today: _dt.date, recheck_days: int) -> bool:
+    """True when a dead mark is old enough to be worth re-probing."""
+    try:
+        when = _dt.date.fromisoformat(marked)
+    except ValueError:
+        return True
+    return (today - when).days >= recheck_days
+
+
+def select_targets(platform: str, dead: dict[str, str], *, recheck_dead: bool,
+                   limit: int | None, sample: int | None, today: _dt.date,
+                   recheck_days: int = RECHECK_DAYS, seed: int = 0) -> list[str]:
+    """Slugs worth probing this run.
+
+    Unchecked slugs first, then dead marks old enough to deserve another look.
+    Ordering matters when --limit bounds the run: spending the budget on slugs
+    nobody has ever probed beats re-confirming what we already believe.
+    """
+    candidates = load_candidates(platform)
+    fresh = [s for s in candidates if s not in dead]
+    stale = [s for s in candidates
+             if s in dead and (recheck_dead or _stale(dead[s], today, recheck_days))]
+    ordered = fresh + stale
+    if sample is not None and len(ordered) > sample:
+        rng = random.Random(seed)
+        ordered = rng.sample(ordered, sample)
+    if limit is not None:
+        ordered = ordered[:limit]
+    return ordered
+
+
+def validate_platform(platform: str, slugs: Iterable[str], *,
+                      probe: Callable[[str], bool] | None = None,
+                      workers: int | None = None,
+                      log: Callable[[str], None] = print) -> dict[str, int]:
+    """Probe slugs concurrently. Returns counts and the resulting verdicts."""
+    slugs = list(slugs)
+    if probe is None:
+        probe = PROBES[platform]
+    if workers is None:
+        workers = WORKERS.get(platform, 8)
+
+    live: list[str] = []
+    dead: list[str] = []
+    unknown: list[str] = []
+    lock = threading.Lock()
+
+    def one(slug: str) -> None:
+        try:
+            ok = probe(slug)
+        except Unreachable:
+            with lock:
+                unknown.append(slug)
+            return
+        except Exception:
+            # Any unexpected failure is "we could not tell", never "dead":
+            # marking on a bug would suppress a real company for a week.
+            with lock:
+                unknown.append(slug)
+            return
+        with lock:
+            (live if ok else dead).append(slug)
+
+    if slugs:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(one, slugs))
+
+    log(f"[validate] {platform}: probed {len(slugs)} -> "
+        f"{len(live)} live, {len(dead)} dead, {len(unknown)} unknown")
+    return {"probed": len(slugs), "live": len(live), "dead": len(dead),
+            "unknown": len(unknown), "_live": live, "_dead": dead}
+
+
+def apply_results(dead_map: dict[str, str], result: dict, today: _dt.date) -> dict[str, int]:
+    """Fold verdicts into the dead map. Live slugs are cleared, dead ones dated.
+
+    Unknown slugs are left exactly as they were: a timeout is not evidence.
+    """
+    added = revived = redated = 0
+    for slug in result["_live"]:
+        if dead_map.pop(slug, None) is not None:
+            revived += 1
+    stamp = today.isoformat()
+    for slug in result["_dead"]:
+        if slug in dead_map:
+            redated += 1
+        else:
+            added += 1
+        dead_map[slug] = stamp
+    return {"added": added, "revived": revived, "redated": redated}
+
+
+def purge_expired(dead_map: dict[str, str], today: _dt.date, ttl_days: int) -> int:
+    """Drop marks older than the TTL so a long-dead slug is eventually retried."""
+    cutoff = (today - _dt.timedelta(days=ttl_days)).isoformat()
+    expired = [s for s, when in dead_map.items() if when < cutoff]
+    for slug in expired:
+        del dead_map[slug]
+    return len(expired)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--platform", action="append", dest="platforms",
+                        choices=sorted(PLATFORMS), help="limit to a platform")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="max slugs to probe per platform")
+    parser.add_argument("--sample", type=int, default=None,
+                        help="probe a random sample (for measuring live rates)")
+    parser.add_argument("--recheck-dead", action="store_true",
+                        help="re-probe every dead mark, ignoring the recheck window")
+    parser.add_argument("--ttl-days", type=int, default=90,
+                        help="drop dead marks older than this (default 90)")
+    parser.add_argument("--workers", type=int, default=None)
+    parser.add_argument("--dry-run", action="store_true",
+                        help="probe and report, write nothing")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    log: Callable[[str], None] = (
+        (lambda m: print(m, file=sys.stderr)) if args.json else print
+    )
+    today = _dt.date.today()
+    platforms = args.platforms or list(PLATFORMS)
+    summary: dict[str, dict] = {}
+    any_probed = False
+    any_targets = False
+    t0 = time.monotonic()
+
+    for platform in platforms:
+        dead_map = load_dead(platform)
+        expired = purge_expired(dead_map, today, args.ttl_days)
+        targets = select_targets(platform, dead_map, recheck_dead=args.recheck_dead,
+                                 limit=args.limit, sample=args.sample, today=today)
+        total = len(load_candidates(platform))
+        if targets:
+            any_targets = True
+        if not targets:
+            log(f"[validate] {platform}: nothing to probe "
+                f"({total} known, {len(dead_map)} dead)")
+            summary[platform] = {"probed": 0, "live": 0, "dead": 0, "unknown": 0,
+                                 "known": total, "dead_total": len(dead_map),
+                                 "expired": expired}
+            if expired and not args.dry_run:
+                save_dead(platform, dead_map)
+            continue
+
+        result = validate_platform(platform, targets, workers=args.workers, log=log)
+        if result["probed"] and result["unknown"] < result["probed"]:
+            any_probed = True
+        changes = apply_results(dead_map, result, today)
+        rate = 100.0 * result["live"] / max(1, result["live"] + result["dead"])
+        log(f"[validate] {platform}: live rate {rate:.1f}% "
+            f"(+{changes['added']} dead, {changes['revived']} revived, "
+            f"{expired} expired)")
+        summary[platform] = {
+            "probed": result["probed"], "live": result["live"],
+            "dead": result["dead"], "unknown": result["unknown"],
+            "live_rate": round(rate, 1), "known": total,
+            "dead_total": len(dead_map), "expired": expired, **changes,
+        }
+        if not args.dry_run:
+            save_dead(platform, dead_map)
+
+    elapsed = time.monotonic() - t0
+    log(f"[validate] done in {elapsed:.1f}s")
+    if args.json:
+        print(json.dumps({"elapsed_seconds": round(elapsed, 1),
+                          "dry_run": args.dry_run, "platforms": summary}, indent=2))
+    # "Nothing left to check" is a successful run -- every slug is either fresh
+    # or inside its recheck window. Only a run that had work and could not do
+    # any of it is a failure.
+    if any_targets and not any_probed:
+        print("[validate] had slugs to probe but every probe was unreachable",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

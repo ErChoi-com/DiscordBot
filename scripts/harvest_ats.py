@@ -20,11 +20,11 @@ Harvesting one crawl across every platform is ~15 requests.  Reading the WAT
 files for the same information would be terabytes.
 
 Usage:
-    python scripts/harvest_commoncrawl.py                  # latest crawl
-    python scripts/harvest_commoncrawl.py --crawl CC-MAIN-2026-30
-    python scripts/harvest_commoncrawl.py --crawls 3       # 3 most recent
-    python scripts/harvest_commoncrawl.py --platform greenhouse --dry-run
-    python scripts/harvest_commoncrawl.py --out data/ats_harvest
+    python scripts/harvest_ats.py                  # latest crawl
+    python scripts/harvest_ats.py --crawl CC-MAIN-2026-30
+    python scripts/harvest_ats.py --crawls 3       # 3 most recent
+    python scripts/harvest_ats.py --platform greenhouse --dry-run
+    python scripts/harvest_ats.py --out data/ats_harvest
 
 Exit codes:
     0  harvest completed (possibly with zero new slugs)
@@ -61,6 +61,11 @@ DEFAULT_OUT_DIR = REPO_ROOT / "data" / "ats_harvest"
 REQUEST_DELAY_SECONDS = 1.0
 REQUEST_TIMEOUT = 180
 MAX_RETRIES = 4
+
+# How many pages to walk when the page count is unavailable. Well above the
+# largest real count seen (Greenhouse and Workday peak at 5), so it bounds a
+# runaway rather than truncating a genuine result set.
+BLIND_PAGE_LIMIT = 25
 
 USER_AGENT = (
     "job-board-harvester/1.0 "
@@ -423,21 +428,26 @@ def harvest_platform(
     result = PlatformResult(platform.name)
 
     for query_url, match_type in platform.queries:
+        blind = False
         try:
             pages = page_count(crawl, query_url, match_type, fetch=fetch, sleep=sleep)
         except HarvestError as exc:
-            # One dead query must not cost us the platform's other query -- the
-            # two Greenhouse hosts are independent sources of companies.
-            result.errors.append(f"{query_url}: {exc}")
-            log(f"[harvest]   {query_url}: page count failed: {exc}")
-            continue
+            # Losing the count must not cost us the platform. showNumPages on a
+            # big domain is the most expensive query we make -- bamboohr.com
+            # spans the whole marketing site -- and it times out on a loaded
+            # index while the paged fetches for the same query still succeed.
+            # Walk pages until one comes back empty instead of giving up.
+            result.errors.append(f"{query_url}: page count failed, walking blind: {exc}")
+            log(f"[harvest]   {query_url}: page count failed ({exc}); walking blind")
+            pages, blind = BLIND_PAGE_LIMIT, True
 
         if pages == 0:
             log(f"[harvest]   {query_url}: no captures in {crawl}")
             continue
 
         limit = pages if max_pages is None else min(pages, max_pages)
-        log(f"[harvest]   {query_url}: {pages} page(s), fetching {limit}")
+        log(f"[harvest]   {query_url}: "
+            f"{'unknown' if blind else pages} page(s), fetching up to {limit}")
 
         for page in range(limit):
             sleep(delay)
@@ -451,6 +461,11 @@ def harvest_platform(
                 log(f"[harvest]   {query_url} page {page}: {exc}")
                 continue
             if raw is None:
+                # Walking blind, an empty page is the end of the result set --
+                # that is the only stop signal available without a count.
+                if blind:
+                    log(f"[harvest]   {query_url}: page {page} empty, stopping")
+                    break
                 continue
             result.pages_fetched += 1
             for url in iter_urls(raw):
@@ -488,6 +503,191 @@ def latest_crawls(
         raise HarvestError("collinfo.json listed no usable crawl ids")
     ids.sort(key=lambda cid: tuple(int(x) for x in cid.split("-")[2:]), reverse=True)
     return ids[:count]
+
+
+# ---------------------------------------------------------------------------
+# Wayback Machine index
+# ---------------------------------------------------------------------------
+#
+# A second, independent archive of the same web. It matters for two reasons.
+#
+# Coverage: Lever blocks Common Crawl outright -- jobs.lever.co/robots.txt
+# carries "User-agent: CCBot" / "Disallow: /" -- so Lever vanished from CC after
+# CC-MAIN-2025-38 and is not coming back. Wayback is still permitted there
+# ("User-agent: *" / "Allow: /") and is the only live source for Lever.
+#
+# Volume: a Wayback sweep of Greenhouse alone returned 11,591 slugs against
+# 5,446 from six Common Crawl snapshots.
+
+WAYBACK_URL = "http://web.archive.org/cdx/search/cdx"
+
+WAYBACK_QUERIES: dict[str, tuple[str, ...]] = {
+    "greenhouse": ("boards.greenhouse.io/*", "job-boards.greenhouse.io/*",
+                   "job-boards.eu.greenhouse.io/*"),
+    "lever": ("jobs.lever.co/*",),
+    "ashby": ("jobs.ashbyhq.com/*",),
+    "workday": ("*.myworkdayjobs.com/*", "*.myworkdaysite.com/*"),
+    "icims": ("*.icims.com/*",),
+    "bamboohr": ("*.bamboohr.com/*",),
+}
+
+# Rows per request. Wayback truncates large responses reliably, so this stays
+# small enough that most pages arrive whole.
+WAYBACK_PAGE_ROWS = 2000
+WAYBACK_MAX_PAGES = 60
+WAYBACK_SINCE = "2022"
+# Give up on a query after this many consecutive pages that add nothing new.
+WAYBACK_STALL_LIMIT = 3
+
+
+def wayback_collapse_depths(query: str) -> tuple[int, int]:
+    """Collapse depths to sweep for a query, shallow first.
+
+    ``collapse=urlkey:N`` groups captures sharing the first N characters of the
+    sort key (``co,lever,jobs)/acme/...``). Without it a sweep drowns: 200,000
+    rows of jobs.lever.co yielded 853 companies, because consecutive rows are
+    all the same handful of employers. With it, 3,000 rows yielded 2,055 -- two
+    orders of magnitude better.
+
+    The key prefix is the reversed host plus ")/", so the slug starts at
+    len(host)+2. Sweeping a shallow and a deeper offset and unioning gets both
+    breadth (aggressive collapse reaches more companies per row) and the slugs
+    that a shallow collapse merges because they share leading characters.
+    """
+    host = query.split("/")[0].lstrip("*.")
+    base = len(host) + 2
+    return base + 4, base + 9
+
+
+def _wayback_fetch_lines(
+    url: str, *, fetch: Fetcher | None = None,
+    sleep: Callable[[float], None] | None = None, tries: int = 3,
+) -> tuple[list[str], bool]:
+    """Fetch CDX text output, salvaging complete lines from a truncated body.
+
+    Returns (lines, complete). Wayback truncates often enough that discarding
+    partial responses loses most of a sweep. Text output is one record per line,
+    so every line before the cut is still usable and only the half-written last
+    one is dropped.
+
+    This is deliberately the opposite of the Common Crawl path, which rejects
+    partial bodies. There a short read is indistinguishable from a complete page
+    and would silently under-harvest; here the truncation is explicit, so
+    salvaging is safe and discarding is what loses data.
+    """
+    # Both resolved here rather than as default arguments: a default binds the
+    # module-level function at import, which defeats patching and lets the
+    # hermetic suite reach the network and really sleep.
+    if fetch is None:
+        fetch = _http_get
+    if sleep is None:
+        sleep = time.sleep
+    for attempt in range(tries):
+        try:
+            return fetch(url).decode("utf-8", "replace").splitlines(), True
+        except http.client.IncompleteRead as exc:
+            lines = exc.partial.decode("utf-8", "replace").splitlines()
+            if len(lines) > 1:
+                return lines[:-1], False
+        except (urllib.error.URLError, TimeoutError, OSError,
+                http.client.HTTPException):
+            if attempt < tries - 1:
+                sleep(4.0 * (attempt + 1))
+    return [], False
+
+
+def harvest_wayback_query(
+    query: str, extract: Callable[[str], str | None], depth: int, *,
+    fetch: Fetcher | None = None, sleep: Callable[[float], None] | None = None,
+    delay: float = 1.5, max_pages: int = WAYBACK_MAX_PAGES,
+    rows: int = WAYBACK_PAGE_ROWS, since: str = WAYBACK_SINCE,
+    log: Callable[[str], None] = print,
+) -> tuple[set[str], int]:
+    """Page one Wayback query at one collapse depth."""
+    if sleep is None:
+        sleep = time.sleep
+    slugs: set[str] = set()
+    resume: str | None = None
+    seen_rows = stalls = 0
+
+    for _page in range(max_pages):
+        params = {
+            "url": query, "fl": "original,urlkey", "collapse": f"urlkey:{depth}",
+            "limit": str(rows), "from": since, "showResumeKey": "true",
+        }
+        if resume:
+            params["resumeKey"] = resume
+        lines, complete = _wayback_fetch_lines(
+            WAYBACK_URL + "?" + urllib.parse.urlencode(params),
+            fetch=fetch, sleep=sleep,
+        )
+        if not lines:
+            break
+
+        next_resume: str | None = None
+        urls: list[str] = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(" ")
+            if len(parts) == 1 and not parts[0].startswith("http"):
+                next_resume = parts[0]      # trailing resume key
+            else:
+                urls.append(parts[0])
+
+        seen_rows += len(urls)
+        before = len(slugs)
+        for url in urls:
+            slug = extract(url)
+            if slug:
+                slugs.add(slug)
+        gained = len(slugs) - before
+
+        # A truncated page loses its trailing resume key. Continue from the last
+        # urlkey actually seen rather than abandoning the rest of the sweep.
+        if next_resume is None and not complete and urls:
+            tail = [ln for ln in lines if ln.strip()][-1].split(" ")
+            if len(tail) > 1:
+                next_resume = tail[-1]
+
+        if not next_resume:
+            break
+        stalls = stalls + 1 if gained == 0 else 0
+        if stalls >= WAYBACK_STALL_LIMIT:
+            log(f"[harvest]   wayback {query}@{depth}: "
+                f"{stalls} pages with nothing new, stopping")
+            break
+        resume = next_resume
+        sleep(delay)
+
+    return slugs, seen_rows
+
+
+def harvest_platform_wayback(
+    platform: Platform, *, fetch: Fetcher | None = None,
+    sleep: Callable[[float], None] | None = None, delay: float = 1.5,
+    max_pages: int = WAYBACK_MAX_PAGES, log: Callable[[str], None] = print,
+) -> PlatformResult:
+    """Sweep every Wayback query and collapse depth for one platform."""
+    result = PlatformResult(platform.name)
+    for query in WAYBACK_QUERIES.get(platform.name, ()):
+        for depth in wayback_collapse_depths(query):
+            try:
+                slugs, rows = harvest_wayback_query(
+                    query, platform.extract, depth, fetch=fetch, sleep=sleep,
+                    delay=delay, max_pages=max_pages, log=log,
+                )
+            except Exception as exc:        # noqa: BLE001 - one query, not the sweep
+                result.errors.append(f"wayback {query}@{depth}: {exc}")
+                log(f"[harvest]   wayback {query}@{depth} failed: {exc}")
+                continue
+            result.slugs |= slugs
+            result.records_seen += rows
+            result.pages_fetched += 1
+            log(f"[harvest]   wayback {query}@{depth}: {len(slugs)} slugs "
+                f"from {rows} rows (running total {len(result.slugs)})")
+    return result
 
 
 def load_existing(path: Path) -> set[str]:
@@ -536,7 +736,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true",
                         help="harvest and report, write nothing")
     parser.add_argument("--json", action="store_true", help="summary as JSON to stdout")
+    parser.add_argument("--index", action="append", dest="indexes",
+                        choices=["commoncrawl", "wayback"],
+                        help="which archive(s) to sweep (repeatable; "
+                             "default: both)")
     args = parser.parse_args(argv)
+
+    indexes = args.indexes or ["commoncrawl", "wayback"]
 
     if args.crawls < 1:
         print("--crawls must be at least 1", file=sys.stderr)
@@ -546,16 +752,23 @@ def main(argv: list[str] | None = None) -> int:
         (lambda msg: print(msg, file=sys.stderr)) if args.json else print
     )
 
-    try:
-        crawls = args.crawls_explicit or latest_crawls(args.crawls)
-    except HarvestError as exc:
-        print(f"[harvest] could not determine crawls: {exc}", file=sys.stderr)
-        return 1
+    crawls: list[str] = []
+    if "commoncrawl" in indexes:
+        try:
+            crawls = args.crawls_explicit or latest_crawls(args.crawls)
+        except HarvestError as exc:
+            # Losing Common Crawl must not cancel the Wayback sweep: they are
+            # independent archives, and Wayback is the only source for Lever.
+            print(f"[harvest] could not determine crawls: {exc}", file=sys.stderr)
+            if "wayback" not in indexes:
+                return 1
+            indexes = [i for i in indexes if i != "commoncrawl"]
 
     platforms = [PLATFORM_BY_NAME[n] for n in args.platforms] if args.platforms \
         else list(PLATFORMS)
 
-    log(f"[harvest] crawls: {', '.join(crawls)}")
+    log(f"[harvest] indexes: {', '.join(indexes)}")
+    log(f"[harvest] crawls: {', '.join(crawls) or '(none)'}")
     log(f"[harvest] platforms: {', '.join(p.name for p in platforms)}")
 
     t_start = time.monotonic()
@@ -568,10 +781,23 @@ def main(argv: list[str] | None = None) -> int:
         errors: list[str] = []
         pages = records = 0
 
-        for crawl in crawls:
-            log(f"[harvest] {platform.name} @ {crawl}")
-            result = harvest_platform(
-                platform, crawl, delay=args.delay, max_pages=args.max_pages, log=log,
+        if "commoncrawl" in indexes:
+            for crawl in crawls:
+                log(f"[harvest] {platform.name} @ {crawl}")
+                result = harvest_platform(
+                    platform, crawl, delay=args.delay, max_pages=args.max_pages,
+                    log=log,
+                )
+                found |= result.slugs
+                errors.extend(result.errors)
+                pages += result.pages_fetched
+                records += result.records_seen
+
+        if "wayback" in indexes:
+            log(f"[harvest] {platform.name} @ wayback")
+            result = harvest_platform_wayback(
+                platform, delay=max(args.delay, 1.0),
+                max_pages=args.max_pages or WAYBACK_MAX_PAGES, log=log,
             )
             found |= result.slugs
             errors.extend(result.errors)
@@ -582,6 +808,7 @@ def main(argv: list[str] | None = None) -> int:
         merged = existing | found
         summary[platform.name] = {
             "harvested": len(found), "new": len(new), "total": len(merged),
+            "indexes": indexes,
             "pages": pages, "records": records, "errors": errors,
         }
         log(f"[harvest] {platform.name}: {len(found)} harvested, "
@@ -597,7 +824,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.json:
         print(json.dumps({
-            "crawls": crawls, "elapsed_seconds": round(elapsed, 1),
+            "indexes": indexes, "crawls": crawls, "elapsed_seconds": round(elapsed, 1),
             "dry_run": args.dry_run, "platforms": summary,
         }, indent=2))
 
