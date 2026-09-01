@@ -1,0 +1,240 @@
+name: ATS company harvest
+
+# Discovers ATS company slugs from the Common Crawl URL index and publishes them
+# to the `ats-harvest` orphan branch, which sync_ats_companies.py pulls.
+#
+# Why this exists: the company lists come from Feashliaa/job-board-aggregator,
+# which builds them with a Common Crawl harvester it does not publish. Our lists
+# therefore only grow when that maintainer regenerates theirs. This runs the
+# same discovery ourselves, so a company that opened a board last month is
+# scrapeable without waiting on anyone.
+#
+# Why an orphan branch rather than a commit to main: the same reason as
+# geonames-sync.yml. These files are rewritten on a schedule, and six full slug
+# lists committed weekly would put a large diff in main's history every run for
+# data that is regenerable. The branch is force-pushed to a single commit, so
+# the remote holds exactly one copy.
+#
+# The output is additive by construction -- the harvester unions onto whatever
+# the branch already holds and never deletes -- which matters because Common
+# Crawl coverage genuinely fluctuates. Lever dropped out of the index entirely
+# after CC-MAIN-2025-38 (recent crawls carry only its robots.txt), so a run that
+# overwrote rather than merged would erase 4,000+ Lever companies the first time
+# it ran against a current crawl.
+
+on:
+  schedule:
+    # Weekly, Tuesdays 03:41 UTC. Common Crawl publishes roughly monthly, so
+    # this is already several times more often than the data changes; the point
+    # is to pick a new crawl up within days of release rather than to poll. The
+    # odd minute avoids the top-of-hour spike when GitHub delays scheduled jobs.
+    - cron: "41 3 * * 2"
+  workflow_dispatch:
+    inputs:
+      crawls:
+        description: "How many recent crawls to sweep"
+        required: false
+        default: "1"
+      extra_crawls:
+        description: >-
+          Space-separated crawl ids to sweep as well, e.g.
+          "CC-MAIN-2025-38 CC-MAIN-2024-38". Use this to backfill platforms that
+          have dropped out of recent crawls.
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  # Never two harvests at once: both would force-push the branch and the loser's
+  # discoveries would be silently dropped rather than merged.
+  group: ats-harvest
+  cancel-in-progress: false
+
+jobs:
+  harvest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Verify the harvester before running it
+        # The harvester parses someone else's URL conventions. If those change,
+        # the extraction tests are what notice -- running a broken harvester
+        # would publish a branch full of garbage slugs that every bot then
+        # probes for 90 days until the dead-slug TTL evicts them.
+        env:
+          PYTHONPATH: src
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          pytest tests/test_harvest_commoncrawl.py -q
+
+      - name: Fetch the previously published harvest
+        # The harvester merges into whatever is already in --out, so seeding the
+        # directory from the branch is what makes runs cumulative rather than
+        # each one replacing the last.
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          if git fetch --depth=1 origin ats-harvest 2>/dev/null; then
+            for p in greenhouse lever ashby workday icims bamboohr; do
+              git show "FETCH_HEAD:$p.json" > "out/$p.json" 2>/dev/null \
+                && echo "seeded $p ($(python -c "import json;print(len(json.load(open('out/$p.json'))))") slugs)" \
+                || echo "no published $p.json yet"
+            done
+          else
+            echo "no ats-harvest branch yet - first run"
+          fi
+
+      - name: Harvest
+        # Inputs reach the shell as environment variables rather than being
+        # interpolated into the script text: a ${{ }} expansion is pasted in
+        # verbatim before bash parses the line, so a crafted input value would
+        # be executed as part of the command.
+        env:
+          CRAWLS: ${{ github.event.inputs.crawls || '1' }}
+          EXTRA_CRAWLS: ${{ github.event.inputs.extra_crawls || '' }}
+        run: |
+          set -euo pipefail
+          args=(--crawls "$CRAWLS" --out out --json)
+          # Word-split deliberately, and only when non-empty: `for c in ; do` is
+          # a bash syntax error, so an unguarded loop would break every
+          # scheduled run (which never sets this input).
+          if [ -n "$EXTRA_CRAWLS" ]; then
+            for c in $EXTRA_CRAWLS; do
+              args+=(--crawl "$c")
+            done
+          fi
+          echo "running: harvest_commoncrawl.py ${args[*]}"
+          python scripts/harvest_commoncrawl.py "${args[@]}" > summary.json
+          cat summary.json
+
+      - name: Verify the harvest before publishing it
+        # A harvest that collapses is the failure mode that matters: the index
+        # returning empty pages, or a URL convention changing under the
+        # extractors, both produce a technically-valid file with almost nothing
+        # in it. Publishing that would not break the bot -- the merge is a union
+        # -- but it would mean silently harvesting nothing while reporting
+        # success every week, which is how this rots unnoticed.
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, sys, pathlib
+
+          # Floors are set well under the counts a single current crawl really
+          # yields (greenhouse ~3,000, ashby ~2,700, bamboohr ~3,300), so normal
+          # crawl-to-crawl variation never trips them.
+          FLOORS = {"greenhouse": 500, "ashby": 300, "workday": 300,
+                    "icims": 200, "bamboohr": 300}
+
+          summary = json.load(open("summary.json"))
+          platforms = summary["platforms"]
+          failed = []
+
+          for name, floor in FLOORS.items():
+              got = platforms.get(name, {}).get("harvested", 0)
+              status = "ok" if got >= floor else "LOW"
+              print(f"{name:11} harvested={got:6} floor={floor:5} {status}")
+              if got < floor:
+                  failed.append(f"{name}: {got} < {floor}")
+
+          # Lever is deliberately absent from FLOORS. It stopped appearing in
+          # Common Crawl after CC-MAIN-2025-38 -- current crawls carry only its
+          # robots.txt -- so a zero there is the expected result of a routine
+          # run, not a regression. Its slugs come from backfilling older crawls
+          # via the extra_crawls input.
+          lev = platforms.get("lever", {}).get("harvested", 0)
+          print(f"{'lever':11} harvested={lev:6} (no floor - absent from recent crawls)")
+
+          for name, data in platforms.items():
+              for err in data.get("errors", []):
+                  print(f"::warning::{name}: {err}")
+
+          if failed:
+              print("::error::harvest below floor: " + "; ".join(failed))
+              sys.exit(1)
+
+          for path in pathlib.Path("out").glob("*.json"):
+              payload = json.loads(path.read_text())
+              assert isinstance(payload, list), f"{path} is not a list"
+              assert payload == sorted(payload), f"{path} is not sorted"
+          print("all output files parse, are lists, and are sorted")
+          PY
+
+      - name: Build the manifest
+        # Consumers can check this first: a few hundred bytes tells them whether
+        # anything changed before they pull the lists.
+        run: |
+          set -euo pipefail
+          cd out
+          python - <<'PY'
+          import json, hashlib, pathlib, datetime
+          files = {}
+          for path in sorted(pathlib.Path(".").glob("*.json")):
+              if path.name == "manifest.json":
+                  continue
+              raw = path.read_bytes()
+              files[path.name] = {
+                  "sha256": hashlib.sha256(raw).hexdigest(),
+                  "count": len(json.loads(raw)),
+              }
+          manifest = {
+              "updated": datetime.datetime.now(datetime.timezone.utc)
+                          .strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "source": "https://index.commoncrawl.org",
+              "generator": "scripts/harvest_commoncrawl.py",
+              "files": files,
+          }
+          pathlib.Path("manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          print(json.dumps(manifest, indent=2))
+          PY
+
+      - name: Skip when nothing was discovered
+        id: changed
+        # Force-pushing identical bytes still moves the branch and makes every
+        # bot re-fetch. Compare against what is already published.
+        run: |
+          set -euo pipefail
+          changed=false
+          for p in greenhouse lever ashby workday icims bamboohr; do
+            [ -f "out/$p.json" ] || continue
+            new=$(sha256sum "out/$p.json" | cut -d' ' -f1)
+            old=$(git show "FETCH_HEAD:$p.json" 2>/dev/null | sha256sum | cut -d' ' -f1 || echo none)
+            if [ "$new" != "$old" ]; then
+              echo "$p changed"
+              changed=true
+            fi
+          done
+          echo "publish=$changed" >> "$GITHUB_OUTPUT"
+          [ "$changed" = true ] || echo "no new companies - nothing to publish"
+
+      - name: Publish to the ats-harvest branch
+        if: steps.changed.outputs.publish == 'true'
+        # The token goes through the environment, not the command line: a secret
+        # interpolated into `run:` lands in the process arguments, where a shell
+        # trace or a crash dump would carry it.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd out
+          rm -rf .git
+          git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q --orphan ats-harvest
+          git add ./*.json
+          git commit -q -m "ATS harvest $(date -u +%Y-%m-%d)"
+          git push -q --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            ats-harvest
+          echo "published to ats-harvest"
