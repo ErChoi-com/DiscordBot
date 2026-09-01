@@ -1576,18 +1576,18 @@ def main(argv: list[str] | None = None) -> int:
 
     selected = [PLATFORM_BY_NAME[n] for n in args.platforms] if args.platforms         else list(PLATFORMS)
 
-    if args.prune:
-        report = prune_existing(args.out, selected, log=log)
-        if args.json:
-            print(json.dumps({"pruned": report}, indent=2))
-        return 0
-
-    # Taken before crawl resolution, not after. Fetching the crawl listing can
-    # block for minutes on a slow collinfo, and a lock acquired afterwards
-    # leaves precisely that window unguarded -- which is when a second run is
-    # most likely to be started, because nothing has been logged yet and the
-    # harvest looks idle. Observed exactly that: a sweep sat in latest_crawls
-    # with no lock and no output for over half a minute.
+    # Taken before anything reads or writes the output directory, and before
+    # crawl resolution in particular. Fetching the crawl listing can block for
+    # minutes on a slow collinfo, and a lock acquired afterwards leaves
+    # precisely that window unguarded -- which is when a second run is most
+    # likely to be started, because nothing has been logged yet and the harvest
+    # looks idle. Observed exactly that: a sweep sat in latest_crawls with no
+    # lock and no output for over half a minute.
+    #
+    # It covers --prune too. Pruning is a read-modify-write over the same
+    # files, so running it against a live harvest loses whichever side writes
+    # first -- and the workflow runs prune immediately before a collection,
+    # which is exactly where an overlapping manual run would land.
     try:
         lock_ctx = output_lock(args.out)
         lock_ctx.__enter__()
@@ -1595,6 +1595,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[harvest] {exc}", file=sys.stderr)
         return 2
     try:
+        if args.prune:
+            report = prune_existing(args.out, selected, log=log)
+            if args.json:
+                print(json.dumps({"pruned": report}, indent=2))
+            return 0
+
         crawls: list[str] = []
         if "commoncrawl" in indexes or "ccbulk" in indexes:
             try:

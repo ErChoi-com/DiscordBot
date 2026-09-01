@@ -1677,3 +1677,24 @@ def test_lock_is_held_during_crawl_resolution(monkeypatch, tmp_path):
 
     hc.main(["--index", "ccbulk", "--platform", "lever", "--out", str(out)])
     assert held == [True], "crawl resolution ran without the lock held"
+
+
+def test_prune_holds_the_output_lock(tmp_path, monkeypatch):
+    """Pruning is a read-modify-write over the harvest files, so running it
+    against a live harvest loses whichever side writes first. The workflow
+    runs prune immediately before a collection, which is exactly where an
+    overlapping manual run would land."""
+    out = tmp_path / "out"
+    out.mkdir()
+    hc.write_slugs(out / "lever.json", {"acme", "al-"})
+    (out / hc.LOCK_NAME).write_text("99999")
+    assert hc.main(["--prune", "--out", str(out)]) == 2
+    # Refused, so the file is untouched.
+    assert hc.load_existing(out / "lever.json") == {"acme", "al-"}
+
+
+def test_prune_releases_the_lock(tmp_path):
+    out = tmp_path / "out"
+    hc.write_slugs(out / "lever.json", {"acme"})
+    assert hc.main(["--prune", "--out", str(out)]) == 0
+    assert not (out / hc.LOCK_NAME).exists()
