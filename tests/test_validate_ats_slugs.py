@@ -311,3 +311,59 @@ def test_lever_unreachable_in_every_region_is_not_dead(monkeypatch):
     monkeypatch.setattr(v, "_request", lambda url, **k: (503, b"", url))
     with pytest.raises(v.Unreachable):
         v.live_lever("acme")
+
+
+# --------------------------------------------------------------------------
+# Wall-clock budget
+# --------------------------------------------------------------------------
+
+def test_validation_stops_when_its_budget_is_spent():
+    """Platforms differ by an order of magnitude in how fast they answer --
+    Workday needs a bodied POST, iCIMS two requests per slug -- so one slow
+    platform must not consume the whole CI job."""
+    clock = {"t": 0.0}
+    seen = []
+
+    def probe(slug):
+        seen.append(slug)
+        clock["t"] += 10.0
+        return True
+
+    result = v.validate_platform(
+        "greenhouse", [f"co{i}" for i in range(400)], probe=probe, workers=2,
+        budget_seconds=100.0, now=lambda: clock["t"], log=lambda m: None)
+    assert result["probed"] < 400
+    assert result["deferred"] == 400 - result["probed"]
+
+
+def test_deferred_slugs_are_not_marked_dead():
+    """Whatever the budget cut off must keep its existing state, not be
+    recorded as anything -- it is simply picked up on the next run."""
+    clock = {"t": 0.0}
+
+    def probe(slug):
+        clock["t"] += 10.0
+        return False
+
+    dead: dict[str, str] = {}
+    result = v.validate_platform(
+        "greenhouse", [f"co{i}" for i in range(400)], probe=probe, workers=2,
+        budget_seconds=50.0, now=lambda: clock["t"], log=lambda m: None)
+    v.apply_results(dead, result, TODAY)
+    assert len(dead) == result["dead"] < 400
+
+
+def test_budget_never_skips_the_first_chunk():
+    """A budget of zero must still make progress rather than probing nothing
+    forever."""
+    result = v.validate_platform(
+        "greenhouse", ["a", "b"], probe=lambda s: True, workers=2,
+        budget_seconds=0.0, now=lambda: 10_000.0, log=lambda m: None)
+    assert result["probed"] == 2
+
+
+def test_no_budget_probes_everything():
+    result = v.validate_platform(
+        "greenhouse", [f"co{i}" for i in range(50)], probe=lambda s: True,
+        workers=4, budget_seconds=None, log=lambda m: None)
+    assert result["probed"] == 50 and result["deferred"] == 0

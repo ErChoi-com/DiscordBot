@@ -303,13 +303,23 @@ def select_targets(platform: str, dead: dict[str, str], *, recheck_dead: bool,
 def validate_platform(platform: str, slugs: Iterable[str], *,
                       probe: Callable[[str], bool] | None = None,
                       workers: int | None = None,
+                      budget_seconds: float | None = None,
+                      now: Callable[[], float] = time.monotonic,
                       log: Callable[[str], None] = print) -> dict[str, int]:
-    """Probe slugs concurrently. Returns counts and the resulting verdicts."""
+    """Probe slugs concurrently. Returns counts and the resulting verdicts.
+
+    Bounded by wall clock, not just count. Platforms differ by an order of
+    magnitude in how fast they answer -- Workday needs a bodied POST and iCIMS
+    two requests per slug -- so a slug budget that suits one starves the rest.
+    Whatever is not reached this run is simply picked up next run: the target
+    selection prefers never-probed slugs, so progress accumulates.
+    """
     slugs = list(slugs)
     if probe is None:
         probe = PROBES[platform]
     if workers is None:
         workers = WORKERS.get(platform, 8)
+    started = now()
 
     live: list[str] = []
     dead: list[str] = []
@@ -332,14 +342,31 @@ def validate_platform(platform: str, slugs: Iterable[str], *,
         with lock:
             (live if ok else dead).append(slug)
 
+    # Submitted in chunks so the budget can be checked between them. Cancelling
+    # in-flight probes is not possible once submitted, so a chunk is the
+    # granularity: small enough to stop promptly, large enough to keep every
+    # worker busy.
+    chunk = max(workers * 4, 1)
+    probed = 0
+    stopped_early = False
     if slugs:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            list(pool.map(one, slugs))
+            for start in range(0, len(slugs), chunk):
+                if budget_seconds is not None and start and                         now() - started > budget_seconds:
+                    stopped_early = True
+                    break
+                batch = slugs[start:start + chunk]
+                list(pool.map(one, batch))
+                probed += len(batch)
 
-    log(f"[validate] {platform}: probed {len(slugs)} -> "
+    if stopped_early:
+        log(f"[validate] {platform}: budget spent, {len(slugs) - probed} slug(s) "
+            "deferred to the next run")
+    log(f"[validate] {platform}: probed {probed} -> "
         f"{len(live)} live, {len(dead)} dead, {len(unknown)} unknown")
-    return {"probed": len(slugs), "live": len(live), "dead": len(dead),
-            "unknown": len(unknown), "_live": live, "_dead": dead}
+    return {"probed": probed, "live": len(live), "dead": len(dead),
+            "unknown": len(unknown), "deferred": len(slugs) - probed,
+            "_live": live, "_dead": dead}
 
 
 def apply_results(dead_map: dict[str, str], result: dict, today: _dt.date) -> dict[str, int]:
@@ -383,6 +410,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ttl-days", type=int, default=90,
                         help="drop dead marks older than this (default 90)")
     parser.add_argument("--workers", type=int, default=None)
+    parser.add_argument("--budget-seconds", type=float, default=1200.0,
+                        help="wall-clock ceiling per platform (0 disables)")
     parser.add_argument("--dry-run", action="store_true",
                         help="probe and report, write nothing")
     parser.add_argument("--json", action="store_true")
@@ -416,7 +445,9 @@ def main(argv: list[str] | None = None) -> int:
                 save_dead(platform, dead_map)
             continue
 
-        result = validate_platform(platform, targets, workers=args.workers, log=log)
+        result = validate_platform(
+            platform, targets, workers=args.workers,
+            budget_seconds=args.budget_seconds or None, log=log)
         if result["probed"] and result["unknown"] < result["probed"]:
             any_probed = True
         changes = apply_results(dead_map, result, today)
@@ -428,6 +459,7 @@ def main(argv: list[str] | None = None) -> int:
             "probed": result["probed"], "live": result["live"],
             "dead": result["dead"], "unknown": result["unknown"],
             "live_rate": round(rate, 1), "known": total,
+            "deferred": result.get("deferred", 0),
             "dead_total": len(dead_map), "expired": expired, **changes,
         }
         if not args.dry_run:
