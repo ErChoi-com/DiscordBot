@@ -320,6 +320,22 @@ def _extract_workday(url: str) -> str | None:
     return _workday_triple(tenant, host, site)
 
 
+# Paylocity identifies a company by GUID rather than a name slug, and the board
+# URL carries it: recruiting.paylocity.com/recruiting/jobs/All/<guid>/<Name>.
+# Upstream ships these as {guid, name, jobs} objects; we store the bare guid so
+# the harvest file stays a flat list like every other platform.
+_PAYLOCITY_RE = re.compile(
+    r"^https?://recruiting\.paylocity\.com/recruiting/jobs/all/"
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+    re.IGNORECASE,
+)
+
+
+def _extract_paylocity(url: str) -> str | None:
+    m = _PAYLOCITY_RE.match(url)
+    return m.group(1).lower() if m else None
+
+
 PLATFORMS: tuple[Platform, ...] = (
     Platform(
         "greenhouse",
@@ -364,6 +380,11 @@ PLATFORMS: tuple[Platform, ...] = (
         "bamboohr",
         (("bamboohr.com", "domain"),),
         _subdomain_extractor("bamboohr.com"),
+    ),
+    Platform(
+        "paylocity",
+        (("recruiting.paylocity.com/*", "prefix"),),
+        _extract_paylocity,
     ),
 )
 
@@ -688,6 +709,7 @@ WAYBACK_QUERIES: dict[str, tuple[str, ...]] = {
     # out (504), and a path-scoped url= is ignored when the host is wildcarded.
     # Common Crawl covers iCIMS fine, so the query only burned a time budget.
     "icims": (),
+    "paylocity": ("recruiting.paylocity.com/*",),
     "bamboohr": ("*.bamboohr.com/*",),
 }
 
@@ -718,6 +740,12 @@ WAYBACK_QUERY_BUDGET_SECONDS = 420.0
 WAYBACK_EXPLICIT_DEPTHS: dict[str, tuple[int, ...]] = {
     "*.myworkdayjobs.com/*": (32, 40),
     "*.myworkdaysite.com/*": (30, 38),
+    # Paylocity puts a deep fixed path before the identifier --
+    # `com,paylocity,recruiting)/recruiting/jobs/all/<guid>` -- so the derived
+    # depth of 30 collapses every /recruiting/* URL into one group and yields
+    # nothing. Measured over 600-900 rows: depth 46 returned 0 rows, 50 gave
+    # 492 guids, 52 gave 775, 56 gave 378 and 60 gave 0.
+    "recruiting.paylocity.com/*": (50, 52),
 }
 
 

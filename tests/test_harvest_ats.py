@@ -710,21 +710,26 @@ def test_greenhouse_sweeps_the_eu_host_in_both_indexes():
 def test_every_wayback_query_host_has_a_matching_extractor():
     """A query without an extractor that recognises its host silently discards
     every row it fetches -- which is exactly what myworkdaysite.com did."""
+    guid = "2eba1a0a-d60f-4fd8-95ab-90b070f1d9f2"
     probes = {
-        "greenhouse": "https://{host}/acme/jobs/1",
-        "lever": "https://{host}/acme/abc",
-        "ashby": "https://{host}/acme/abc",
-        "icims": "https://acme.{host}/jobs/1",
-        "bamboohr": "https://acme.{host}/careers/list",
+        "greenhouse": ("https://{host}/acme/jobs/1", "acme"),
+        "lever": ("https://{host}/acme/abc", "acme"),
+        "ashby": ("https://{host}/acme/abc", "acme"),
+        "icims": ("https://acme.{host}/jobs/1", "acme"),
+        "bamboohr": ("https://acme.{host}/careers/list", "acme"),
+        # Paylocity's identifier is a GUID, not a name.
+        "paylocity": ("https://{host}/recruiting/jobs/All/" + guid + "/X", guid),
     }
     for name, queries in hc.WAYBACK_QUERIES.items():
         if name == "workday":
             continue          # covered by test_myworkdaysite_extraction
+        assert name in probes, f"{name} has queries but no round-trip probe"
+        template, expected = probes[name]
         extract = hc.PLATFORM_BY_NAME[name].extract
         for query in queries:
             host = query.split("/")[0].lstrip("*.")
-            url = probes[name].format(host=host)
-            assert extract(url) == "acme", f"{name}: {query} -> {url}"
+            url = template.format(host=host)
+            assert extract(url) == expected, f"{name}: {query} -> {url}"
 
 
 def test_lever_sweeps_both_regions():
@@ -968,3 +973,36 @@ def test_cache_write_failure_does_not_break_a_harvest(tmp_path):
     got = hc.latest_crawls(1, fetch=lambda u: _collinfo("CC-MAIN-2026-34"),
                            sleep=lambda s: None, cache_path=unwritable)
     assert got == ["CC-MAIN-2026-34"]
+
+
+# --------------------------------------------------------------------------
+# Paylocity
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://recruiting.paylocity.com/recruiting/jobs/All/"
+     "2eba1a0a-d60f-4fd8-95ab-90b070f1d9f2/National-Registry-of-EMTs",
+     "2eba1a0a-d60f-4fd8-95ab-90b070f1d9f2"),
+    # The archived path casing varies; the stored form is lowercase.
+    ("https://recruiting.paylocity.com/Recruiting/Jobs/All/"
+     "2EBA1A0A-D60F-4FD8-95AB-90B070F1D9F2/X",
+     "2eba1a0a-d60f-4fd8-95ab-90b070f1d9f2"),
+    ("https://recruiting.paylocity.com/ads.txt", None),
+    ("https://recruiting.paylocity.com/Recruiting/Content/citrus", None),
+    ("https://recruiting.paylocity.com/recruiting/jobs/All/not-a-guid/X", None),
+])
+def test_paylocity_extracts_the_guid(url, expected):
+    """Paylocity identifies a company by GUID rather than a name slug."""
+    assert hc.PLATFORM_BY_NAME["paylocity"].extract(url) == expected
+
+
+def test_paylocity_has_explicit_collapse_depths():
+    """Its identifier sits behind a deep fixed path
+    (`/recruiting/jobs/all/<guid>`), so the derived depth collapses every
+    /recruiting/* URL into one group. Measured: derived depth 30 returned 0
+    guids, depth 52 returned 775 from 900 rows."""
+    query = "recruiting.paylocity.com/*"
+    assert query in hc.WAYBACK_EXPLICIT_DEPTHS
+    depths = hc.wayback_collapse_depths(query)
+    # Must clear "com,paylocity,recruiting)/recruiting/jobs/all/".
+    assert min(depths) >= 46, depths

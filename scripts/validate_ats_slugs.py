@@ -54,9 +54,13 @@ COMPANY_DIR = DATA_DIR / "ats_companies"
 HARVEST_DIR = DATA_DIR / "ats_harvest"
 DEAD_DIR = DATA_DIR / "dead_slugs"
 
-PLATFORMS = ("greenhouse", "lever", "ashby", "workday", "icims", "bamboohr")
+PLATFORMS = ("greenhouse", "lever", "ashby", "workday", "icims", "bamboohr",
+             "paylocity")
 
 COMPANY_FILES = {p: f"{p}_companies.json" for p in PLATFORMS}
+# Upstream ships this one under a different name, and as {guid, name, jobs}
+# objects rather than a flat list of identifiers.
+COMPANY_FILES["paylocity"] = "paylocity_companies_clean.json"
 
 # Mirrors ats_service.DEAD_SLUG_RECHECK_DAYS. A slug marked dead more recently
 # than this is not re-probed, so repeated runs cost nothing for known-dead
@@ -68,7 +72,14 @@ REQUEST_TIMEOUT = 25
 # Per-platform concurrency. These hit real ATS endpoints, so they stay at or
 # below what ats_service already uses for the same host.
 WORKERS = {"greenhouse": 16, "lever": 16, "ashby": 8, "workday": 12,
-           "icims": 12, "bamboohr": 12}
+           "icims": 12, "bamboohr": 12,
+           # Paylocity refuses connections outright under load rather than
+           # slowing down: at 4 workers all 60 probes in a batch failed within
+           # 8 seconds, at 2 workers the same batch resolved 41 of 60. Every
+           # refusal is recorded unknown and changes no marks, so the cost of
+           # pushing harder is wasted requests, not wrong verdicts -- but it is
+           # still wasted.
+           "paylocity": 2}
 
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36")
@@ -184,6 +195,24 @@ def live_icims(slug: str) -> bool:
     return False
 
 
+def live_paylocity(slug: str) -> bool:
+    """Paylocity answers 200 for an unknown company too.
+
+    A missing board renders a 4.3KB shell titled "Job Not Found" while a real
+    one renders "<Company> - Job Opportunities", so status and even response
+    size are not the discriminator -- the title is. Same trap as Ashby's SPA
+    and BambooHR's marketing redirect.
+    """
+    status, body, _ = _request(
+        f"https://recruiting.paylocity.com/recruiting/jobs/All/{slug}",
+        timeout=REQUEST_TIMEOUT)
+    if status is None:
+        raise Unreachable("no response")
+    if status != 200:
+        return _decide(status)
+    return b"Job Not Found" not in body
+
+
 def live_workday(slug: str) -> bool:
     # The CXS endpoint needs a real JSON body: without one a live tenant answers
     # 500 and a nonexistent one 422, and the plain page GET is an SPA that 200s
@@ -203,6 +232,7 @@ def live_workday(slug: str) -> bool:
 PROBES: dict[str, Callable[[str], bool]] = {
     "greenhouse": live_greenhouse, "lever": live_lever, "ashby": live_ashby,
     "workday": live_workday, "icims": live_icims, "bamboohr": live_bamboohr,
+    "paylocity": live_paylocity,
 }
 
 
@@ -211,13 +241,23 @@ PROBES: dict[str, Callable[[str], bool]] = {
 # --------------------------------------------------------------------------
 
 def _read_list(path: Path) -> list[str]:
+    """Read an identifier list, tolerating upstream's object-shaped Paylocity
+    file. Without the dict branch every entry would stringify to "{'guid': ...}"
+    and the whole platform would probe as garbage."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
     if not isinstance(data, list):
         return []
-    return [str(x).strip() for x in data if str(x).strip()]
+    out: list[str] = []
+    for item in data:
+        if isinstance(item, dict):
+            item = item.get("guid") or item.get("id") or ""
+        text = str(item).strip()
+        if text:
+            out.append(text)
+    return out
 
 
 def load_candidates(platform: str) -> list[str]:

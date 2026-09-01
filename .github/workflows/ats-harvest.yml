@@ -104,7 +104,7 @@ jobs:
           set -euo pipefail
           mkdir -p data/ats_harvest data/dead_slugs
           if git fetch --depth=1 origin ats-harvest 2>/dev/null; then
-            for p in greenhouse lever ashby workday icims bamboohr; do
+            for p in greenhouse lever ashby workday icims bamboohr paylocity; do
               git show "FETCH_HEAD:$p.json" > "data/ats_harvest/$p.json" 2>/dev/null \
                 && echo "seeded harvest $p" || echo "no published $p.json yet"
               git show "FETCH_HEAD:dead/$p.json" > "data/dead_slugs/$p.json" 2>/dev/null \
@@ -172,6 +172,11 @@ jobs:
           # finds zero. Its companies come from Wayback.
           lev = platforms.get("lever", {}).get("harvested", 0)
           print(f"{'lever':11} harvested={lev:6} (no floor - blocks CCBot)")
+          # Paylocity has no floor yet: newly added, and its yield across a
+          # full sweep is unmeasured, so any number here would be a guess that
+          # fails the build rather than a check that catches a regression.
+          pay = platforms.get("paylocity", {}).get("harvested", 0)
+          print(f"{'paylocity':11} harvested={pay:6} (no floor - newly added)")
 
           for name, data in platforms.items():
               for err in data.get("errors", []):
@@ -307,7 +312,7 @@ jobs:
         run: |
           set -euo pipefail
           changed=false
-          for p in greenhouse lever ashby workday icims bamboohr; do
+          for p in greenhouse lever ashby workday icims bamboohr paylocity; do
             for rel in "$p.json" "dead/$p.json"; do
               [ -f "publish/$rel" ] || continue
               new=$(sha256sum "publish/$rel" | cut -d' ' -f1)
@@ -365,7 +370,8 @@ jobs:
                   return {}
           h = load("harvest.json", "platforms")
           v = load("validate.json", "platforms")
-          for name in ["greenhouse", "lever", "ashby", "workday", "icims", "bamboohr"]:
+          for name in ["greenhouse", "lever", "ashby", "workday", "icims",
+                       "bamboohr", "paylocity"]:
               a, b = h.get(name, {}), v.get(name, {})
               audit = b.get("audit") or {}
               # The audit rate, not the working one: the working pass samples
