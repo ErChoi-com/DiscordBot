@@ -595,7 +595,21 @@ WAYBACK_STALL_LIMIT = 3
 WAYBACK_QUERY_BUDGET_SECONDS = 420.0
 
 
-def wayback_collapse_depths(query: str) -> tuple[int, int]:
+# Explicit collapse depths for queries whose identifying part is not where the
+# derivation below assumes. The heuristic reads the slug from the path, but a
+# wildcard-subdomain query puts it in the *host* portion of the sort key, ahead
+# of the ")". Workday is the extreme case: its key is
+# `com,myworkdayjobs,<wdN-host>,<tenant>)/...`, so the derived depth of 23 cuts
+# inside the host and collapses every tenant beneath it. Measured on a live
+# sweep: depth 23 returned 7 rows and zero companies, depth 40 returned 1,500
+# rows and 643 companies.
+WAYBACK_EXPLICIT_DEPTHS: dict[str, tuple[int, ...]] = {
+    "*.myworkdayjobs.com/*": (32, 40),
+    "*.myworkdaysite.com/*": (30, 38),
+}
+
+
+def wayback_collapse_depths(query: str) -> tuple[int, ...]:
     """Collapse depths to sweep for a query, shallow first.
 
     ``collapse=urlkey:N`` groups captures sharing the first N characters of the
@@ -608,7 +622,13 @@ def wayback_collapse_depths(query: str) -> tuple[int, int]:
     len(host)+2. Sweeping a shallow and a deeper offset and unioning gets both
     breadth (aggressive collapse reaches more companies per row) and the slugs
     that a shallow collapse merges because they share leading characters.
+
+    This derivation only holds when the slug is in the path. Queries whose slug
+    lives in the host are listed in WAYBACK_EXPLICIT_DEPTHS instead.
     """
+    explicit = WAYBACK_EXPLICIT_DEPTHS.get(query)
+    if explicit:
+        return explicit
     host = query.split("/")[0].lstrip("*.")
     base = len(host) + 2
     return base + 4, base + 9

@@ -733,3 +733,34 @@ def test_eu_lever_urls_extract_the_bare_company_slug():
     got = hc.PLATFORM_BY_NAME["lever"].extract(
         "https://jobs.eu.lever.co/amicustherapeutics/96625890-d24b-4c98")
     assert got == "amicustherapeutics"
+
+
+def test_multi_level_subdomain_queries_have_explicit_depths():
+    """The depth derivation reads the slug from the path, which is wrong for a
+    query whose slug lives behind two subdomain levels.
+
+    Workday's sort key is `com,myworkdayjobs,<wdN-host>,<tenant>)/...`, so the
+    derived depth cuts inside the host and collapses every tenant beneath it.
+    Measured live: the derived depth 23 returned 7 rows and zero companies,
+    while 40 returned 1,500 rows and 643 companies. The failure is silent --
+    the sweep reports success having harvested nothing -- so it needs a guard.
+    """
+    for query in hc.WAYBACK_QUERIES["workday"]:
+        depths = hc.wayback_collapse_depths(query)
+        assert query in hc.WAYBACK_EXPLICIT_DEPTHS, query
+        # Must clear the reversed registered domain plus a host label.
+        domain = query.split("/")[0].lstrip("*.")
+        assert min(depths) > len(domain) + 8, (query, depths)
+
+
+def test_explicit_depths_are_ordered_shallow_first():
+    for query, depths in hc.WAYBACK_EXPLICIT_DEPTHS.items():
+        assert list(depths) == sorted(depths), query
+        assert len(depths) >= 2, query
+
+
+def test_explicit_depths_only_name_real_queries():
+    """A typo'd key here silently reverts that query to the broken derivation."""
+    every = {q for qs in hc.WAYBACK_QUERIES.values() for q in qs}
+    for query in hc.WAYBACK_EXPLICIT_DEPTHS:
+        assert query in every, query
