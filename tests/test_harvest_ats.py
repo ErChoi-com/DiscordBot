@@ -1653,3 +1653,27 @@ def test_main_exits_rather_than_racing(tmp_path, monkeypatch):
     _offline_bulk(monkeypatch)
     assert hc.main(["--index", "ccbulk", "--crawl", "CC-MAIN-2026-34",
                     "--platform", "lever", "--out", str(out)]) == 2
+
+
+def test_lock_is_held_during_crawl_resolution(monkeypatch, tmp_path):
+    """The lock must cover fetching the crawl listing, not start after it.
+
+    latest_crawls can block for minutes on a slow collinfo. A lock taken
+    afterwards leaves exactly that window open -- and it is the window where a
+    second run is most likely to be started, because nothing has been logged
+    yet and the harvest looks idle. Observed directly: a sweep sat in
+    latest_crawls for over 30 seconds holding no lock.
+    """
+    out = tmp_path / "out"
+    held: list[bool] = []
+
+    def slow_listing(*args, **kwargs):
+        held.append((out / hc.LOCK_NAME).exists())
+        raise hc.HarvestError("listing unavailable")
+
+    monkeypatch.setattr(hc, "latest_crawls", slow_listing)
+    _offline_bulk(monkeypatch)
+    monkeypatch.setattr(hc.time, "sleep", lambda s: None)
+
+    hc.main(["--index", "ccbulk", "--platform", "lever", "--out", str(out)])
+    assert held == [True], "crawl resolution ran without the lock held"

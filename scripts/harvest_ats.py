@@ -1574,27 +1574,12 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"pruned": report}, indent=2))
         return 0
 
-    crawls: list[str] = []
-    if "commoncrawl" in indexes or "ccbulk" in indexes:
-        try:
-            crawls = args.crawls_explicit or latest_crawls(
-                args.crawls, cache_path=args.out / CRAWL_CACHE_NAME,
-                discover_years=args.discover_years)
-        except HarvestError as exc:
-            # Losing Common Crawl must not cancel the Wayback sweep: they are
-            # independent archives, and Wayback is the only source for Lever.
-            print(f"[harvest] could not determine crawls: {exc}", file=sys.stderr)
-            if "wayback" not in indexes:
-                return 1
-            indexes = [i for i in indexes if i not in ("commoncrawl", "ccbulk")]
-
-    platforms = [PLATFORM_BY_NAME[n] for n in args.platforms] if args.platforms \
-        else list(PLATFORMS)
-
-    log(f"[harvest] indexes: {', '.join(indexes)}")
-    log(f"[harvest] crawls: {', '.join(crawls) or '(none)'}")
-    log(f"[harvest] platforms: {', '.join(p.name for p in platforms)}")
-
+    # Taken before crawl resolution, not after. Fetching the crawl listing can
+    # block for minutes on a slow collinfo, and a lock acquired afterwards
+    # leaves precisely that window unguarded -- which is when a second run is
+    # most likely to be started, because nothing has been logged yet and the
+    # harvest looks idle. Observed exactly that: a sweep sat in latest_crawls
+    # with no lock and no output for over half a minute.
     try:
         lock_ctx = output_lock(args.out)
         lock_ctx.__enter__()
@@ -1602,6 +1587,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[harvest] {exc}", file=sys.stderr)
         return 2
     try:
+        crawls: list[str] = []
+        if "commoncrawl" in indexes or "ccbulk" in indexes:
+            try:
+                crawls = args.crawls_explicit or latest_crawls(
+                    args.crawls, cache_path=args.out / CRAWL_CACHE_NAME,
+                    discover_years=args.discover_years)
+            except HarvestError as exc:
+                # Losing Common Crawl must not cancel the Wayback sweep: they
+                # are independent archives, and Wayback is Lever's only source.
+                print(f"[harvest] could not determine crawls: {exc}",
+                      file=sys.stderr)
+                if "wayback" not in indexes:
+                    return 1
+                indexes = [i for i in indexes
+                           if i not in ("commoncrawl", "ccbulk")]
+
+        platforms = [PLATFORM_BY_NAME[n] for n in args.platforms] \
+            if args.platforms else list(PLATFORMS)
+
+        log(f"[harvest] indexes: {', '.join(indexes)}")
+        log(f"[harvest] crawls: {', '.join(crawls) or '(none)'}")
+        log(f"[harvest] platforms: {', '.join(p.name for p in platforms)}")
+
         t_start = time.monotonic()
         summary: dict[str, dict[str, object]] = {}
         any_success = False
