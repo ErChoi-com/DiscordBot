@@ -757,6 +757,13 @@ def _save_crawl_cache(cache_path: Path | None, ids: list[str]) -> None:
 #   records and 1,033 distinct companies in 3s total. The API needed minutes
 #   per page for the same data.
 #
+#   Agreement. It returns what the query service returns, which matters now
+#   that it is the default path. On CC-MAIN-2026-34, measured against API
+#   sweeps of the same crawl: Ashby 2,708 companies from 20,403 records
+#   against the API's 2,708 from 20,403, and iCIMS 2,004 from 22,382 against
+#   2,005 from 22,721. Both were roughly 11% short before the boundary blocks
+#   either side of a range were included -- see bulk_find_blocks.
+#
 #   Politeness. Range reads of static files do not compete for the shared
 #   query service, which is what the rate limit exists to protect.
 #
