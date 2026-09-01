@@ -142,14 +142,19 @@ jobs:
         # Six rather than thirty, though, and that bound is deliberate. Two
         # matched sweeps differing only in the age of the crawls:
         #
-        #   12 recent  (CC-MAIN-2025-38 .. 2026-34)  +5,378 at 90.7% live
-        #   18 archival (CC-MAIN-2024-10 .. 2025-33) +2,475 at 32.2% live
+        #   12 recent   (CC-MAIN-2025-38 .. 2026-34)  +5,378 at 90.7% live
+        #   18 archival (CC-MAIN-2024-10 .. 2025-33)  +2,475 at 32.2% live
+        #    8 older    (CC-MAIN-2022-33 .. 2023-50)  +1,259 at 11.7% live
         #
-        # Reaching further back keeps finding companies, but two thirds of them
-        # are gone, and every dead slug costs a request per scrape cycle until
-        # the TTL evicts it. Raising this number looks like more coverage and
-        # is mostly more work for the bot. The age of the evidence, not the
-        # archive it came from, is what predicts a live board.
+        # Reaching further back keeps finding companies and they keep getting
+        # deader, and past a point the trade goes negative. The 2022-2023 sweep
+        # bought about 145 live boards and 1,114 dead ones; ats_service
+        # re-probes a dead slug every DEAD_SLUG_RECHECK_DAYS, so those cost on
+        # the order of 8,000 requests a year, permanently, for 145 companies.
+        #
+        # Raising this number looks like more coverage and is mostly more work
+        # for the bot. The age of the evidence, not the archive it came from,
+        # is what predicts a live board.
         #
         # Lever is the one reason to sweep archival crawls at all: it blocks
         # CCBot, so it left Common Crawl after CC-MAIN-2025-38 and older crawls
