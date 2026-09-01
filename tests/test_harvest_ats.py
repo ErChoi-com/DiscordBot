@@ -1451,3 +1451,21 @@ def test_underscores_are_fine_in_a_path_slug():
     assert hc.PLATFORM_BY_NAME["greenhouse"].extract(
         "https://job-boards.greenhouse.io/2026_summer_intern_program/jobs/1"
     ) == "2026_summer_intern_program"
+
+
+@pytest.mark.parametrize("site", ["job", "details", "login", "en-", "fr-"])
+def test_workday_dead_path_components_are_not_sites(site):
+    """Each probed across every tenant carrying it and found entirely dead:
+    job 0/30 live (62 entries), details 0/25, login 0/22, and truncated
+    locales like "en-" 0/24."""
+    assert hc._workday_triple("acme", "wd1", site) is None
+
+
+@pytest.mark.parametrize("site", ["search", "external", "careers", "jobs"])
+def test_workday_real_sites_that_look_like_path_components_survive(site):
+    """The guard against intuition. "search" looks exactly as much like a URL
+    component as "job" does, and is a live board for 26 tenants (83.9%);
+    "jobs" plural is real where "job" singular is not. Rejecting on appearance
+    rather than measurement would have deleted them.
+    """
+    assert hc._workday_triple("acme", "wd1", site) == f"acme|wd1|{site}"

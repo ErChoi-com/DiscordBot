@@ -242,7 +242,21 @@ _WORKDAY_SITE_REJECT = frozenset({
     "robots.txt", "sitemap.xml", "favicon.ico", "index.html",
     "wday", "assets", "cdn-cgi", "static", "refreshfacet", "images", "img",
     "css", "js", "fonts", "media", "api", "wday-assets",
+    # Path components that land in the site position, each probed and found
+    # entirely dead across every tenant carrying them:
+    #   job      62 entries, 0/30 live   (the /job/<id>/<title> component;
+    #                                     upstream has 10 and they are dead too)
+    #   details  25 entries, 0/25 live
+    #   login    22 entries, 0/22 live
+    # For contrast "external" runs 69% live and "search" 83.9%, so this list
+    # stays evidence-led rather than intuition-led: "search" looks just as much
+    # like a path component and is a real site for 26 tenants.
+    "job", "details", "login",
 })
+
+# A truncated locale, e.g. "en-" from a URL cut mid-segment. 24 such entries
+# were harvested and none resolved.
+_WORKDAY_PARTIAL_LOCALE_RE = re.compile(r"^[a-z]{2}-$")
 
 # Workday's other public domain, with the host and tenant the other way round:
 # myworkdayjobs.com is <tenant>.<wdN>.myworkdayjobs.com, while myworkdaysite.com
@@ -269,6 +283,8 @@ def _workday_triple(tenant: str, host: str, site: str) -> str | None:
     if not _looks_like_company(tenant):
         return None
     if not site or site in _WORKDAY_SITE_REJECT:
+        return None
+    if _WORKDAY_PARTIAL_LOCALE_RE.fullmatch(site):
         return None
     # No dot: a site segment never has one, while ads.txt, app-ads.txt and
     # shared-vendors.min.js all do. Verified against upstream -- zero of its
