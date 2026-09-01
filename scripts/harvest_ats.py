@@ -539,6 +539,13 @@ WAYBACK_SINCE = "2022"
 # Give up on a query after this many consecutive pages that add nothing new.
 WAYBACK_STALL_LIMIT = 3
 
+# Wall-clock ceiling for a single query+depth sweep. Wayback can slow to the
+# point where one query would otherwise consume the entire CI job: at a 180s
+# request timeout with retries, sixty pages is theoretically hours. The sweep is
+# cumulative across runs, so cutting a slow query short costs nothing but a
+# little progress this week.
+WAYBACK_QUERY_BUDGET_SECONDS = 420.0
+
 
 def wayback_collapse_depths(query: str) -> tuple[int, int]:
     """Collapse depths to sweep for a query, shallow first.
@@ -601,16 +608,23 @@ def harvest_wayback_query(
     fetch: Fetcher | None = None, sleep: Callable[[float], None] | None = None,
     delay: float = 1.5, max_pages: int = WAYBACK_MAX_PAGES,
     rows: int = WAYBACK_PAGE_ROWS, since: str = WAYBACK_SINCE,
+    budget_seconds: float = WAYBACK_QUERY_BUDGET_SECONDS,
+    now: Callable[[], float] = time.monotonic,
     log: Callable[[str], None] = print,
 ) -> tuple[set[str], int]:
     """Page one Wayback query at one collapse depth."""
     if sleep is None:
         sleep = time.sleep
+    started = now()
     slugs: set[str] = set()
     resume: str | None = None
     seen_rows = stalls = 0
 
-    for _page in range(max_pages):
+    for page in range(max_pages):
+        if page and now() - started > budget_seconds:
+            log(f"[harvest]   wayback {query}@{depth}: budget spent after "
+                f"{page} page(s), stopping")
+            break
         params = {
             "url": query, "fl": "original,urlkey", "collapse": f"urlkey:{depth}",
             "limit": str(rows), "from": since, "showResumeKey": "true",

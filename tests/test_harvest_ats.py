@@ -602,3 +602,42 @@ def test_lever_is_wayback_only_in_practice():
 def test_every_platform_has_a_wayback_query():
     for platform in hc.PLATFORMS:
         assert hc.WAYBACK_QUERIES.get(platform.name), platform.name
+
+
+def test_wayback_query_stops_when_its_time_budget_is_spent():
+    """One slow query must not consume the whole CI job.
+
+    Wayback can degrade to the point where a single query would run for hours
+    at a 180s request timeout with retries. The sweep is cumulative across
+    weekly runs, so cutting a slow query short costs a little progress, not
+    data.
+    """
+    clock = {"t": 0.0}
+    seen = []
+
+    def fetch(url):
+        seen.append(url)
+        clock["t"] += 100.0          # each page "takes" 100 seconds
+        return _wb_page([f"https://jobs.lever.co/co{len(seen)}/1"],
+                        resume=f"K{len(seen)}")
+
+    slugs, _ = hc.harvest_wayback_query(
+        "jobs.lever.co/*", hc.PLATFORM_BY_NAME["lever"].extract, 20,
+        fetch=fetch, sleep=lambda s: None, delay=0, max_pages=100,
+        budget_seconds=250.0, now=lambda: clock["t"], log=lambda m: None)
+    # Stops once the budget is exceeded rather than running all 100 pages.
+    assert 2 <= len(seen) <= 5
+    assert slugs
+
+
+def test_wayback_budget_never_skips_the_first_page():
+    """A budget already blown by an earlier query must still fetch one page,
+    otherwise a slow run silently harvests nothing at all."""
+    def fetch(url):
+        return _wb_page(["https://jobs.lever.co/acme/1"])
+
+    slugs, _ = hc.harvest_wayback_query(
+        "jobs.lever.co/*", hc.PLATFORM_BY_NAME["lever"].extract, 20,
+        fetch=fetch, sleep=lambda s: None, delay=0,
+        budget_seconds=0.0, now=lambda: 10_000.0, log=lambda m: None)
+    assert slugs == {"acme"}
