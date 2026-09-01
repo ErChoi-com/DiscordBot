@@ -521,3 +521,37 @@ def test_paylocity_concurrency_stays_at_two():
 def test_every_platform_has_a_worker_count():
     for platform in v.PLATFORMS:
         assert v.WORKERS.get(platform), platform
+
+
+def test_uncorroborated_slugs_are_probed_first(tmp_path, monkeypatch):
+    """Whether a slug also appears upstream predicts liveness strongly.
+
+    Measured on Lever: slugs in both lists are 41.7% live, harvest-only 11.7%,
+    upstream-only 1.7%. A bounded run exists to retire dead slugs before the
+    bot spends a request on each every cycle, so probing the ~88%-dead group
+    first buys several times more dead marks per probe.
+    """
+    _seed(tmp_path, monkeypatch, "lever",
+          ["corroborated"], harvest=["corroborated", "harvest-only"])
+    targets = v.select_targets("lever", {}, recheck_dead=False, limit=None,
+                               sample=None, today=TODAY)
+    assert targets[0] == "harvest-only"
+    assert set(targets) == {"corroborated", "harvest-only"}
+
+
+def test_ordering_changes_the_order_not_the_set(tmp_path, monkeypatch):
+    """Everything is still reached; the priority only decides when."""
+    _seed(tmp_path, monkeypatch, "lever", ["a", "b"], harvest=["c", "d"])
+    targets = v.select_targets("lever", {}, recheck_dead=False, limit=None,
+                               sample=None, today=TODAY)
+    assert set(targets) == {"a", "b", "c", "d"}
+
+
+def test_unchecked_still_outrank_stale_dead_marks(tmp_path, monkeypatch):
+    """The corroboration ordering must not promote a known-dead slug above one
+    nobody has ever probed."""
+    _seed(tmp_path, monkeypatch, "lever", ["olddead"], harvest=["fresh"],
+          dead={"olddead": "2026-01-01"})
+    targets = v.select_targets("lever", v.load_dead("lever"), recheck_dead=False,
+                               limit=1, sample=None, today=TODAY)
+    assert targets == ["fresh"]

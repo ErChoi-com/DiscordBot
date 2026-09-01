@@ -367,7 +367,22 @@ def select_targets(platform: str, dead: dict[str, str], *, recheck_dead: bool,
     nobody has ever probed beats re-confirming what we already believe.
     """
     candidates = load_candidates(platform)
+    # Uncorroborated slugs first among the unchecked ones. Whether a slug also
+    # appears in the upstream list turns out to predict liveness strongly --
+    # measured on Lever, where the two lists overlap heavily:
+    #
+    #   in both upstream and our harvest   4,267 slugs   41.7% live
+    #   our harvest only                   3,426 slugs   11.7% live
+    #   upstream only                        101 slugs    1.7% live
+    #
+    # The point of a bounded run is to retire dead slugs before the bot spends
+    # a request on each of them every cycle, so probing the ~88%-dead group
+    # first buys several times more dead marks per probe than probing the
+    # corroborated ones. It changes the order, never the set: everything is
+    # still reached, just sooner or later.
+    upstream = set(_read_list(COMPANY_DIR / COMPANY_FILES[platform]))
     fresh = [s for s in candidates if s not in dead]
+    fresh.sort(key=lambda s: s in upstream)
     stale = [s for s in candidates
              if s in dead and (recheck_dead or _stale(dead[s], today, recheck_days))]
     ordered = fresh + stale
