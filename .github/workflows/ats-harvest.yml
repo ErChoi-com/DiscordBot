@@ -351,8 +351,8 @@ jobs:
           {
             echo "## ATS harvest"
             echo
-            echo "| platform | harvested | new | total | probed | live | dead |"
-            echo "|---|---:|---:|---:|---:|---:|---:|"
+            echo "| platform | harvested | new | total | probed | live | dead | true live rate |"
+            echo "|---|---:|---:|---:|---:|---:|---:|---:|"
             python - <<'PY'
           import json, pathlib
           def load(name, key):
@@ -367,8 +367,12 @@ jobs:
           v = load("validate.json", "platforms")
           for name in ["greenhouse", "lever", "ashby", "workday", "icims", "bamboohr"]:
               a, b = h.get(name, {}), v.get(name, {})
+              audit = b.get("audit") or {}
+              # The audit rate, not the working one: the working pass samples
+              # survivors by design and its rate is not the population's.
+              rate = f"{audit['rate']}% (n={audit['sampled']})" if audit else "-"
               print(f"| {name} | {a.get('harvested', 0)} | {a.get('new', 0)} | "
                     f"{a.get('total', 0)} | {b.get('probed', 0)} | "
-                    f"{b.get('live', 0)} | {b.get('dead', 0)} |")
+                    f"{b.get('live', 0)} | {b.get('dead', 0)} | {rate} |")
           PY
           } >> "$GITHUB_STEP_SUMMARY"

@@ -423,6 +423,40 @@ def purge_expired(dead_map: dict[str, str], today: _dt.date, ttl_days: int) -> i
     return len(expired)
 
 
+def audit_live_rate(platform: str, sample: int, *,
+                     probe: Callable[[str], bool] | None = None,
+                     workers: int | None = None,
+                     seed: int = 0,
+                     log: Callable[[str], None] = print) -> dict[str, int]:
+    """Estimate a platform's true live rate from a uniform random sample.
+
+    The working pass cannot answer this. It probes never-probed slugs first --
+    correct for getting work done, since re-confirming known-dead companies is
+    waste -- but that means it systematically samples survivors: everything the
+    bot already found dead is excluded. Reading its live rate as the
+    population's overstates it badly. Measured on the same data, the working
+    pass reported 97.5% while a uniform sample of the same slugs was 38.8%.
+
+    Deliberately read-only. Folding these verdicts into the dead map would let
+    an audit reshape the population it is trying to measure, and the working
+    pass reaches those slugs on its own soon enough.
+    """
+    candidates = load_candidates(platform)
+    if not candidates:
+        return {"sampled": 0, "live": 0, "dead": 0, "unknown": 0, "rate": 0.0}
+    picks = (candidates if len(candidates) <= sample
+             else random.Random(seed).sample(candidates, sample))
+    result = validate_platform(platform, picks, probe=probe, workers=workers,
+                               log=lambda _m: None)
+    decided = result["live"] + result["dead"]
+    rate = round(100.0 * result["live"] / decided, 1) if decided else 0.0
+    log(f"[validate] {platform}: audit sample {result['probed']} of "
+        f"{len(candidates)} -> {rate}% live (population estimate)")
+    return {"sampled": result["probed"], "live": result["live"],
+            "dead": result["dead"], "unknown": result["unknown"],
+            "rate": rate, "population": len(candidates)}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--platform", action="append", dest="platforms",
@@ -438,6 +472,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--budget-seconds", type=float, default=1200.0,
                         help="wall-clock ceiling per platform (0 disables)")
+    parser.add_argument("--audit-sample", type=int, default=0,
+                        help="also probe N random slugs per platform, read-only, "
+                             "to estimate the true population live rate")
     parser.add_argument("--dry-run", action="store_true",
                         help="probe and report, write nothing")
     parser.add_argument("--json", action="store_true")
@@ -501,6 +538,11 @@ def main(argv: list[str] | None = None) -> int:
             "deferred": result.get("deferred", 0),
             "dead_total": len(dead_map), "expired": expired, **changes,
         }
+
+    if args.audit_sample > 0:
+        for platform in platforms:
+            summary.setdefault(platform, {})["audit"] = audit_live_rate(
+                platform, args.audit_sample, workers=args.workers, log=log)
 
     elapsed = time.monotonic() - t0
     log(f"[validate] done in {elapsed:.1f}s")

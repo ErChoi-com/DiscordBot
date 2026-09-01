@@ -413,3 +413,66 @@ def test_merge_applies_the_ttl_purge(tmp_path, monkeypatch):
     changes = v.save_dead_merged("lever", result, TODAY, ttl_days=90)
     assert changes["expired"] == 1
     assert "ancient" not in v.load_dead("lever")
+
+
+# --------------------------------------------------------------------------
+# Unbiased audit sampling
+# --------------------------------------------------------------------------
+
+def test_audit_samples_the_whole_population_not_just_unprobed(tmp_path, monkeypatch):
+    """The working pass probes never-probed slugs first, so its live rate
+    excludes everything already known dead and reads far too high -- 97.5%
+    against 38.8% on the same data. The audit must sample uniformly.
+    """
+    _seed(tmp_path, monkeypatch, "lever", [f"co{i}" for i in range(100)],
+          dead={f"co{i}": "2026-08-30" for i in range(90)})
+    seen = []
+
+    def probe(slug):
+        seen.append(slug)
+        return int(slug[2:]) >= 90        # only the 10 unprobed ones are live
+
+    out = v.audit_live_rate("lever", 100, probe=probe, workers=2,
+                            log=lambda m: None)
+    assert out["sampled"] == 100
+    # A biased pass would have found 100%; the true population rate is 10%.
+    assert out["rate"] == 10.0
+
+
+def test_audit_is_read_only(tmp_path, monkeypatch):
+    """Folding audit verdicts into the dead map would let the measurement
+    reshape the population it is measuring."""
+    _seed(tmp_path, monkeypatch, "lever", ["a", "b"], dead={"a": "2026-08-30"})
+    before = v.load_dead("lever")
+    v.audit_live_rate("lever", 2, probe=lambda s: False, workers=1,
+                      log=lambda m: None)
+    assert v.load_dead("lever") == before
+
+
+def test_audit_handles_a_population_smaller_than_the_sample(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch, "lever", ["only"])
+    out = v.audit_live_rate("lever", 500, probe=lambda s: True, workers=1,
+                            log=lambda m: None)
+    assert out["sampled"] == 1 and out["rate"] == 100.0
+
+
+def test_audit_on_empty_population_is_not_an_error(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch, "lever", [])
+    out = v.audit_live_rate("lever", 50, probe=lambda s: True, workers=1,
+                            log=lambda m: None)
+    assert out["sampled"] == 0 and out["rate"] == 0.0
+
+
+def test_audit_rate_ignores_unknowns(tmp_path, monkeypatch):
+    """A rate over attempts rather than answers would let timeouts read as
+    deaths, the same mistake the CI gate had."""
+    _seed(tmp_path, monkeypatch, "lever", ["a", "b", "c", "d"])
+
+    def probe(slug):
+        if slug in ("a", "b"):
+            raise v.Unreachable("timeout")
+        return slug == "c"
+
+    out = v.audit_live_rate("lever", 4, probe=probe, workers=2, log=lambda m: None)
+    assert out["unknown"] == 2
+    assert out["rate"] == 50.0        # 1 live of 2 decided, not of 4 attempted
