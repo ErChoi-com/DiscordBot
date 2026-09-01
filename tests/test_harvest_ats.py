@@ -23,6 +23,20 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import harvest_ats as hc  # noqa: E402
 
 
+def _offline_bulk(monkeypatch):
+    """Stub the bulk index's own fetchers.
+
+    They are separate from _http_get, so patching only that leaves the bulk
+    path reaching data.commoncrawl.org for real -- which is how a 2-second
+    suite quietly became a 62-second one.
+    """
+    def no_net(*args, **kwargs):
+        raise urllib.error.URLError("offline in tests")
+
+    monkeypatch.setattr(hc, "_http_get_range", no_net)
+    monkeypatch.setattr(hc, "_http_head_size", no_net)
+
+
 def _http_error(code: int, body: bytes = b"") -> urllib.error.HTTPError:
     import io
     return urllib.error.HTTPError(
@@ -415,9 +429,10 @@ def test_harvest_is_additive_never_removes(tmp_path, monkeypatch):
     })
     monkeypatch.setattr(hc, "_http_get", fetch)
     monkeypatch.setattr(hc.time, "sleep", lambda s: None)
+    _offline_bulk(monkeypatch)
 
     rc = hc.main(["--crawl", "CC-MAIN-2026-34", "--platform", "greenhouse",
-                  "--out", str(out), "--delay", "0"])
+                  "--out", str(out), "--index", "commoncrawl", "--delay", "0"])
     assert rc == 0
     assert hc.load_existing(out / "greenhouse.json") == {"old-company", "acme", "newco"}
 
@@ -429,8 +444,10 @@ def test_dry_run_writes_nothing(tmp_path, monkeypatch):
     })
     monkeypatch.setattr(hc, "_http_get", fetch)
     monkeypatch.setattr(hc.time, "sleep", lambda s: None)
+    _offline_bulk(monkeypatch)
     assert hc.main(["--crawl", "CC-MAIN-2026-34", "--platform", "greenhouse",
-                    "--out", str(out), "--dry-run", "--delay", "0"]) == 0
+                    "--out", str(out), "--index", "commoncrawl",
+                    "--dry-run", "--delay", "0"]) == 0
     assert not (out / "greenhouse.json").exists()
 
 
@@ -442,6 +459,7 @@ def test_total_failure_exits_nonzero(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(hc, "_http_get", _fake_index({}))
     monkeypatch.setattr(hc.time, "sleep", lambda s: None)
+    _offline_bulk(monkeypatch)
     assert hc.main(["--crawl", "CC-MAIN-2026-34", "--out", str(tmp_path / "o"),
                     "--delay", "0"]) == 1
 
@@ -1073,3 +1091,138 @@ def test_prune_is_offline(tmp_path, monkeypatch):
     monkeypatch.setattr(hc, "_http_get", explode)
     hc.write_slugs(tmp_path / "lever.json", {"acme", "al-"})
     hc.prune_existing(tmp_path, [hc.PLATFORM_BY_NAME["lever"]], log=lambda m: None)
+
+
+# --------------------------------------------------------------------------
+# Common Crawl bulk index (data.commoncrawl.org)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("query,match,expected", [
+    ("job-boards.greenhouse.io/*", "prefix", "io,greenhouse,job-boards)/"),
+    ("jobs.lever.co/*", "prefix", "co,lever,jobs)/"),
+    ("recruiting.paylocity.com/*", "prefix", "com,paylocity,recruiting)/"),
+    # A domain match has to reach subdomains, so it stops at the comma:
+    # "com,myworkdayjobs," matches com,myworkdayjobs,acme) and every tenant.
+    ("myworkdayjobs.com", "domain", "com,myworkdayjobs,"),
+    ("bamboohr.com", "domain", "com,bamboohr,"),
+    ("*.icims.com/*", "prefix", "com,icims)/"),
+])
+def test_surt_prefix_translation(query, match, expected):
+    assert hc._surt_prefix(query, match) == expected
+
+
+def _cluster(lines):
+    return ("\n".join(lines) + "\n").encode()
+
+
+def test_bulk_find_blocks_selects_only_the_matching_run():
+    body = _cluster([
+        "co,aaa)/x 2026\tcdx-00000.gz\t0\t100\t1",
+        "io,greenhouse,job-boards)/a 2026\tcdx-00001.gz\t100\t200\t2",
+        "io,greenhouse,job-boards)/m 2026\tcdx-00001.gz\t300\t250\t3",
+        "io,zzz)/x 2026\tcdx-00002.gz\t550\t100\t4",
+    ])
+    blocks = hc.bulk_find_blocks(
+        "CC-MAIN-2026-34", "io,greenhouse,job-boards)/",
+        fetch_range=lambda u, a, b: body, fetch_size=lambda u: len(body),
+        probe_bytes=10 ** 9)
+    assert blocks == [("cdx-00001.gz", 100, 200), ("cdx-00001.gz", 300, 250)]
+
+
+def test_bulk_find_blocks_skips_the_partial_first_line():
+    """A byte-range read almost always starts mid-line, so the first line of a
+    window is garbage and must not be parsed as an entry."""
+    body = _cluster([
+        "ds)/truncated-garbage 2026\tcdx-BAD.gz\t0\t1\t0",
+        "io,greenhouse,job-boards)/a 2026\tcdx-00001.gz\t100\t200\t2",
+    ])
+    blocks = hc.bulk_find_blocks(
+        "CC-MAIN-2026-34", "io,greenhouse,job-boards)/",
+        fetch_range=lambda u, a, b: body, fetch_size=lambda u: len(body),
+        probe_bytes=10 ** 9)
+    assert blocks == [("cdx-00001.gz", 100, 200)]
+
+
+def test_bulk_find_blocks_reports_an_unreachable_cluster_index():
+    def boom(url):
+        raise urllib.error.URLError("down")
+
+    with pytest.raises(hc.HarvestError):
+        hc.bulk_find_blocks("CC-MAIN-2026-34", "co,lever,jobs)/",
+                            fetch_range=lambda u, a, b: b"", fetch_size=boom)
+
+
+def _gz(text):
+    import gzip as _gzip, io as _io
+    buf = _io.BytesIO()
+    with _gzip.GzipFile(fileobj=buf, mode="wb") as fh:
+        fh.write(text.encode())
+    return buf.getvalue()
+
+
+def test_bulk_block_is_gunzipped_and_parsed():
+    line = ('co,lever,jobs)/acme/1 20260101 '
+            '{"url": "https://jobs.lever.co/acme/1", "status": "200"}')
+    text = hc.bulk_fetch_block("CC-MAIN-2026-34", "cdx-0.gz", 0, 10,
+                               fetch_range=lambda u, a, b: _gz(line))
+    assert list(hc.iter_bulk_urls(text, "co,lever,jobs)/")) == \
+        ["https://jobs.lever.co/acme/1"]
+
+
+def test_bulk_only_yields_status_200():
+    """The API sweep filters status:200 server-side; the bulk path must agree
+    or the two sources would harvest different sets from the same index."""
+    lines = "\n".join([
+        'co,lever,jobs)/a 1 {"url": "https://jobs.lever.co/a/1", "status": "200"}',
+        'co,lever,jobs)/b 1 {"url": "https://jobs.lever.co/b/1", "status": "404"}',
+        'co,lever,jobs)/c 1 {"url": "https://jobs.lever.co/c/1", "status": "302"}',
+    ])
+    assert list(hc.iter_bulk_urls(lines, "co,lever,jobs)/")) == \
+        ["https://jobs.lever.co/a/1"]
+
+
+def test_bulk_skips_malformed_lines():
+    lines = "\n".join([
+        'co,lever,jobs)/a 1 {"url": "https://jobs.lever.co/a/1", "status": "200"}',
+        'co,lever,jobs)/b 1 {not json',
+        'co,lever,jobs)/c 1',
+        'co,other)/x 1 {"url": "https://x/", "status": "200"}',
+        'co,lever,jobs)/d 1 {"url": "https://jobs.lever.co/d/1", "status": "200"}',
+    ])
+    got = list(hc.iter_bulk_urls(lines, "co,lever,jobs)/"))
+    assert got == ["https://jobs.lever.co/a/1", "https://jobs.lever.co/d/1"]
+
+
+def test_bulk_corrupt_block_raises_rather_than_returning_junk():
+    with pytest.raises(hc.HarvestError):
+        hc.bulk_fetch_block("CC-MAIN-2026-34", "cdx-0.gz", 0, 10,
+                            fetch_range=lambda u, a, b: b"not gzip at all")
+
+
+def test_bulk_one_bad_block_does_not_lose_the_platform():
+    good = _gz('co,lever,jobs)/acme/1 1 '
+               '{"url": "https://jobs.lever.co/acme/1", "status": "200"}')
+    body = _cluster([
+        # bulk_find_blocks discards the first line of a window by design: a
+        # byte-range read starts mid-line. Without a throwaway here the fixture
+        # would only ever offer one block.
+        "co,lever,jobs)/partial 1\tcdx-SKIPPED.gz\t0\t1\t0",
+        "co,lever,jobs)/a 1\tcdx-00000.gz\t0\t10\t1",
+        "co,lever,jobs)/b 1\tcdx-00001.gz\t10\t10\t2",
+    ])
+    calls = {"n": 0}
+
+    def fetch_range(url, start, end):
+        if "cluster.idx" in url:
+            return body
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return b"corrupt"
+        return good
+
+    r = hc.harvest_platform_bulk(
+        hc.PLATFORM_BY_NAME["lever"], "CC-MAIN-2026-34",
+        fetch_range=fetch_range, fetch_size=lambda u: len(body),
+        log=lambda m: None)
+    assert r.slugs == {"acme"}
+    assert r.errors
