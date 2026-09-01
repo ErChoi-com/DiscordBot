@@ -1000,6 +1000,14 @@ def capture_is_usable(status: str) -> bool:
     such slugs and Ashby none, so this rule is a large gain on one platform and
     a harmless no-op on the rest rather than a uniform uplift.
 
+    And 911 is a per-crawl figure, not a cumulative one. Re-sweeping twelve
+    crawls with the rule in place added 609 companies in total, 47.6% of them
+    live -- greenhouse 342, icims 122, workday 113 -- because a capture that
+    only redirected in one crawl usually returned 200 in another, so the
+    accumulated harvest already had most of them. Roughly 290 live boards, not
+    the ten thousand a naive multiplication suggests. The same saturation
+    applies to every extraction fix measured on a single crawl.
+
     4xx stays out. Nothing in that bucket resolved, which is what the status
     says: the path was wrong.
     """
