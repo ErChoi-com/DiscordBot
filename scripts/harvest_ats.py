@@ -194,6 +194,53 @@ _WORKDAY_SITE_REJECT = frozenset({
     "robots.txt", "sitemap.xml", "favicon.ico", "index.html",
 })
 
+# Workday's other public domain, with the host and tenant the other way round:
+# myworkdayjobs.com is <tenant>.<wdN>.myworkdayjobs.com, while myworkdaysite.com
+# is <wdN>.myworkdaysite.com/[locale/]recruiting/<tenant>/<site>/...
+#
+# Worth extracting because the resulting triple works against the
+# myworkdayjobs.com API that ats_service already calls -- verified live for
+# whitecase|wd1|external and woodcountyhospital|wd503|jobs, neither of which
+# appears anywhere in the upstream Workday list. Some myworkdaysite URLs have no
+# "recruiting" segment at all (e.g. /de-CH/jobs/job/...) and name no tenant, so
+# they are skipped rather than guessed at.
+_WORKDAY_SITE_DOMAIN_RE = re.compile(
+    r"^https?://([a-z0-9][a-z0-9-]*)\.myworkdaysite\.com/(.+)$", re.IGNORECASE,
+)
+
+
+def _workday_triple(tenant: str, host: str, site: str) -> str | None:
+    """Validate and format the ``tenant|host|site`` triple."""
+    tenant, host, site = tenant.lower(), host.lower(), site.lower()
+    if not _WORKDAY_HOST_RE.fullmatch(host):
+        # impl-wd103, dr-wd108 and friends are staging tenants; they never serve
+        # a real board.
+        return None
+    if not _looks_like_company(tenant):
+        return None
+    if not site or site in _WORKDAY_SITE_REJECT:
+        return None
+    if len(site) > 100 or not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", site):
+        return None
+    return f"{tenant}|{host}|{site}"
+
+
+def _extract_workday_site(url: str) -> str | None:
+    """``<wdN>.myworkdaysite.com/[locale/]recruiting/<tenant>/<site>/...``"""
+    m = _WORKDAY_SITE_DOMAIN_RE.match(url)
+    if not m:
+        return None
+    host = m.group(1)
+    segments = [urllib.parse.unquote(x).strip()
+                for x in m.group(2).split("?")[0].split("#")[0].split("/") if x]
+    # Skip any leading locale, then require the literal "recruiting" marker --
+    # without it the URL names no tenant and there is nothing to harvest.
+    while segments and _WORKDAY_LOCALE_RE.fullmatch(segments[0]):
+        segments.pop(0)
+    if len(segments) < 3 or segments[0].lower() != "recruiting":
+        return None
+    return _workday_triple(segments[1], host, segments[2])
+
 
 def _extract_workday(url: str) -> str | None:
     """Workday needs three parts, stored as ``tenant|host|site``.
@@ -204,13 +251,8 @@ def _extract_workday(url: str) -> str | None:
     """
     m = _WORKDAY_RE.match(url)
     if not m:
-        return None
-    tenant, host = m.group(1).lower(), m.group(2).lower()
-    if not _WORKDAY_HOST_RE.fullmatch(host):
-        # impl-wd103 and friends are staging tenants; they never serve a real board.
-        return None
-    if not _looks_like_company(tenant):
-        return None
+        return _extract_workday_site(url)
+    tenant, host = m.group(1), m.group(2)
 
     # Walk past any leading locale segments to the first real one.
     site = None
@@ -220,13 +262,11 @@ def _extract_workday(url: str) -> str | None:
             continue
         if _WORKDAY_LOCALE_RE.fullmatch(segment):
             continue
-        site = segment.lower()
+        site = segment
         break
-    if not site or site in _WORKDAY_SITE_REJECT:
+    if not site:
         return None
-    if len(site) > 100 or not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", site):
-        return None
-    return f"{tenant}|{host}|{site}"
+    return _workday_triple(tenant, host, site)
 
 
 PLATFORMS: tuple[Platform, ...] = (
@@ -236,7 +276,10 @@ PLATFORMS: tuple[Platform, ...] = (
         # job-boards.greenhouse.io; old crawls carry the former, new ones the
         # latter, and neither host alone covers the company set.
         (("boards.greenhouse.io/*", "prefix"),
-         ("job-boards.greenhouse.io/*", "prefix")),
+         ("job-boards.greenhouse.io/*", "prefix"),
+         # The EU board host carries companies the US hosts do not (abbyy and
+         # others); it was in the Wayback queries but missing here.
+         ("job-boards.eu.greenhouse.io/*", "prefix")),
         _path_segment_extractor("greenhouse.io"),
     ),
     Platform(
@@ -253,7 +296,8 @@ PLATFORMS: tuple[Platform, ...] = (
         # A host query returns zero pages here: every tenant is its own
         # subdomain, so the query has to match the registered domain.
         "workday",
-        (("myworkdayjobs.com", "domain"),),
+        (("myworkdayjobs.com", "domain"),
+         ("myworkdaysite.com", "domain")),
         _extract_workday,
     ),
     Platform(

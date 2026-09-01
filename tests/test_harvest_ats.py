@@ -244,7 +244,11 @@ def test_iter_urls_skips_malformed_lines():
 def test_workday_query_uses_domain_match():
     """A host query returns zero pages for Workday - tenants are subdomains."""
     workday = hc.PLATFORM_BY_NAME["workday"]
-    assert workday.queries == (("myworkdayjobs.com", "domain"),)
+    # Every Workday query must be a domain match, whatever hosts are listed:
+    # tenants are subdomains, so a host query returns zero pages.
+    assert workday.queries, "workday must have queries"
+    assert all(match == "domain" for _, match in workday.queries)
+    assert ("myworkdayjobs.com", "domain") in workday.queries
     url = hc.build_query_url("CC-MAIN-2026-34", "myworkdayjobs.com", "domain", page=0)
     assert "matchType=domain" in url
 
@@ -265,10 +269,12 @@ def test_page_count_query_drops_field_filters():
     assert "fl=" not in url
 
 
-def test_greenhouse_sweeps_both_hosts():
-    """Greenhouse migrated hosts; neither alone covers the company set."""
+def test_greenhouse_sweeps_every_board_host():
+    """Greenhouse migrated hosts and runs a separate EU one; no single host
+    covers the company set."""
     hosts = {q for q, _ in hc.PLATFORM_BY_NAME["greenhouse"].queries}
-    assert hosts == {"boards.greenhouse.io/*", "job-boards.greenhouse.io/*"}
+    assert hosts == {"boards.greenhouse.io/*", "job-boards.greenhouse.io/*",
+                     "job-boards.eu.greenhouse.io/*"}
 
 
 # --------------------------------------------------------------------------
@@ -641,3 +647,71 @@ def test_wayback_budget_never_skips_the_first_page():
         fetch=fetch, sleep=lambda s: None, delay=0,
         budget_seconds=0.0, now=lambda: 10_000.0, log=lambda m: None)
     assert slugs == {"acme"}
+
+
+# --------------------------------------------------------------------------
+# myworkdaysite.com - Workday's other public domain
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("url,expected", [
+    # Host and tenant are the reverse of myworkdayjobs.com: the wdN host is the
+    # subdomain and the tenant sits in the path after "recruiting".
+    ("https://wd1.myworkdaysite.com/de-DE/recruiting/whitecase/External/job/Berlin/X",
+     "whitecase|wd1|external"),
+    ("https://wd503.myworkdaysite.com/recruiting/woodcountyhospital/jobs",
+     "woodcountyhospital|wd503|jobs"),
+    # No "recruiting" segment means the URL names no tenant at all.
+    ("https://wd502.myworkdaysite.com/de-CH/jobs/job/X_JR03607", None),
+    ("https://aade-wd106.myworkdaysite.com/favicon.ico", None),
+    # Staging hosts serve no public board.
+    ("https://dr-wd108.myworkdaysite.com/recruiting/acme/External", None),
+    ("https://perf-wd102.myworkdaysite.com/recruiting/acme/External", None),
+])
+def test_myworkdaysite_extraction(url, expected):
+    assert hc.PLATFORM_BY_NAME["workday"].extract(url) == expected
+
+
+def test_myworkdaysite_triple_targets_the_api_ats_service_calls():
+    """The point of harvesting this domain is that the triple it yields works
+    against myworkdayjobs.com, which is what ats_service scrapes -- verified
+    live for both of these. Emitting a myworkdaysite-shaped identifier instead
+    would harvest companies the bot cannot use."""
+    got = hc.PLATFORM_BY_NAME["workday"].extract(
+        "https://wd1.myworkdaysite.com/de-DE/recruiting/whitecase/External/job/x")
+    assert got == "whitecase|wd1|external"
+    tenant, host, site = got.split("|")
+    assert host.startswith("wd") and tenant and site
+
+
+def test_workday_sweeps_both_domains():
+    hosts = {q for q, _ in hc.PLATFORM_BY_NAME["workday"].queries}
+    assert hosts == {"myworkdayjobs.com", "myworkdaysite.com"}
+
+
+def test_greenhouse_sweeps_the_eu_host_in_both_indexes():
+    """The EU board host carries companies the US hosts do not. It was in the
+    Wayback queries but missing from Common Crawl, so those companies were only
+    ever found by one of the two sweeps."""
+    cc = {q for q, _ in hc.PLATFORM_BY_NAME["greenhouse"].queries}
+    assert "job-boards.eu.greenhouse.io/*" in cc
+    assert "job-boards.eu.greenhouse.io/*" in hc.WAYBACK_QUERIES["greenhouse"]
+
+
+def test_every_wayback_query_host_has_a_matching_extractor():
+    """A query without an extractor that recognises its host silently discards
+    every row it fetches -- which is exactly what myworkdaysite.com did."""
+    probes = {
+        "greenhouse": "https://{host}/acme/jobs/1",
+        "lever": "https://{host}/acme/abc",
+        "ashby": "https://{host}/acme/abc",
+        "icims": "https://acme.{host}/jobs/1",
+        "bamboohr": "https://acme.{host}/careers/list",
+    }
+    for name, queries in hc.WAYBACK_QUERIES.items():
+        if name == "workday":
+            continue          # covered by test_myworkdaysite_extraction
+        extract = hc.PLATFORM_BY_NAME[name].extract
+        for query in queries:
+            host = query.split("/")[0].lstrip("*.")
+            url = probes[name].format(host=host)
+            assert extract(url) == "acme", f"{name}: {query} -> {url}"
