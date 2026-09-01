@@ -893,3 +893,78 @@ def test_real_tenants_survive_the_infrastructure_filter():
     # A company whose name merely starts with an infrastructure word is fine.
     assert hc.PLATFORM_BY_NAME["bamboohr"].extract(
         "https://appleseed.bamboohr.com/careers/list") == "appleseed"
+
+
+# --------------------------------------------------------------------------
+# Crawl-list cache
+# --------------------------------------------------------------------------
+
+def _collinfo(*ids):
+    return json.dumps([{"id": i} for i in ids]).encode()
+
+
+def test_crawl_list_is_cached_on_success(tmp_path):
+    cache = tmp_path / "_crawls.json"
+    got = hc.latest_crawls(2, fetch=lambda u: _collinfo("CC-MAIN-2026-34",
+                                                        "CC-MAIN-2026-30"),
+                           sleep=lambda s: None, cache_path=cache)
+    assert got == ["CC-MAIN-2026-34", "CC-MAIN-2026-30"]
+    assert json.loads(cache.read_text()) == ["CC-MAIN-2026-34", "CC-MAIN-2026-30"]
+
+
+def test_cached_list_is_used_when_collinfo_fails(tmp_path):
+    """collinfo.json is genuinely unreliable -- two requests seconds apart
+    returned 200 in 0.23s and then timed out. Losing it drops the whole Common
+    Crawl half of a run for one line on stderr, and crawl ids are immutable
+    once minted, so a stale list still names real crawls."""
+    cache = tmp_path / "_crawls.json"
+    cache.write_text(json.dumps(["CC-MAIN-2026-34", "CC-MAIN-2026-30"]))
+
+    def fetch(url):
+        raise urllib.error.URLError("timed out")
+
+    got = hc.latest_crawls(1, fetch=fetch, sleep=lambda s: None, cache_path=cache)
+    assert got == ["CC-MAIN-2026-34"]
+
+
+def test_failure_with_no_cache_still_raises(tmp_path):
+    """Falling back to nothing must stay an error, so the caller can decide to
+    carry on with Wayback alone rather than silently harvesting zero."""
+    def fetch(url):
+        raise urllib.error.URLError("timed out")
+
+    with pytest.raises(hc.HarvestError):
+        hc.latest_crawls(1, fetch=fetch, sleep=lambda s: None,
+                         cache_path=tmp_path / "absent.json")
+
+
+def test_corrupt_cache_is_ignored(tmp_path):
+    cache = tmp_path / "_crawls.json"
+    cache.write_text("{ not json")
+
+    def fetch(url):
+        raise urllib.error.URLError("timed out")
+
+    with pytest.raises(hc.HarvestError):
+        hc.latest_crawls(1, fetch=fetch, sleep=lambda s: None, cache_path=cache)
+
+
+def test_cache_rejects_entries_that_are_not_crawl_ids(tmp_path):
+    """A cache is read back as crawl ids and pasted into request URLs, so it
+    must not carry arbitrary strings."""
+    cache = tmp_path / "_crawls.json"
+    cache.write_text(json.dumps(["CC-MAIN-2026-34", "../../etc", "nonsense"]))
+
+    def fetch(url):
+        raise urllib.error.URLError("timed out")
+
+    assert hc.latest_crawls(5, fetch=fetch, sleep=lambda s: None,
+                            cache_path=cache) == ["CC-MAIN-2026-34"]
+
+
+def test_cache_write_failure_does_not_break_a_harvest(tmp_path):
+    unwritable = tmp_path / "afile" / "_crawls.json"
+    (tmp_path / "afile").write_text("not a directory")
+    got = hc.latest_crawls(1, fetch=lambda u: _collinfo("CC-MAIN-2026-34"),
+                           sleep=lambda s: None, cache_path=unwritable)
+    assert got == ["CC-MAIN-2026-34"]

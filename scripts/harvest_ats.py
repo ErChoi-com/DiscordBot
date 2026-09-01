@@ -576,19 +576,13 @@ def harvest_platform(
     return result
 
 
-def latest_crawls(
-    count: int, *, fetch: Fetcher | None = None,
-    sleep: Callable[[float], None] = time.sleep,
-) -> list[str]:
-    """The N most recent crawl ids, newest first.
+# Cache of the crawl listing, written beside the harvest output so it travels
+# with the published branch and is seeded back on the next run. The underscore
+# keeps it out of the per-platform globs.
+CRAWL_CACHE_NAME = "_crawls.json"
 
-    collinfo.json is ordered newest-first, but relying on that order alone would
-    silently harvest the wrong crawls if it ever changed, so the ids are sorted
-    on their own year/week.
-    """
-    raw = cdx_request(COLLINFO_URL, fetch=fetch, sleep=sleep)
-    if raw is None:
-        raise HarvestError("collinfo.json returned no data")
+
+def _parse_collinfo(raw: bytes) -> list[str]:
     try:
         entries = json.loads(raw)
     except ValueError as exc:
@@ -600,8 +594,67 @@ def latest_crawls(
     ]
     if not ids:
         raise HarvestError("collinfo.json listed no usable crawl ids")
+    # collinfo.json is ordered newest-first, but relying on that order alone
+    # would silently harvest the wrong crawls if it ever changed, so the ids are
+    # sorted on their own year/week.
     ids.sort(key=lambda cid: tuple(int(x) for x in cid.split("-")[2:]), reverse=True)
+    return ids
+
+
+def latest_crawls(
+    count: int, *, fetch: Fetcher | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    cache_path: Path | None = None,
+) -> list[str]:
+    """The N most recent crawl ids, newest first, with a cached fallback.
+
+    collinfo.json is genuinely unreliable -- two requests seconds apart returned
+    200 in 0.23s and then timed out. Losing it means losing the entire Common
+    Crawl half of a run, and the only symptom is one line on stderr, so a
+    flaky minute quietly halves a week's harvest.
+
+    A stale list is a good enough substitute: crawls are published roughly
+    monthly and the ids are immutable once minted, so yesterday's list still
+    names real crawls. The worst case is missing the newest one for a week.
+    """
+    try:
+        raw = cdx_request(COLLINFO_URL, fetch=fetch, sleep=sleep)
+        if raw is None:
+            raise HarvestError("collinfo.json returned no data")
+        ids = _parse_collinfo(raw)
+    except HarvestError:
+        cached = _load_crawl_cache(cache_path)
+        if cached:
+            return cached[:count]
+        raise
+    _save_crawl_cache(cache_path, ids)
     return ids[:count]
+
+
+def _load_crawl_cache(cache_path: Path | None) -> list[str]:
+    if cache_path is None or not cache_path.exists():
+        return []
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [c for c in data
+            if isinstance(c, str) and re.fullmatch(r"CC-MAIN-\d{4}-\d{2}", c)]
+
+
+def _save_crawl_cache(cache_path: Path | None, ids: list[str]) -> None:
+    if cache_path is None:
+        return
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(ids, indent=1) + "\n", encoding="utf-8")
+        tmp.replace(cache_path)
+    except OSError:
+        # A cache we cannot write is not a reason to fail a harvest.
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -896,7 +949,8 @@ def main(argv: list[str] | None = None) -> int:
     crawls: list[str] = []
     if "commoncrawl" in indexes:
         try:
-            crawls = args.crawls_explicit or latest_crawls(args.crawls)
+            crawls = args.crawls_explicit or latest_crawls(
+                args.crawls, cache_path=args.out / CRAWL_CACHE_NAME)
         except HarvestError as exc:
             # Losing Common Crawl must not cancel the Wayback sweep: they are
             # independent archives, and Wayback is the only source for Lever.

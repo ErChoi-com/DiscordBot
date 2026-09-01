@@ -181,7 +181,12 @@ jobs:
               print("::error::harvest below floor: " + "; ".join(failed))
               sys.exit(1)
 
-          for path in pathlib.Path("data/ats_harvest").glob("*.json"):
+          for path in sorted(pathlib.Path("data/ats_harvest").glob("*.json")):
+              # _crawls.json caches the Common Crawl listing so a flaky
+              # collinfo.json cannot silently drop the whole CC half of a run.
+              # It rides along in the published branch but is not a slug list.
+              if path.name.startswith("_"):
+                  continue
               payload = json.loads(path.read_text())
               assert isinstance(payload, list), f"{path} is not a list"
               assert payload == sorted(payload), f"{path} is not sorted"
@@ -273,6 +278,11 @@ jobs:
                               (pathlib.Path("data/dead_slugs"), "dead/")):
               for path in sorted(src.glob("*.json")):
                   raw = path.read_bytes()
+                  if path.name.startswith("_") and prefix == "":
+                      # Cache file: publish it so the next run can fall back on
+                      # it, but keep it out of the per-platform counts.
+                      (out / path.name).write_bytes(raw)
+                      continue
                   (out / f"{prefix}{path.name}").write_bytes(raw)
                   files[f"{prefix}{path.name}"] = {
                       "sha256": hashlib.sha256(raw).hexdigest(),
@@ -325,7 +335,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -q --orphan ats-harvest
-          git add ./*.json dead/*.json
+          git add ./*.json ./_*.json dead/*.json 2>/dev/null || git add ./*.json dead/*.json
           git commit -q -m "ATS harvest + validation $(date -u +%Y-%m-%d)"
           git push -q --force \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
