@@ -269,6 +269,32 @@ def save_dead(platform: str, dead: dict[str, str]) -> None:
                 pass
 
 
+def save_dead_merged(platform: str, result: dict, today: _dt.date,
+                     ttl_days: int) -> dict[str, int]:
+    """Re-read the on-disk marks, apply this run's verdicts, then write.
+
+    The map this run loaded is minutes to tens of minutes stale by the time it
+    is written, and the running bot marks the same files from its own scrape
+    cycles -- on this machine it wrote ~3,500 greenhouse marks during a single
+    validation pass. Writing back the map we loaded would silently discard
+    every one of them, and the bot would do the same to us on its next flush.
+    Both writers are individually atomic, which makes the loss invisible rather
+    than corrupt.
+
+    Re-reading immediately before the write narrows the race to the write
+    itself. It cannot close it without a cross-process lock, but the remaining
+    window is milliseconds instead of minutes, and the recheck cycle repairs
+    anything lost in it.
+    """
+    dead_map = load_dead(platform)
+    expired = purge_expired(dead_map, today, ttl_days)
+    changes = apply_results(dead_map, result, today)
+    save_dead(platform, dead_map)
+    changes["expired"] = expired
+    changes["dead_total"] = len(dead_map)
+    return changes
+
+
 def _stale(marked: str, today: _dt.date, recheck_days: int) -> bool:
     """True when a dead mark is old enough to be worth re-probing."""
     try:
@@ -442,7 +468,11 @@ def main(argv: list[str] | None = None) -> int:
                                  "known": total, "dead_total": len(dead_map),
                                  "expired": expired}
             if expired and not args.dry_run:
-                save_dead(platform, dead_map)
+                # Same race as the probing path: re-read so a TTL purge does
+                # not roll back marks the bot made while this was running.
+                fresh = load_dead(platform)
+                purge_expired(fresh, today, args.ttl_days)
+                save_dead(platform, fresh)
             continue
 
         result = validate_platform(
@@ -450,7 +480,16 @@ def main(argv: list[str] | None = None) -> int:
             budget_seconds=args.budget_seconds or None, log=log)
         if result["probed"] and result["unknown"] < result["probed"]:
             any_probed = True
-        changes = apply_results(dead_map, result, today)
+        if args.dry_run:
+            changes = apply_results(dict(dead_map), result, today)
+            changes["expired"] = expired
+            changes["dead_total"] = len(dead_map)
+        else:
+            # Re-read before writing: the bot marks these same files from its
+            # own scrape cycles while this runs.
+            changes = save_dead_merged(platform, result, today, args.ttl_days)
+            expired = changes["expired"]
+            dead_map = load_dead(platform)
         rate = 100.0 * result["live"] / max(1, result["live"] + result["dead"])
         log(f"[validate] {platform}: live rate {rate:.1f}% "
             f"(+{changes['added']} dead, {changes['revived']} revived, "
@@ -462,8 +501,6 @@ def main(argv: list[str] | None = None) -> int:
             "deferred": result.get("deferred", 0),
             "dead_total": len(dead_map), "expired": expired, **changes,
         }
-        if not args.dry_run:
-            save_dead(platform, dead_map)
 
     elapsed = time.monotonic() - t0
     log(f"[validate] done in {elapsed:.1f}s")

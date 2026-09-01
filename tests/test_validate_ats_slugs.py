@@ -367,3 +367,49 @@ def test_no_budget_probes_everything():
         "greenhouse", [f"co{i}" for i in range(50)], probe=lambda s: True,
         workers=4, budget_seconds=None, log=lambda m: None)
     assert result["probed"] == 50 and result["deferred"] == 0
+
+
+# --------------------------------------------------------------------------
+# Concurrent writers
+# --------------------------------------------------------------------------
+
+def test_marks_written_during_the_run_are_not_clobbered(tmp_path, monkeypatch):
+    """The bot marks these same files from its own scrape cycles.
+
+    On this machine it wrote ~3,500 greenhouse marks during a single validation
+    pass. Writing back the map loaded at the start would silently discard every
+    one of them -- and because both writers are individually atomic, the loss
+    looks like clean data rather than corruption.
+    """
+    _seed(tmp_path, monkeypatch, "lever", ["gone"], dead={"pre": "2026-08-20"})
+
+    result = v.validate_platform("lever", ["gone"], probe=lambda s: False,
+                                 workers=1, log=lambda m: None)
+    # Another writer lands a mark after this run loaded the map.
+    concurrent = v.load_dead("lever")
+    concurrent["written-by-the-bot"] = "2026-09-01"
+    v.save_dead("lever", concurrent)
+
+    v.save_dead_merged("lever", result, TODAY, ttl_days=90)
+
+    final = v.load_dead("lever")
+    assert "written-by-the-bot" in final, "concurrent mark was clobbered"
+    assert final["gone"] == "2026-09-01", "this run's verdict was lost"
+    assert "pre" in final, "pre-existing mark was lost"
+
+
+def test_merge_still_revives_a_slug_found_live(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch, "lever", ["back"], dead={"back": "2026-08-20"})
+    result = v.validate_platform("lever", ["back"], probe=lambda s: True,
+                                 workers=1, log=lambda m: None)
+    v.save_dead_merged("lever", result, TODAY, ttl_days=90)
+    assert "back" not in v.load_dead("lever")
+
+
+def test_merge_applies_the_ttl_purge(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch, "lever", ["x"], dead={"ancient": "2020-01-01"})
+    result = v.validate_platform("lever", [], probe=lambda s: True, workers=1,
+                                 log=lambda m: None)
+    changes = v.save_dead_merged("lever", result, TODAY, ttl_days=90)
+    assert changes["expired"] == 1
+    assert "ancient" not in v.load_dead("lever")
