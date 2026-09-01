@@ -78,12 +78,20 @@ AUDIT_BUDGET_SECONDS = 240.0
 # below what ats_service already uses for the same host.
 WORKERS = {"greenhouse": 16, "lever": 16, "ashby": 8, "workday": 12,
            "icims": 12, "bamboohr": 12,
-           # Paylocity refuses connections outright under load rather than
-           # slowing down: at 4 workers all 60 probes in a batch failed within
-           # 8 seconds, at 2 workers the same batch resolved 41 of 60. Every
-           # refusal is recorded unknown and changes no marks, so the cost of
-           # pushing harder is wasted requests, not wrong verdicts -- but it is
-           # still wasted.
+           # Paylocity sheds load by refusing connections rather than slowing
+           # down, and it does so steeply. Measured over 60-slug batches:
+           #
+           #   workers  unreachable  raw rate  useful rate
+           #      2         0/60      3.2/s      3.2/s
+           #      4        20/60      5.3/s      3.5/s
+           #      8        48/60     13.2/s      2.7/s
+           #     12        53/60     21.5/s      2.5/s
+           #
+           # Raw throughput keeps climbing while useful throughput does not:
+           # past two workers most requests come back with no verdict, so the
+           # extra concurrency buys refusals. A refusal is recorded unknown and
+           # changes no marks, so the cost is wasted requests rather than wrong
+           # answers -- but the slug still has to be probed again later.
            "paylocity": 2}
 
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

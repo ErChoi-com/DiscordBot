@@ -508,3 +508,16 @@ def test_audit_passes_a_budget_through(monkeypatch, tmp_path):
     v.audit_live_rate("lever", 2, probe=lambda s: True, workers=1,
                       log=lambda m: None)
     assert seen.get("budget_seconds") == v.AUDIT_BUDGET_SECONDS
+
+
+def test_paylocity_concurrency_stays_at_two():
+    """Measured over 60-slug batches, unreachable responses by worker count:
+    2 -> 0, 4 -> 20, 8 -> 48, 12 -> 53. Raw throughput keeps climbing past two
+    workers while useful throughput falls, so a well-meaning bump here buys
+    refusals that have to be re-probed later."""
+    assert v.WORKERS["paylocity"] == 2
+
+
+def test_every_platform_has_a_worker_count():
+    for platform in v.PLATFORMS:
+        assert v.WORKERS.get(platform), platform
