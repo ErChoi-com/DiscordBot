@@ -282,6 +282,14 @@ def _workday_triple(tenant: str, host: str, site: str) -> str | None:
         return None
     if not _looks_like_company(tenant):
         return None
+    if _WORKDAY_HOST_RE.fullmatch(tenant):
+        # A host label sitting in the tenant slot, which happens when the URL
+        # has no tenant subdomain at all: wd1.myworkdayjobs.com/... reads as
+        # tenant "wd1". The result cannot resolve -- there is no
+        # wd1.wd1.myworkdayjobs.com -- and it is not a hypothetical: 6,055 of
+        # upstream's 12,884 Workday entries (47%) have this shape, and a
+        # 50-slug sample of that cohort was entirely dead.
+        return None
     if not site or site in _WORKDAY_SITE_REJECT:
         return None
     if _WORKDAY_PARTIAL_LOCALE_RE.fullmatch(site):

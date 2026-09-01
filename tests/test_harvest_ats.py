@@ -1469,3 +1469,32 @@ def test_workday_real_sites_that_look_like_path_components_survive(site):
     rather than measurement would have deleted them.
     """
     assert hc._workday_triple("acme", "wd1", site) == f"acme|wd1|{site}"
+
+
+@pytest.mark.parametrize("url", [
+    "https://wd1.wd1.myworkdayjobs.com/en-US/careers/job/x",
+    "https://wd5.wd1.myworkdayjobs.com/simply_careers",
+    "https://wd3.wd1.myworkdayjobs.com/corporate_us_theory",
+])
+def test_workday_host_label_in_the_tenant_slot_is_rejected(url):
+    """A URL with no tenant subdomain reads as tenant "wdN", which cannot
+    resolve -- there is no wd1.wd1.myworkdayjobs.com.
+
+    Not hypothetical: 6,055 of upstream's 12,884 Workday entries (47%) have
+    this shape, and a 50-slug sample of that cohort was entirely dead. Our
+    harvest has none, but only because those URLs happen not to have come up.
+    """
+    assert hc.PLATFORM_BY_NAME["workday"].extract(url) is None
+
+
+def test_real_tenants_beginning_with_wd_are_kept():
+    """The guard matches a bare host label, not any name starting with "wd"."""
+    assert hc.PLATFORM_BY_NAME["workday"].extract(
+        "https://wdesk.wd1.myworkdayjobs.com/careers") == "wdesk|wd1|careers"
+    assert hc.PLATFORM_BY_NAME["workday"].extract(
+        "https://wd40company.wd5.myworkdayjobs.com/careers") == "wd40company|wd5|careers"
+
+
+def test_prune_would_strip_a_host_label_tenant():
+    assert hc._current_identifier(
+        hc.PLATFORM_BY_NAME["workday"], "wd1|wd1|careers") is None
