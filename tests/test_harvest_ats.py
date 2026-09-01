@@ -13,6 +13,7 @@ import argparse
 import http.client
 import json
 import sys
+import time
 import urllib.error
 from pathlib import Path
 
@@ -1596,3 +1597,59 @@ def test_checkpoint_writes_nothing_on_a_dry_run(tmp_path):
     args = argparse.Namespace(dry_run=True, out=out)
     hc._checkpoint(args, "lever", set(), {"found"})
     assert not (out / "lever.json").exists()
+
+
+# --------------------------------------------------------------------------
+# Output directory lock
+# --------------------------------------------------------------------------
+
+def test_second_harvest_on_the_same_output_is_refused(tmp_path):
+    """Two harvests over one directory silently lose each other's finds.
+
+    Both do a read-modify-write against what they loaded at their own start, so
+    the later writer discards whatever the earlier added in between. Nothing
+    errors; the totals just come out low.
+    """
+    with hc.output_lock(tmp_path):
+        with pytest.raises(hc.HarvestLocked):
+            with hc.output_lock(tmp_path):
+                pass
+
+
+def test_lock_is_released_on_the_way_out(tmp_path):
+    with hc.output_lock(tmp_path):
+        assert (tmp_path / hc.LOCK_NAME).exists()
+    assert not (tmp_path / hc.LOCK_NAME).exists()
+
+
+def test_lock_is_released_even_when_the_harvest_raises(tmp_path):
+    with pytest.raises(ValueError):
+        with hc.output_lock(tmp_path):
+            raise ValueError("harvest blew up")
+    assert not (tmp_path / hc.LOCK_NAME).exists()
+
+
+def test_a_stale_lock_is_taken_over(tmp_path):
+    """A process killed mid-run leaves its lock behind. Treating that as fatal
+    would block every run after one crash -- which is how the harvest died in
+    the first place."""
+    (tmp_path / hc.LOCK_NAME).write_text("99999")
+    later = time.time() + hc.LOCK_STALE_SECONDS + 1
+    with hc.output_lock(tmp_path, now=lambda: later):
+        pass
+
+
+def test_a_fresh_lock_is_respected(tmp_path):
+    (tmp_path / hc.LOCK_NAME).write_text("99999")
+    with pytest.raises(hc.HarvestLocked):
+        with hc.output_lock(tmp_path, now=time.time):
+            pass
+
+
+def test_main_exits_rather_than_racing(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / hc.LOCK_NAME).write_text("99999")
+    _offline_bulk(monkeypatch)
+    assert hc.main(["--index", "ccbulk", "--crawl", "CC-MAIN-2026-34",
+                    "--platform", "lever", "--out", str(out)]) == 2

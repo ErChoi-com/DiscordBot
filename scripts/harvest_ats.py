@@ -35,8 +35,10 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gzip
 import http.client
+import os
 import io
 import json
 import re
@@ -1444,6 +1446,64 @@ _IDENTIFIER_PROBES: dict[str, Callable[[str], str | None]] = {
 }
 
 
+LOCK_NAME = ".harvest.lock"
+# A lock older than this is assumed to belong to a process that died without
+# cleaning up. Long enough that a real 30-crawl sweep (23 minutes observed)
+# never trips it, short enough that a crash does not block the next weekly run.
+LOCK_STALE_SECONDS = 6 * 60 * 60
+
+
+class HarvestLocked(RuntimeError):
+    """Another harvest is already writing to this output directory."""
+
+
+@contextlib.contextmanager
+def output_lock(out_dir: Path, *, now: Callable[[], float] = time.time):
+    """Refuse to run two harvests against the same output directory.
+
+    Both write the same files, and the merge each performs is read-modify-write
+    against what it loaded at its own start -- so the later writer silently
+    discards whatever the earlier one added in between. Nothing errors and the
+    totals just come out low.
+
+    This is not hypothetical. Checking for a running harvest with
+    `ps -W | grep harvest_ats` always returns nothing, because that output
+    carries the executable path and not the script name, so the check reads as
+    "clear" every time. On the strength of it I started a second sweep over a
+    live one and had four processes racing the same files.
+
+    A stale lock -- one left by a process that was killed -- is taken over
+    rather than treated as fatal, since otherwise one crash blocks every run
+    after it.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    lock = out_dir / LOCK_NAME
+    if lock.exists():
+        try:
+            age = now() - lock.stat().st_mtime
+        except OSError:
+            age = 0.0
+        if age < LOCK_STALE_SECONDS:
+            raise HarvestLocked(
+                f"another harvest holds {lock} (age {age:.0f}s). "
+                "Concurrent runs silently drop each other's finds; wait for it "
+                "or delete the lock if you are certain it is stale."
+            )
+    try:
+        lock.write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        # A lock we cannot write is not a reason to refuse to harvest.
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+
+
 def _checkpoint(args, platform_name: str, existing: set[str], found: set[str]) -> None:
     """Write what has been harvested so far, after each crawl.
 
@@ -1535,67 +1595,77 @@ def main(argv: list[str] | None = None) -> int:
     log(f"[harvest] crawls: {', '.join(crawls) or '(none)'}")
     log(f"[harvest] platforms: {', '.join(p.name for p in platforms)}")
 
-    t_start = time.monotonic()
-    summary: dict[str, dict[str, object]] = {}
-    any_success = False
+    try:
+        lock_ctx = output_lock(args.out)
+        lock_ctx.__enter__()
+    except HarvestLocked as exc:
+        print(f"[harvest] {exc}", file=sys.stderr)
+        return 2
+    try:
+        t_start = time.monotonic()
+        summary: dict[str, dict[str, object]] = {}
+        any_success = False
 
-    for platform in platforms:
-        existing = load_existing(args.out / f"{platform.name}.json")
-        found: set[str] = set()
-        errors: list[str] = []
-        pages = records = 0
+        for platform in platforms:
+            existing = load_existing(args.out / f"{platform.name}.json")
+            found: set[str] = set()
+            errors: list[str] = []
+            pages = records = 0
 
-        if "ccbulk" in indexes:
-            for crawl in crawls:
-                log(f"[harvest] {platform.name} @ {crawl} (bulk)")
-                result = harvest_platform_bulk(
-                    platform, crawl, delay=args.delay if args.delay > 1 else 0.0,
-                    max_blocks=args.max_pages, log=log,
+            if "ccbulk" in indexes:
+                for crawl in crawls:
+                    log(f"[harvest] {platform.name} @ {crawl} (bulk)")
+                    result = harvest_platform_bulk(
+                        platform, crawl, delay=args.delay if args.delay > 1 else 0.0,
+                        max_blocks=args.max_pages, log=log,
+                    )
+                    found |= result.slugs
+                    errors.extend(result.errors)
+                    pages += result.pages_fetched
+                    records += result.records_seen
+                    _checkpoint(args, platform.name, existing, found)
+
+            if "commoncrawl" in indexes:
+                for crawl in crawls:
+                    log(f"[harvest] {platform.name} @ {crawl}")
+                    result = harvest_platform(
+                        platform, crawl, delay=args.delay, max_pages=args.max_pages,
+                        log=log,
+                    )
+                    found |= result.slugs
+                    errors.extend(result.errors)
+                    pages += result.pages_fetched
+                    records += result.records_seen
+                    _checkpoint(args, platform.name, existing, found)
+
+            if "wayback" in indexes:
+                log(f"[harvest] {platform.name} @ wayback")
+                result = harvest_platform_wayback(
+                    platform, delay=max(args.delay, 1.0),
+                    max_pages=args.max_pages or WAYBACK_MAX_PAGES, log=log,
                 )
                 found |= result.slugs
                 errors.extend(result.errors)
                 pages += result.pages_fetched
                 records += result.records_seen
-                _checkpoint(args, platform.name, existing, found)
 
-        if "commoncrawl" in indexes:
-            for crawl in crawls:
-                log(f"[harvest] {platform.name} @ {crawl}")
-                result = harvest_platform(
-                    platform, crawl, delay=args.delay, max_pages=args.max_pages,
-                    log=log,
-                )
-                found |= result.slugs
-                errors.extend(result.errors)
-                pages += result.pages_fetched
-                records += result.records_seen
-                _checkpoint(args, platform.name, existing, found)
+            new = found - existing
+            merged = existing | found
+            summary[platform.name] = {
+                "harvested": len(found), "new": len(new), "total": len(merged),
+                "indexes": indexes,
+                "pages": pages, "records": records, "errors": errors,
+            }
+            log(f"[harvest] {platform.name}: {len(found)} harvested, "
+                f"{len(new)} new, {len(merged)} total ({records} records, {pages} pages)")
 
-        if "wayback" in indexes:
-            log(f"[harvest] {platform.name} @ wayback")
-            result = harvest_platform_wayback(
-                platform, delay=max(args.delay, 1.0),
-                max_pages=args.max_pages or WAYBACK_MAX_PAGES, log=log,
-            )
-            found |= result.slugs
-            errors.extend(result.errors)
-            pages += result.pages_fetched
-            records += result.records_seen
+            if found:
+                any_success = True
+            if found and not args.dry_run:
+                write_slugs(args.out / f"{platform.name}.json", merged)
 
-        new = found - existing
-        merged = existing | found
-        summary[platform.name] = {
-            "harvested": len(found), "new": len(new), "total": len(merged),
-            "indexes": indexes,
-            "pages": pages, "records": records, "errors": errors,
-        }
-        log(f"[harvest] {platform.name}: {len(found)} harvested, "
-            f"{len(new)} new, {len(merged)} total ({records} records, {pages} pages)")
-
-        if found:
-            any_success = True
-        if found and not args.dry_run:
-            write_slugs(args.out / f"{platform.name}.json", merged)
+    finally:
+        lock_ctx.__exit__(None, None, None)
 
     elapsed = time.monotonic() - t_start
     log(f"[harvest] done in {elapsed:.1f}s")
