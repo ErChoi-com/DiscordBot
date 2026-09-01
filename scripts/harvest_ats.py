@@ -888,21 +888,33 @@ def bulk_find_blocks(
         raise HarvestError(f"cluster.idx read failed for {crawl}: {exc}") from exc
 
     blocks: list[tuple[str, int, int]] = []
+    previous: tuple[str, int, int] | None = None
     # Skip the first line: a byte-range read almost always starts mid-line.
     for line in window.split("\n")[1:-1]:
         fields = line.split("\t")
         if len(fields) < 4:
             continue
         key = fields[0].split(" ", 1)[0]
+        try:
+            entry = (fields[1], int(fields[2]), int(fields[3]))
+        except ValueError:
+            continue
         if key.startswith(surt_prefix):
-            try:
-                blocks.append((fields[1], int(fields[2]), int(fields[3])))
-            except ValueError:
-                continue
+            # cluster.idx names each block by its *first* key, so a prefix that
+            # begins partway through a block leaves that block's key sorting
+            # below it. Skipping it drops the start of the range. Taking the
+            # preceding block costs one read, and iter_bulk_urls re-checks the
+            # prefix so nothing foreign leaks in.
+            if not blocks and previous is not None:
+                blocks.append(previous)
+            blocks.append(entry)
         elif blocks:
             # Sorted file: the first non-matching key after a run of matches
-            # ends the region.
+            # ends the region. Keep it too, for the mirror-image reason -- the
+            # tail of the range can share that block.
+            blocks.append(entry)
             break
+        previous = entry
     return blocks
 
 

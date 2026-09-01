@@ -1115,8 +1115,16 @@ def _cluster(lines):
     return ("\n".join(lines) + "\n").encode()
 
 
-def test_bulk_find_blocks_selects_only_the_matching_run():
+def test_bulk_find_blocks_selects_the_matching_run_plus_its_boundaries():
+    """Every matching block, plus one either side.
+
+    The neighbours are required, not incidental: cluster.idx keys a block by
+    its first entry, so the range routinely starts inside the preceding block
+    and ends inside the following one. Reading only the exactly-matching run
+    cost 285 of 2,708 Ashby companies on CC-MAIN-2026-34.
+    """
     body = _cluster([
+        "aa,partial)/x 2026\tcdx-SKIPPED.gz\t0\t1\t0",
         "co,aaa)/x 2026\tcdx-00000.gz\t0\t100\t1",
         "io,greenhouse,job-boards)/a 2026\tcdx-00001.gz\t100\t200\t2",
         "io,greenhouse,job-boards)/m 2026\tcdx-00001.gz\t300\t250\t3",
@@ -1126,7 +1134,12 @@ def test_bulk_find_blocks_selects_only_the_matching_run():
         "CC-MAIN-2026-34", "io,greenhouse,job-boards)/",
         fetch_range=lambda u, a, b: body, fetch_size=lambda u: len(body),
         probe_bytes=10 ** 9)
-    assert blocks == [("cdx-00001.gz", 100, 200), ("cdx-00001.gz", 300, 250)]
+    assert blocks == [
+        ("cdx-00000.gz", 0, 100),      # boundary before
+        ("cdx-00001.gz", 100, 200),
+        ("cdx-00001.gz", 300, 250),
+        ("cdx-00002.gz", 550, 100),    # boundary after
+    ]
 
 
 def test_bulk_find_blocks_skips_the_partial_first_line():
@@ -1333,3 +1346,48 @@ def test_bulk_block_does_not_retry_a_404():
         hc.bulk_fetch_block("CC-MAIN-2026-34", "cdx-0.gz", 0, 10,
                             fetch_range=fetch_range, sleep=lambda s: None)
     assert len(calls) == 1
+
+
+def test_bulk_includes_the_block_before_the_first_match():
+    """cluster.idx names each block by its *first* key, so a prefix beginning
+    partway through a block leaves that block's key sorting below it. Skipping
+    it silently drops the start of the range."""
+    body = _cluster([
+        "aa,skip)/x 1\tcdx-PARTIAL.gz\t0\t1\t0",
+        # This block starts before the prefix but can still contain it.
+        "co,lever,job)/z 1\tcdx-BEFORE.gz\t10\t10\t1",
+        "co,lever,jobs)/a 1\tcdx-MATCH.gz\t20\t10\t2",
+        "co,zzz)/x 1\tcdx-AFTER.gz\t30\t10\t3",
+    ])
+    blocks = hc.bulk_find_blocks(
+        "CC-MAIN-2026-34", "co,lever,jobs)/",
+        fetch_range=lambda u, a, b: body, fetch_size=lambda u: len(body),
+        probe_bytes=10 ** 9)
+    names = [name for name, _, _ in blocks]
+    assert "cdx-BEFORE.gz" in names, "boundary block before the match was dropped"
+    assert "cdx-MATCH.gz" in names
+
+
+def test_bulk_includes_the_block_after_the_last_match():
+    """Mirror image: the tail of the range can share the following block."""
+    body = _cluster([
+        "aa,skip)/x 1\tcdx-PARTIAL.gz\t0\t1\t0",
+        "co,lever,jobs)/a 1\tcdx-MATCH.gz\t20\t10\t2",
+        "co,zzz)/x 1\tcdx-AFTER.gz\t30\t10\t3",
+    ])
+    blocks = hc.bulk_find_blocks(
+        "CC-MAIN-2026-34", "co,lever,jobs)/",
+        fetch_range=lambda u, a, b: body, fetch_size=lambda u: len(body),
+        probe_bytes=10 ** 9)
+    assert "cdx-AFTER.gz" in [name for name, _, _ in blocks]
+
+
+def test_bulk_extra_boundary_blocks_do_not_leak_foreign_slugs():
+    """Reading neighbouring blocks is only safe because the prefix check runs
+    again on their contents."""
+    text = "\n".join([
+        'co,lever,jobs)/acme/1 1 {"url": "https://jobs.lever.co/acme/1", "status": "200"}',
+        'co,zzz,other)/x 1 {"url": "https://other.zzz/notacompany", "status": "200"}',
+    ])
+    assert list(hc.iter_bulk_urls(text, "co,lever,jobs)/")) == \
+        ["https://jobs.lever.co/acme/1"]
