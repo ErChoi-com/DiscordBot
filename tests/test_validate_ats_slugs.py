@@ -284,3 +284,30 @@ def test_results_are_persisted(tmp_path, monkeypatch):
     assert v.main(["--platform", "lever"]) == 0
     dead = v.load_dead("lever")
     assert "gone" in dead and "alive" not in dead
+
+
+def test_lever_checks_both_regions(monkeypatch):
+    """Lever's US and EU deployments are separate and a company exists in
+    exactly one: amicustherapeutics is 200 on api.eu.lever.co and 404 on
+    api.lever.co. Checking only the US host marks every EU company dead."""
+    seen = []
+
+    def fake(url, **kwargs):
+        seen.append(url)
+        return (200 if "api.eu.lever.co" in url else 404), b"", url
+
+    monkeypatch.setattr(v, "_request", fake)
+    assert v.live_lever("amicustherapeutics") is True
+    assert any("//api.lever.co/" in u for u in seen)
+    assert any("//api.eu.lever.co/" in u for u in seen)
+
+
+def test_lever_dead_only_when_both_regions_miss(monkeypatch):
+    monkeypatch.setattr(v, "_request", lambda url, **k: (404, b"", url))
+    assert v.live_lever("nosuchco") is False
+
+
+def test_lever_unreachable_in_every_region_is_not_dead(monkeypatch):
+    monkeypatch.setattr(v, "_request", lambda url, **k: (503, b"", url))
+    with pytest.raises(v.Unreachable):
+        v.live_lever("acme")

@@ -715,3 +715,21 @@ def test_every_wayback_query_host_has_a_matching_extractor():
             host = query.split("/")[0].lstrip("*.")
             url = probes[name].format(host=host)
             assert extract(url) == "acme", f"{name}: {query} -> {url}"
+
+
+def test_lever_sweeps_both_regions():
+    """jobs.eu.lever.co is a separate region with its own companies, and it
+    matters disproportionately: Lever blocks CCBot on jobs.lever.co, so the EU
+    host is the only Lever board host Common Crawl still carries."""
+    cc = {q for q, _ in hc.PLATFORM_BY_NAME["lever"].queries}
+    assert cc == {"jobs.lever.co/*", "jobs.eu.lever.co/*"}
+    assert "jobs.eu.lever.co/*" in hc.WAYBACK_QUERIES["lever"]
+
+
+def test_eu_lever_urls_extract_the_bare_company_slug():
+    """The region lives in the host, not the slug, so the identifier stored is
+    the same shape as a US one -- ats_service picks the region by trying both
+    API hosts."""
+    got = hc.PLATFORM_BY_NAME["lever"].extract(
+        "https://jobs.eu.lever.co/amicustherapeutics/96625890-d24b-4c98")
+    assert got == "amicustherapeutics"

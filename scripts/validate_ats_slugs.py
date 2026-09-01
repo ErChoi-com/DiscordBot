@@ -123,9 +123,24 @@ def live_greenhouse(slug: str) -> bool:
     return _decide(status)
 
 
+# Lever's US and EU regions are separate deployments and a company exists in
+# exactly one: amicustherapeutics is 200 on api.eu.lever.co and 404 on
+# api.lever.co. Checking one host marks the entire EU population dead.
+LEVER_API_HOSTS = ("api.lever.co", "api.eu.lever.co")
+
+
 def live_lever(slug: str) -> bool:
-    status, _, _ = _request(f"https://api.lever.co/v0/postings/{slug}?mode=json")
-    return _decide(status)
+    unreachable = 0
+    for host in LEVER_API_HOSTS:
+        status, _, _ = _request(f"https://{host}/v0/postings/{slug}?mode=json")
+        try:
+            if _decide(status):
+                return True
+        except Unreachable:
+            unreachable += 1
+    if unreachable == len(LEVER_API_HOSTS):
+        raise Unreachable("no region answered")
+    return False
 
 
 def live_ashby(slug: str) -> bool:

@@ -284,7 +284,11 @@ PLATFORMS: tuple[Platform, ...] = (
     ),
     Platform(
         "lever",
-        (("jobs.lever.co/*", "prefix"),),
+        # jobs.eu.lever.co is a separate region with its own companies, and it
+        # matters disproportionately: Lever blocks CCBot on jobs.lever.co, so
+        # the EU host is the only Lever board host Common Crawl still carries.
+        (("jobs.lever.co/*", "prefix"),
+         ("jobs.eu.lever.co/*", "prefix")),
         _path_segment_extractor("lever.co"),
     ),
     Platform(
@@ -568,7 +572,7 @@ WAYBACK_URL = "http://web.archive.org/cdx/search/cdx"
 WAYBACK_QUERIES: dict[str, tuple[str, ...]] = {
     "greenhouse": ("boards.greenhouse.io/*", "job-boards.greenhouse.io/*",
                    "job-boards.eu.greenhouse.io/*"),
-    "lever": ("jobs.lever.co/*",),
+    "lever": ("jobs.lever.co/*", "jobs.eu.lever.co/*"),
     "ashby": ("jobs.ashbyhq.com/*",),
     "workday": ("*.myworkdayjobs.com/*", "*.myworkdaysite.com/*"),
     "icims": ("*.icims.com/*",),
