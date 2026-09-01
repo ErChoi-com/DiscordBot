@@ -821,3 +821,40 @@ def test_real_upstream_site_shapes_still_pass(site):
     """Guards the tightening: these are all real upstream site segments, and
     the short numeric ones are the easiest to reject by accident."""
     assert hc._workday_triple("acme", "wd3", site) == f"acme|wd3|{site}"
+
+
+@pytest.mark.parametrize("slug,ok", [
+    # Companies routinely use their own domain as the slug; all three are live.
+    ("affinity.co", True), ("akasa.com", True), ("alignment.org", True),
+    ("all.health", True), ("adept.ai", True),
+    # Version strings look similar but carry no two-letter word. All dead.
+    ("2.5", False), ("2021b-49.2", False), ("2022ae-13.3", False),
+    ("u.s.a", False),
+    # Root files that land in the slug position on every host.
+    ("ads.txt", False), ("app-ads.txt", False),
+])
+def test_dotted_slugs_keep_domains_and_drop_version_strings(slug, ok):
+    """Rejecting dots wholesale would delete real companies -- checked against
+    live boards -- so the discriminator is a two-letter alphabetic run, which
+    every TLD has and no version string does."""
+    assert hc._looks_like_company(slug) is ok
+
+
+@pytest.mark.parametrize("url,expected", [
+    # Archived URLs pick up a sentence's full stop. All three bare names are
+    # live boards, so rejecting the captured form loses real companies.
+    ("https://jobs.ashbyhq.com/camber./abc", "camber"),
+    ("https://jobs.ashbyhq.com/inherent./abc", "inherent"),
+    ("https://jobs.lever.co/dnb./abc", "dnb"),
+    # Only trailing characters are trimmed; a domain-style slug is untouched.
+    ("https://jobs.ashbyhq.com/affinity.co/abc", "affinity.co"),
+])
+def test_trailing_punctuation_is_trimmed_not_rejected(url, expected):
+    platform = "lever" if "lever" in url else "ashby"
+    assert hc.PLATFORM_BY_NAME[platform].extract(url) == expected
+
+
+def test_ashby_root_uuid_noise_is_dropped():
+    """1,301 of 6,304 harvested Ashby entries were root.<uuid> and similar."""
+    assert hc.PLATFORM_BY_NAME["ashby"].extract(
+        "https://jobs.ashbyhq.com/root.00598075_84d8_48d8_bad7_5db9ef0b9e4b/x") is None

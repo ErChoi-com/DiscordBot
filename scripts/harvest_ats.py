@@ -80,12 +80,26 @@ RESERVED_SEGMENTS = frozenset({
     "favicon.ico", "robots.txt", "sitemap.xml", "images", "img", "css", "js",
     "search", "login", "signup", "about", "privacy", "terms", "blog", "www",
     "index.html", "apply", "applications", "boards", "confirmation",
+    # Well-known root files that land in the slug position on every host.
+    "ads.txt", "app-ads.txt", "security.txt", "humans.txt", "manifest.json",
 })
 
 # Workday tenant hosts are wd1..wd105 plus impl/impl-wd* staging hosts.  The
 # staging ones serve nothing public, so they are dropped rather than harvested
 # into a list that would probe them forever.
 _WORKDAY_HOST_RE = re.compile(r"^wd\d+$")
+
+
+def _normalise_slug(slug: str) -> str:
+    """Trim trailing punctuation a URL picked up from surrounding text.
+
+    Archived URLs are frequently captured with a sentence's full stop or a
+    stray dash glued on, giving "camber." and "inherent." -- both of which are
+    live Ashby boards under their bare name, and "dnb." likewise on Lever.
+    Rejecting them as malformed loses real companies; trimming recovers them.
+    Only trailing characters are touched, so affinity.co is untouched.
+    """
+    return slug.rstrip(".-_")
 
 
 def _looks_like_company(slug: str) -> bool:
@@ -108,6 +122,15 @@ def _looks_like_company(slug: str) -> bool:
     # spill. Rare -- one in ~700 segments -- but a silent loss of real
     # companies.
     if not re.fullmatch(r"[a-z0-9][a-z0-9._&+-]*", slug):
+        return False
+    # A dotted slug is usually a company using its own domain -- affinity.co,
+    # akasa.com, alignment.org and adept.ai are all live boards -- so dots
+    # cannot simply be rejected. What separates them from version strings is
+    # what follows the final dot: a TLD is two or more letters, while "2.5",
+    # "2021b-49.2", "2022ae-13.3" and "u.s.a" all end in digits or a single
+    # letter. (Checking for a two-letter run anywhere is not enough: the "ae"
+    # in 2022ae-13.3 is itself a valid TLD.)
+    if "." in slug and not re.fullmatch(r"[a-z]{2,}", slug.rsplit(".", 1)[-1]):
         return False
     # A bare 32/40-char hex string is a session or tracking id, never a company.
     if len(slug) >= 32 and re.fullmatch(r"[0-9a-f]+", slug):
@@ -146,7 +169,7 @@ def _path_segment_extractor(host_suffix: str) -> Callable[[str], str | None]:
         m = pattern.match(url)
         if not m:
             return None
-        slug = urllib.parse.unquote(m.group(2)).strip().lower()
+        slug = _normalise_slug(urllib.parse.unquote(m.group(2)).strip().lower())
         return slug if _looks_like_company(slug) else None
 
     return extract
@@ -166,7 +189,7 @@ def _subdomain_extractor(
         m = pattern.match(url)
         if not m:
             return None
-        slug = m.group(1).strip().lower()
+        slug = _normalise_slug(m.group(1).strip().lower())
         if slug in ("www", "api", "static", "cdn", "help", "support", "app"):
             return None
         if strip_prefix and slug.startswith(strip_prefix):
