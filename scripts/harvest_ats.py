@@ -993,6 +993,11 @@ def capture_is_usable(status: str) -> bool:
     crawls yields. conviva is the case that surfaced it: eight captures, all
     302, a live board, and absent from our harvest entirely.
 
+    The size of that is particular to Greenhouse, which redirects utm-tagged
+    and retired job URLs heavily. Checked on the same crawl, BambooHR had two
+    such slugs and Ashby none, so this rule is a large gain on one platform and
+    a harmless no-op on the rest rather than a uniform uplift.
+
     4xx stays out. Nothing in that bucket resolved, which is what the status
     says: the path was wrong.
     """
