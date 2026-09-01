@@ -246,12 +246,12 @@ def test_retries_are_bounded():
 
 def test_iter_urls_skips_malformed_lines():
     """One bad line must not discard the other 13,000 on the page."""
-    raw = (b'{"url": "https://a.com/1"}\n'
-           b'{"url": "https://a.com/2"\n'      # truncated
+    raw = (b'{"url": "https://a.com/1", "status": "200"}\n'
+           b'{"url": "https://a.com/2", "status": "200"\n'      # truncated
            b'\n'
            b'not json at all\n'
            b'{"nourl": true}\n'
-           b'{"url": "https://a.com/3"}\n')
+           b'{"url": "https://a.com/3", "status": "200"}\n')
     assert list(hc.iter_urls(raw)) == ["https://a.com/1", "https://a.com/3"]
 
 
@@ -274,7 +274,6 @@ def test_workday_query_uses_domain_match():
 def test_prefix_queries_omit_match_type():
     url = hc.build_query_url("CC-MAIN-2026-34", "jobs.lever.co/*", "prefix", page=0)
     assert "matchType" not in url
-    assert "filter=status%3A200" in url
     assert "page=0" in url
 
 
@@ -321,7 +320,7 @@ def _fake_index(pages: dict[str, list[str]], fail: set[str] | None = None):
             raise _http_error(500)
         if "showNumPages" in query:
             return json.dumps({"pages": 1}).encode()
-        return b"\n".join(json.dumps({"url": u}).encode() for u in pages[target])
+        return b"\n".join(json.dumps({"url": u, "status": "200"}).encode() for u in pages[target])
 
     return fetch
 
@@ -488,7 +487,7 @@ def test_page_count_failure_falls_back_to_blind_walk():
         page = int((query.get("page") or ["0"])[0])
         if page > 0:
             raise _http_error(404, b'{"message": "No Captures found"}')
-        return b"\n".join(json.dumps({"url": u}).encode()
+        return b"\n".join(json.dumps({"url": u, "status": "200"}).encode()
                           for u in pages["bamboohr.com"])
 
     r = hc.harvest_platform(hc.PLATFORM_BY_NAME["bamboohr"], "CC-MAIN-2026-34",
@@ -504,7 +503,8 @@ def test_blind_walk_is_bounded():
         import urllib.parse as _up
         if "showNumPages" in _up.parse_qs(_up.urlparse(url).query):
             raise _http_error(504)
-        return json.dumps({"url": "https://acme.bamboohr.com/careers/list"}).encode()
+        return json.dumps({"url": "https://acme.bamboohr.com/careers/list",
+                           "status": "200"}).encode()
 
     r = hc.harvest_platform(hc.PLATFORM_BY_NAME["bamboohr"], "CC-MAIN-2026-34",
                             fetch=fetch, sleep=lambda s: None, delay=0,
@@ -1186,16 +1186,22 @@ def test_bulk_block_is_gunzipped_and_parsed():
         ["https://jobs.lever.co/acme/1"]
 
 
-def test_bulk_only_yields_status_200():
-    """The API sweep filters status:200 server-side; the bulk path must agree
-    or the two sources would harvest different sets from the same index."""
+def test_bulk_keeps_redirects_and_drops_client_errors():
+    """A redirect is not evidence the board is gone.
+
+    Greenhouse answers 302 for tagged and retired job URLs while the company is
+    still hiring. Filtering to 200 dropped 911 companies in one crawl, 38.6% of
+    them live -- conviva surfaced it: eight captures, all 302, a live board,
+    missing from the harvest entirely. 4xx stays out; none of that bucket
+    resolved."""
     lines = "\n".join([
         'co,lever,jobs)/a 1 {"url": "https://jobs.lever.co/a/1", "status": "200"}',
         'co,lever,jobs)/b 1 {"url": "https://jobs.lever.co/b/1", "status": "404"}',
         'co,lever,jobs)/c 1 {"url": "https://jobs.lever.co/c/1", "status": "302"}',
+        'co,lever,jobs)/d 1 {"url": "https://jobs.lever.co/d/1", "status": "500"}',
     ])
     assert list(hc.iter_bulk_urls(lines, "co,lever,jobs)/")) == \
-        ["https://jobs.lever.co/a/1"]
+        ["https://jobs.lever.co/a/1", "https://jobs.lever.co/c/1"]
 
 
 def test_bulk_skips_malformed_lines():
@@ -1498,3 +1504,36 @@ def test_real_tenants_beginning_with_wd_are_kept():
 def test_prune_would_strip_a_host_label_tenant():
     assert hc._current_identifier(
         hc.PLATFORM_BY_NAME["workday"], "wd1|wd1|careers") is None
+
+
+@pytest.mark.parametrize("status,usable", [
+    ("200", True), ("201", True), ("301", True), ("302", True), ("307", True),
+    ("404", False), ("410", False), ("403", False), ("500", False),
+    ("503", False), ("", False),
+])
+def test_capture_status_rule(status, usable):
+    assert hc.capture_is_usable(status) is usable
+
+
+def test_both_index_paths_apply_the_same_status_rule():
+    """They read the same index; if they disagreed on which captures count,
+    the harvest would depend on which path happened to run."""
+    api = list(hc.iter_urls(b"\n".join([
+        json.dumps({"url": "https://jobs.lever.co/a/1", "status": "200"}).encode(),
+        json.dumps({"url": "https://jobs.lever.co/b/1", "status": "302"}).encode(),
+        json.dumps({"url": "https://jobs.lever.co/c/1", "status": "404"}).encode(),
+    ])))
+    bulk = list(hc.iter_bulk_urls("\n".join([
+        'co,lever,jobs)/a 1 {"url": "https://jobs.lever.co/a/1", "status": "200"}',
+        'co,lever,jobs)/b 1 {"url": "https://jobs.lever.co/b/1", "status": "302"}',
+        'co,lever,jobs)/c 1 {"url": "https://jobs.lever.co/c/1", "status": "404"}',
+    ]), "co,lever,jobs)/"))
+    assert api == bulk
+
+
+def test_api_query_requests_the_status_field():
+    """Filtering moved client-side, so the field has to come back or every
+    capture reads as status "" and nothing is harvested at all."""
+    url = hc.build_query_url("CC-MAIN-2026-34", "x.com/*", "prefix", page=0)
+    assert "fl=url%2Cstatus" in url
+    assert "filter=" not in url

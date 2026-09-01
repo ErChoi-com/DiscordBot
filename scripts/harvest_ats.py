@@ -502,11 +502,13 @@ def build_query_url(
     params = {
         "url": url,
         "output": "json",
-        "fl": "url",
-        # Redirects and error captures still name a real company in the path, but
-        # a 200 is the strongest evidence the board existed at crawl time, and
-        # filtering server-side cuts the payload we transfer by roughly half.
-        "filter": "status:200",
+        # status is needed because the filtering moved client-side.
+        "fl": "url,status",
+        # No server-side status filter. It used to pin this to status:200,
+        # which silently dropped every company whose captures were all
+        # redirects -- 911 of them in one Greenhouse crawl, 38.6% of which are
+        # live boards. Filtering client-side through capture_is_usable costs
+        # more transfer and keeps the two index paths in exact agreement.
     }
     if match_type != "prefix":
         params["matchType"] = match_type
@@ -548,8 +550,12 @@ def iter_urls(raw: bytes) -> Iterator[str]:
             record = json.loads(line)
         except ValueError:
             continue
-        value = record.get("url") if isinstance(record, dict) else None
-        if isinstance(value, str):
+        if not isinstance(record, dict):
+            continue
+        value = record.get("url")
+        # Same predicate the bulk reader uses, so the two paths cannot diverge
+        # on what counts as a usable capture.
+        if isinstance(value, str) and capture_is_usable(str(record.get("status", ""))):
             yield value
 
 
@@ -971,6 +977,28 @@ def bulk_fetch_block(crawl: str, name: str, offset: int, length: int, *,
         raise HarvestError(f"undecodable cdx block {name}@{offset}: {exc}") from exc
 
 
+def capture_is_usable(status: str) -> bool:
+    """Whether a capture's HTTP status means its URL still names a company.
+
+    2xx and 3xx count; 4xx and 5xx do not. A redirect is not evidence the board
+    is gone -- Greenhouse answers 302 for tagged and retired job URLs while the
+    company is very much still hiring. Measured on CC-MAIN-2026-34 Greenhouse:
+
+        captures seen only with 2xx        3,017 slugs   97.1% live
+        captures seen only with 3xx          911 slugs   38.6% live
+        captures seen only with 4xx           26 slugs    0.0% live
+
+    Filtering to 200 alone was dropping those 911 in a single crawl -- a third
+    again on top of what it kept, at a live rate well above what sweeping older
+    crawls yields. conviva is the case that surfaced it: eight captures, all
+    302, a live board, and absent from our harvest entirely.
+
+    4xx stays out. Nothing in that bucket resolved, which is what the status
+    says: the path was wrong.
+    """
+    return status.startswith("2") or status.startswith("3")
+
+
 def iter_bulk_urls(text: str, surt_prefix: str) -> Iterator[str]:
     """Yield URLs from cdx shard lines matching the prefix.
 
@@ -989,9 +1017,7 @@ def iter_bulk_urls(text: str, surt_prefix: str) -> Iterator[str]:
             continue
         url = record.get("url") if isinstance(record, dict) else None
         status = str(record.get("status", "")) if isinstance(record, dict) else ""
-        # The API sweep filters status:200 server-side; do the same here so the
-        # two paths agree on what they harvest.
-        if isinstance(url, str) and status == "200":
+        if isinstance(url, str) and capture_is_usable(status):
             yield url
 
 
