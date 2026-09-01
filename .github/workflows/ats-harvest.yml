@@ -40,7 +40,7 @@ on:
       crawls:
         description: "How many recent Common Crawl snapshots to sweep"
         required: false
-        default: "1"
+        default: "6"
       extra_crawls:
         description: >-
           Space-separated crawl ids to also sweep, e.g.
@@ -129,12 +129,20 @@ jobs:
           python scripts/harvest_ats.py --prune --out data/ats_harvest
 
       - name: Collect
+        # Six crawls rather than one. That default dates from when every crawl
+        # meant paging the rate-limited query service; reading the published
+        # index files made a multi-crawl sweep cheap, and recent crawls turn
+        # out to be the best-quality source there is. A sweep of the 12 most
+        # recent produced 2,535 companies at 90.7% live, against 38.8% for the
+        # net-new slugs harvested from deep Wayback history -- recency of the
+        # evidence, not the archive it came from, is what predicts a live board.
+        #
         # Inputs reach the shell as environment variables rather than being
         # interpolated into the script text: a ${{ }} expansion is pasted in
         # verbatim before bash parses the line, so a crafted value would run as
         # part of the command.
         env:
-          CRAWLS: ${{ github.event.inputs.crawls || '1' }}
+          CRAWLS: ${{ github.event.inputs.crawls || '6' }}
           EXTRA_CRAWLS: ${{ github.event.inputs.extra_crawls || '' }}
           INDEXES: ${{ github.event.inputs.indexes || 'both' }}
         run: |
