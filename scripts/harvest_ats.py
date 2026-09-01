@@ -787,6 +787,37 @@ def _surt_prefix(query_url: str, match_type: str) -> str:
     return reversed_host + ")/"
 
 
+def _retrying_range(
+    fetch_range: RangeFetcher, url: str, start: int, end: int, *,
+    sleep: Callable[[float], None], tries: int = MAX_RETRIES,
+) -> bytes:
+    """Range-fetch with backoff.
+
+    data.commoncrawl.org throttles sustained reads: a 12-crawl sweep lost 11
+    blocks to 503s, all on the platform with the most blocks to read. A block
+    is roughly 170 companies, and unlike a paged API there is no later request
+    that happens to cover the same ground -- a dropped block is simply a hole.
+    """
+    last: Exception | None = None
+    for attempt in range(tries):
+        try:
+            return fetch_range(url, start, end)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (429, 500, 502, 503, 504) and attempt < tries - 1:
+                last = exc
+                sleep(2.0 * (2 ** attempt))
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError, OSError,
+                http.client.HTTPException) as exc:
+            if attempt < tries - 1:
+                last = exc
+                sleep(2.0 * (2 ** attempt))
+                continue
+            raise
+    raise HarvestError(f"exhausted range retries for {url}: {last}")
+
+
 def _http_get_range(url: str, start: int, end: int) -> bytes:
     request = urllib.request.Request(
         url, headers={"User-Agent": USER_AGENT, "Range": f"bytes={start}-{end}"})
@@ -876,12 +907,16 @@ def bulk_find_blocks(
 
 
 def bulk_fetch_block(crawl: str, name: str, offset: int, length: int, *,
-                     fetch_range: RangeFetcher | None = None) -> str:
+                     fetch_range: RangeFetcher | None = None,
+                     sleep: Callable[[float], None] | None = None) -> str:
     """Range-fetch one gzipped cdx shard and return its text."""
     if fetch_range is None:
         fetch_range = _http_get_range
+    if sleep is None:
+        sleep = time.sleep
     url = f"{CC_DATA_BASE}/cc-index/collections/{crawl}/indexes/{name}"
-    raw = fetch_range(url, offset, offset + length - 1)
+    raw = _retrying_range(fetch_range, url, offset, offset + length - 1,
+                          sleep=sleep)
     try:
         return gzip.GzipFile(fileobj=io.BytesIO(raw)).read().decode("utf-8", "replace")
     except (OSError, EOFError) as exc:
@@ -949,7 +984,7 @@ def harvest_platform_bulk(
                 sleep(delay)
             try:
                 text = bulk_fetch_block(crawl, name, offset, length,
-                                        fetch_range=fetch_range)
+                                        fetch_range=fetch_range, sleep=sleep)
             except HarvestError as exc:
                 result.errors.append(f"bulk {name}@{offset}: {exc}")
                 continue

@@ -1285,3 +1285,51 @@ def test_discovery_is_not_attempted_when_not_asked_for(tmp_path, monkeypatch):
     with pytest.raises(hc.HarvestError):
         hc.latest_crawls(1, fetch=dead, sleep=lambda s: None,
                          cache_path=tmp_path / "absent.json", discover_years=None)
+
+
+def test_bulk_block_retries_a_throttled_read():
+    """data.commoncrawl.org throttles sustained reads: a 12-crawl sweep lost 11
+    blocks to 503s. Unlike a paged API there is no later request that covers
+    the same ground, so a dropped block is simply a hole of ~170 companies."""
+    good = _gz('co,lever,jobs)/acme/1 1 '
+               '{"url": "https://jobs.lever.co/acme/1", "status": "200"}')
+    calls = []
+
+    def fetch_range(url, start, end):
+        calls.append(url)
+        if len(calls) < 3:
+            raise _http_error(503)
+        return good
+
+    slept = []
+    text = hc.bulk_fetch_block("CC-MAIN-2026-34", "cdx-0.gz", 0, 10,
+                               fetch_range=fetch_range, sleep=slept.append)
+    assert "acme" in text
+    assert len(calls) == 3 and slept == [2.0, 4.0]
+
+
+def test_bulk_block_retries_are_bounded():
+    calls = []
+
+    def fetch_range(url, start, end):
+        calls.append(url)
+        raise _http_error(503)
+
+    with pytest.raises(urllib.error.HTTPError):
+        hc.bulk_fetch_block("CC-MAIN-2026-34", "cdx-0.gz", 0, 10,
+                            fetch_range=fetch_range, sleep=lambda s: None)
+    assert len(calls) == hc.MAX_RETRIES
+
+
+def test_bulk_block_does_not_retry_a_404():
+    """A missing shard is not going to appear on the second ask."""
+    calls = []
+
+    def fetch_range(url, start, end):
+        calls.append(url)
+        raise _http_error(404)
+
+    with pytest.raises(urllib.error.HTTPError):
+        hc.bulk_fetch_block("CC-MAIN-2026-34", "cdx-0.gz", 0, 10,
+                            fetch_range=fetch_range, sleep=lambda s: None)
+    assert len(calls) == 1
