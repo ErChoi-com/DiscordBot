@@ -101,7 +101,13 @@ def _looks_like_company(slug: str) -> bool:
         return False
     if slug in RESERVED_SEGMENTS:
         return False
-    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", slug):
+    # "&" and "+" belong here: harrison&star is a live Greenhouse board and
+    # harrisonstar is not, so the character is part of the identifier rather
+    # than something to normalise away. They are safe because the extractors
+    # take a single path segment ([^/?#]+), so neither can be query-string
+    # spill. Rare -- one in ~700 segments -- but a silent loss of real
+    # companies.
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._&+-]*", slug):
         return False
     # A bare 32/40-char hex string is a session or tracking id, never a company.
     if len(slug) >= 32 and re.fullmatch(r"[0-9a-f]+", slug):

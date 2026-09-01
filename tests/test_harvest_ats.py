@@ -764,3 +764,23 @@ def test_explicit_depths_only_name_real_queries():
     every = {q for qs in hc.WAYBACK_QUERIES.values() for q in qs}
     for query in hc.WAYBACK_EXPLICIT_DEPTHS:
         assert query in every, query
+
+
+@pytest.mark.parametrize("slug", ["harrison&star", "1840&company", "a+b"])
+def test_ampersand_and_plus_slugs_are_kept(slug):
+    """harrison&star is a live Greenhouse board; harrisonstar is not, so the
+    ampersand is part of the identifier rather than noise to strip. The
+    extractors take a single path segment, so these cannot be query-string
+    spill."""
+    assert hc._looks_like_company(slug) is True
+
+
+def test_ampersand_survives_extraction():
+    assert hc.PLATFORM_BY_NAME["greenhouse"].extract(
+        "https://job-boards.greenhouse.io/harrison&star/jobs/123") == "harrison&star"
+
+
+def test_query_string_is_still_not_treated_as_slug():
+    """Widening the charset must not let a ?a&b= tail become part of the slug."""
+    assert hc.PLATFORM_BY_NAME["greenhouse"].extract(
+        "https://job-boards.greenhouse.io/acme?utm=x&gh_src=y") == "acme"
