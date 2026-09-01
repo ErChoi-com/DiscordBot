@@ -9,6 +9,7 @@ built on made-up URLs would prove nothing.
 
 from __future__ import annotations
 
+import argparse
 import http.client
 import json
 import sys
@@ -1537,3 +1538,61 @@ def test_api_query_requests_the_status_field():
     url = hc.build_query_url("CC-MAIN-2026-34", "x.com/*", "prefix", page=0)
     assert "fl=url%2Cstatus" in url
     assert "filter=" not in url
+
+
+def test_progress_is_checkpointed_after_each_crawl(tmp_path, monkeypatch):
+    """A run that dies partway through a platform must not lose the platform.
+
+    Output used to be written only once every crawl for a platform had
+    finished, so a 12-crawl sweep that stopped during Greenhouse -- silently,
+    with no traceback -- left the file untouched and threw away everything it
+    had read. The property is that the file is on disk before the run ends.
+    """
+    out = tmp_path / "out"
+    crawls = ["CC-MAIN-2026-34", "CC-MAIN-2026-30", "CC-MAIN-2026-25"]
+    on_disk_midway = {}
+
+    def fetch_range(url, start_b, end_b):
+        if "cluster.idx" in url:
+            crawl = url.split("/collections/")[1].split("/")[0]
+            # Record what a crash at this moment would have preserved.
+            on_disk_midway[crawl] = hc.load_existing(out / "lever.json")
+            return _cluster([
+                "co,lever,jobs)/partial 1	cdx-SKIP.gz	0	1	0",
+                "co,lever,jobs)/a 1	cdx-0.gz	0	10	1",
+                "co,zzz)/x 1	cdx-1.gz	10	10	2",
+            ])
+        idx = len(on_disk_midway)
+        return _gz(f'co,lever,jobs)/co{idx}/1 1 '
+                   f'{{"url": "https://jobs.lever.co/co{idx}/1", "status": "200"}}')
+
+    monkeypatch.setattr(hc, "_http_get_range", fetch_range)
+    monkeypatch.setattr(hc, "_http_head_size", lambda u: 500)
+    monkeypatch.setattr(hc.time, "sleep", lambda s: None)
+
+    argv = ["--index", "ccbulk", "--platform", "lever", "--out", str(out),
+            "--delay", "0"]
+    for crawl in crawls:
+        argv += ["--crawl", crawl]
+    assert hc.main(argv) == 0
+
+    # By the time the second crawl started, the first crawl's find was durable.
+    assert on_disk_midway[crawls[1]], "nothing was written before the run ended"
+    assert len(on_disk_midway[crawls[2]]) >= len(on_disk_midway[crawls[1]])
+
+
+def test_checkpoint_only_ever_adds(tmp_path):
+    """The merge is a union and the write is atomic, so an interrupted run
+    leaves a smaller harvest, never a corrupt or shrunken one."""
+    out = tmp_path / "out"
+    hc.write_slugs(out / "lever.json", {"pre-existing"})
+    args = argparse.Namespace(dry_run=False, out=out)
+    hc._checkpoint(args, "lever", {"pre-existing"}, {"newly-found"})
+    assert hc.load_existing(out / "lever.json") == {"pre-existing", "newly-found"}
+
+
+def test_checkpoint_writes_nothing_on_a_dry_run(tmp_path):
+    out = tmp_path / "out"
+    args = argparse.Namespace(dry_run=True, out=out)
+    hc._checkpoint(args, "lever", set(), {"found"})
+    assert not (out / "lever.json").exists()

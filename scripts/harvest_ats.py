@@ -1444,6 +1444,23 @@ _IDENTIFIER_PROBES: dict[str, Callable[[str], str | None]] = {
 }
 
 
+def _checkpoint(args, platform_name: str, existing: set[str], found: set[str]) -> None:
+    """Write what has been harvested so far, after each crawl.
+
+    Output used to be written once a platform had finished every crawl. A
+    12-crawl run that died partway through Greenhouse therefore lost the whole
+    platform -- which is exactly what happened, silently, with no traceback:
+    the process simply stopped and the file was untouched.
+
+    Writing per crawl bounds the loss to one crawl instead of one platform. The
+    write is atomic and the merge is a union, so a checkpoint can only ever add
+    -- an interrupted run leaves a smaller harvest, never a corrupt one.
+    """
+    if args.dry_run or not found:
+        return
+    write_slugs(args.out / f"{platform_name}.json", existing | found)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--crawl", action="append", dest="crawls_explicit",
@@ -1539,6 +1556,7 @@ def main(argv: list[str] | None = None) -> int:
                 errors.extend(result.errors)
                 pages += result.pages_fetched
                 records += result.records_seen
+                _checkpoint(args, platform.name, existing, found)
 
         if "commoncrawl" in indexes:
             for crawl in crawls:
@@ -1551,6 +1569,7 @@ def main(argv: list[str] | None = None) -> int:
                 errors.extend(result.errors)
                 pages += result.pages_fetched
                 records += result.records_seen
+                _checkpoint(args, platform.name, existing, found)
 
         if "wayback" in indexes:
             log(f"[harvest] {platform.name} @ wayback")
