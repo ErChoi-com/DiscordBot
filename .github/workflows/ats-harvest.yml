@@ -57,7 +57,7 @@ on:
       validate_limit:
         description: "Max slugs to probe per platform (0 disables validation)"
         required: false
-        default: "6000"
+        default: "12000"
 
 permissions:
   contents: write
@@ -253,7 +253,7 @@ jobs:
         # marks once they age past the recheck window, so successive weekly runs
         # work through the backlog instead of re-probing the same slugs.
         env:
-          VALIDATE_LIMIT: ${{ github.event.inputs.validate_limit || '6000' }}
+          VALIDATE_LIMIT: ${{ github.event.inputs.validate_limit || '12000' }}
         run: |
           set -euo pipefail
           if [ "$VALIDATE_LIMIT" = "0" ]; then
@@ -261,8 +261,27 @@ jobs:
             echo '{"platforms":{}}' > validate.json
             exit 0
           fi
+          # Sized against the measured backlog rather than a guess. There are
+          # currently 61,906 slugs due for a probe, dominated by BambooHR
+          # (20,376) and Paylocity (15,582 -- never validated at scale, and
+          # limited to two workers because it refuses connections under load).
+          # At the previous 900s/6000 the job used 117 minutes of its 330 and
+          # was bound by the slug limit rather than the clock, so doubling both
+          # lands near 222 minutes with margin and roughly halves how long the
+          # backlog takes to clear. Anything deferred is picked up next week --
+          # target selection prefers never-probed slugs, so progress
+          # accumulates rather than restarting.
+          #
+          # --audit-sample additionally probes 100 random slugs per platform,
+          # read-only. The working pass deliberately probes never-probed slugs
+          # first, so its live rate excludes everything already known dead and
+          # reads far too high -- 97.5% against 38.8% on the same data. The
+          # audit is the number the summary reports as the true live rate.
           python scripts/validate_ats_slugs.py \
-            --limit "$VALIDATE_LIMIT" --json > validate.json
+            --limit "$VALIDATE_LIMIT" \
+            --budget-seconds 1800 \
+            --audit-sample 100 \
+            --json > validate.json
           cat validate.json
 
       - name: Verify the validation before publishing it
