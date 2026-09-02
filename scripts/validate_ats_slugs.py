@@ -127,15 +127,25 @@ WORKERS = {"greenhouse": 16, "lever": 16, "ashby": 8, "workday": 12,
            "breezy": 8, "smartrecruiters": 8, "rippling": 8,
            "teamtailor": 8, "jazzhr": 8, "recruitee": 8, "jobvite": 8,
            "applicantpro": 8,
-           # Workable refuses anything quicker. See DELAYS below.
-           "workable": 1}
+           # Paced rather than throttled down. See DELAYS below.
+           "workable": 4}
 
 # Seconds to wait before each probe, per platform. Only for endpoints that
-# refuse a normal pace: an unpaced Workable pass was 91% refused and left the
-# address throttled afterwards. A slow platform is not a problem on its own --
-# whatever a run does not reach is deferred to the next one, and the target
-# selection prefers never-probed slugs, so the population still converges.
-DELAYS: dict[str, float] = {"workable": 1.0}
+# refuse a normal pace: an unpaced Workable pass at eight workers ran about
+# 45/s, came back 91% refused with 429, and left the address throttled for
+# minutes afterwards.
+#
+# The delay is what fixes that, not low concurrency, and the difference is
+# worth 4x. Measured after the throttle cleared, 429s in every case zero:
+#
+#   serial, 0.5s   80 requests   1.5/s
+#   serial, 0.25s  80 requests   2.4/s
+#   4 workers, 0.25s  60 requests  10.0/s
+#
+# So four workers with a quarter-second pace, rather than the one worker a
+# guess had put here -- same safety, four times the throughput. Eight workers
+# with a delay is untested; the unpaced eight-worker run is the one that broke.
+DELAYS: dict[str, float] = {"workable": 0.25}
 
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36")

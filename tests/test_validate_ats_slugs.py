@@ -1046,4 +1046,7 @@ def test_workable_is_paced_by_default():
     """The pacing has to be the default, not something a caller remembers:
     the unpaced run is the one that gets the address throttled."""
     assert v.DELAYS.get("workable", 0) > 0
-    assert v.WORKERS["workable"] == 1
+    # The pace is what makes it safe, so concurrency stays well under the
+    # eight-worker unpaced run that triggered the throttle. Four workers at a
+    # quarter-second measured 10/s with zero refusals.
+    assert v.WORKERS["workable"] <= 4
