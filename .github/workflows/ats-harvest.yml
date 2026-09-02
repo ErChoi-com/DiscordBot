@@ -442,8 +442,8 @@ jobs:
           {
             echo "## ATS harvest"
             echo
-            echo "| platform | harvested | new | total | probed | live | dead | true live rate |"
-            echo "|---|---:|---:|---:|---:|---:|---:|---:|"
+            echo "| platform | harvested | new | total | probed | live | dead | deferred | confirmed | true live rate |"
+            echo "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
             python - <<'PY'
           import json, pathlib
           def load(name, key):
@@ -463,8 +463,17 @@ jobs:
               # The audit rate, not the working one: the working pass samples
               # survivors by design and its rate is not the population's.
               rate = f"{audit['rate']}% (n={audit['sampled']})" if audit else "-"
+              # "confirmed" is how many slugs sit inside their live-recheck
+              # window, and it is the number that says whether the run is
+              # converging. Without it a healthy steady state -- few probes
+              # because most companies were confirmed recently -- reads
+              # identically to a run that did nothing. "deferred" is what the
+              # budget cut off, so a persistently large value means the
+              # platform needs more time rather than that it is finished.
               print(f"| {name} | {a.get('harvested', 0)} | {a.get('new', 0)} | "
                     f"{a.get('total', 0)} | {b.get('probed', 0)} | "
-                    f"{b.get('live', 0)} | {b.get('dead', 0)} | {rate} |")
+                    f"{b.get('live', 0)} | {b.get('dead', 0)} | "
+                    f"{b.get('deferred', 0)} | {b.get('checked_total', 0)} | "
+                    f"{rate} |")
           PY
           } >> "$GITHUB_STEP_SUMMARY"

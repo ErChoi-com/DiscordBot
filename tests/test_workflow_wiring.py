@@ -214,3 +214,17 @@ def test_floors_exist_for_every_platform_that_can_have_one(steps):
         if platform == "lever":
             continue
         assert f'"{platform}"' in verify, platform
+
+
+def test_summary_reports_convergence(steps):
+    """A steady state and a stalled run look identical without these.
+
+    Once slugs are skipped for thirty days after being confirmed, a healthy
+    week probes very few of them -- which reads exactly like a run that did
+    nothing. "confirmed" says how many are inside that window, and "deferred"
+    says how much the budget cut off, so a platform that needs more time is
+    distinguishable from one that is finished.
+    """
+    summary = steps["Summary"]
+    assert "checked_total" in summary
+    assert "deferred" in summary
