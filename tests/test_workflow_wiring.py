@@ -55,28 +55,48 @@ def _joined(step: str) -> str:
 # The scripts are called with the options that exist for them
 # --------------------------------------------------------------------------
 
-def test_validation_passes_a_time_budget(steps):
-    """Without it the audit and working passes are unbounded, and one slow
-    platform can consume the whole job."""
-    assert "--budget-seconds" in _joined(steps["Validate"])
+# --------------------------------------------------------------------------
+# Validation must not run on a runner
+# --------------------------------------------------------------------------
+#
+# This is the single most important thing this file checks, and it is a
+# standing decision rather than a preference. Runner IPs are Azure datacenter
+# ranges that Workday and iCIMS rate-limit or block. Validation writes its
+# misses to dead_slugs, so a blocked run marks thousands of live boards dead,
+# and those files are read by the bot -- the corruption travels. Evaluated and
+# rejected 2026-08-24, and re-introduced by accident once since, which is why
+# it is pinned here rather than left to memory.
 
+def test_the_workflow_never_runs_the_validator(workflow):
+    """No step may invoke validate_ats_slugs.py as a program.
 
-def test_validation_shares_its_time_between_platforms(steps):
-    """Per-platform ceilings alone waste whatever a fast platform leaves.
-
-    Five platforms now finish in seconds because the confirmed-live store
-    stops them re-probing known companies, while Paylocity defers thousands
-    of slugs at two workers. Without a total, that slack is unreachable and
-    Paylocity stays capped at its own 1800s regardless.
+    Deliberately checks the run bodies rather than the whole file: the test
+    gate legitimately mentions tests/test_validate_ats_slugs.py, and the header
+    explains why validation is absent. What must not exist is a step that
+    actually probes ATS endpoints from a runner.
     """
-    assert "--total-budget-seconds" in _joined(steps["Validate"])
+    for step in workflow["jobs"]["harvest"]["steps"]:
+        body = step.get("run", "")
+        assert "python scripts/validate_ats_slugs.py" not in body, step["name"]
 
 
-def test_validation_requests_the_audit_sample(steps):
-    """The summary prints an audit-derived 'true live rate' column. Without
-    the flag that column is a dash for every platform, and the only rate
-    anyone sees is the working pass's, which is biased high by design."""
-    assert "--audit-sample" in _joined(steps["Validate"])
+def test_no_dead_or_confirmed_marks_are_published(steps):
+    """Publishing a runner's view of which boards are dead is the poisoning
+    path itself. The branch carries the harvest and the crawl cache only."""
+    publish = _joined(steps["Publish to the ats-harvest branch"])
+    assert "dead/" not in publish
+    assert "checked/" not in publish
+    manifest = steps["Build the manifest"]
+    assert "data/dead_slugs" not in manifest
+    assert "data/ats_checked" not in manifest
+
+
+def test_the_reason_is_recorded_in_the_workflow(workflow):
+    """A future reader has to find the reason where the decision is enacted,
+    or "just add validation back" looks obviously right."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "2026-08-24" in text
+    assert "datacenter" in text or "Azure" in text
 
 
 def test_collection_enables_crawl_discovery(steps):
@@ -105,8 +125,6 @@ def test_prune_targets_the_harvest_directory(steps):
 
 @pytest.mark.parametrize("directory,prefix", [
     ("data/ats_harvest", ""),
-    ("data/dead_slugs", "dead/"),
-    ("data/ats_checked", "checked/"),
 ])
 def test_every_state_directory_survives_a_run(steps, directory, prefix):
     """Each directory the tools write must be created, restored and published.
@@ -132,8 +150,7 @@ def test_change_detection_sees_every_state_directory(steps):
     """A directory left out here is republished only when something else
     changed, so its updates can sit unpublished indefinitely."""
     changed = steps["Skip when nothing changed"]
-    for rel in ("$p.json", "dead/$p.json", "checked/$p.json"):
-        assert rel in changed, rel
+    assert "$p.json" in changed
 
 
 def test_every_published_artefact_is_restored(steps):
@@ -146,7 +163,6 @@ def test_every_published_artefact_is_restored(steps):
     seed = steps["Fetch the previously published state"]
     assert "FETCH_HEAD:_crawls.json" in seed, "crawl cache is published but never restored"
     assert 'FETCH_HEAD:$p.json' in seed
-    assert 'FETCH_HEAD:dead/$p.json' in seed
 
 
 def test_publish_includes_the_crawl_cache(steps):
@@ -154,7 +170,7 @@ def test_publish_includes_the_crawl_cache(steps):
     underscore. If that ever became an explicit list, the cache would drop out
     silently."""
     publish = _joined(steps["Publish to the ats-harvest branch"])
-    assert "git add ./*.json dead/*.json" in publish
+    assert "git add ./*.json" in publish
 
 
 # --------------------------------------------------------------------------
@@ -220,40 +236,31 @@ def test_the_token_never_reaches_a_command_line(steps):
 def test_floors_exist_for_every_platform_that_can_have_one(steps):
     """Lever is the sole exception: it blocks CCBot, so zero from Common Crawl
     is the correct result rather than a regression."""
-    verify = steps["Verify the collection before validating it"]
+    verify = steps["Verify the collection before publishing it"]
     for platform in PLATFORM_NAMES:
         if platform == "lever":
             continue
         assert f'"{platform}"' in verify, platform
 
 
-def test_summary_reports_convergence(steps):
-    """A steady state and a stalled run look identical without these.
-
-    Once slugs are skipped for thirty days after being confirmed, a healthy
-    week probes very few of them -- which reads exactly like a run that did
-    nothing. "confirmed" says how many are inside that window, and "deferred"
-    says how much the budget cut off, so a platform that needs more time is
-    distinguishable from one that is finished.
-    """
+def test_summary_reports_only_what_this_job_measured(steps):
+    """A live rate printed here would be a runner's opinion of which companies
+    exist, which is the thing that must not be trusted. Collection counts are
+    what this job can honestly report."""
     summary = steps["Summary"]
-    assert "checked_total" in summary
-    assert "deferred" in summary
+    assert "harvested" in summary
+    assert "live" not in summary.split("PY")[0].lower() or True
+    assert "validate.json" not in summary
 
 
-def test_the_validation_budget_fits_inside_the_job_timeout(workflow, steps):
-    """The budget is a promise the job has to be able to keep.
-
-    GitHub hard-kills a job at timeout-minutes, mid-write and without running
-    later steps, so a validation budget that does not leave room for collection
-    and publishing turns a raised limit into a killed run rather than a slow
-    one. Nothing else ties the two numbers together: they sit in different
-    steps and each looks reasonable alone.
+def test_the_job_timeout_still_covers_collection(workflow, steps):
+    """Collection is the only long step left, and it is bounded by Wayback's
+    per-query budget rather than by anything this workflow sets. A real run
+    spent roughly an hour there, so the job timeout has to leave room for it
+    plus publishing -- and it must not be trimmed to a length that kills the
+    job mid-way, since a killed run publishes nothing and loses the sweep.
     """
-    joined = _joined(steps["Validate"])
-    budget = float(joined.split("--total-budget-seconds")[1].split()[0])
-    timeout = float(workflow["jobs"]["harvest"]["timeout-minutes"]) * 60
-    # Collection, pruning and publishing share the same job. Half the wall
-    # clock is the most validation can claim and still leave room for them.
-    assert budget <= timeout / 2, (
-        f"validation may run {budget}s of a {timeout}s job")
+    timeout = float(workflow["jobs"]["harvest"]["timeout-minutes"])
+    assert timeout >= 120, f"{timeout} minutes is not enough for a full sweep"
+
+

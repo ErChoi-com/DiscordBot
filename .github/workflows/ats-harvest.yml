@@ -10,12 +10,24 @@ name: ATS company harvest
 #      builds them with a harvester it does not publish, so without this our
 #      lists only grow when that maintainer regenerates theirs.
 #
-#   2. Validate. Asks each platform whether the board actually exists and writes
-#      the misses to dead/ in the same {slug: YYYY-MM-DD} format ats_service
-#      already uses. Collection alone is not enough: measured live rates for
-#      newly harvested slugs run from 87% (BambooHR) down to 11% (iCIMS), so an
-#      append-only list fills with companies that never answer, and each one
-#      costs a request every scrape cycle, forever.
+# Validation deliberately does NOT run here, and that is a standing decision
+# rather than an oversight. Runner IPs are Azure datacenter ranges that Workday
+# and iCIMS rate-limit or block outright. Validation writes its misses to
+# dead_slugs, so a blocked run marks thousands of live boards dead, and that
+# corruption then follows into the bot that reads those files. Evaluated and
+# rejected 2026-08-24; scripts/validate_ats_slugs.py runs on the bot's own host
+# instead, from an address the platforms actually answer.
+#
+# The split is not arbitrary. Collection reads static index files from
+# data.commoncrawl.org and never contacts an ATS at all, so it cannot produce a
+# dead mark no matter how a runner is treated. Validation is the entire
+# poisoning path, and it is the half that stays local.
+#
+# Collection alone is not enough overall -- measured live rates for newly
+# harvested slugs run from 87% (BambooHR) down to 11% (iCIMS), so an
+# append-only list fills with companies that never answer, and each one costs
+# the bot a request every scrape cycle, forever. That is what the local
+# validation pass is for; it publishes nothing here.
 #
 # Why an orphan branch rather than commits to main: same reasoning as
 # geonames-sync.yml. Both halves rewrite whole files on a schedule, and
@@ -117,15 +129,11 @@ jobs:
         # last.
         run: |
           set -euo pipefail
-          mkdir -p data/ats_harvest data/dead_slugs data/ats_checked
+          mkdir -p data/ats_harvest
           if git fetch --depth=1 origin ats-harvest 2>/dev/null; then
             for p in greenhouse lever ashby workday icims bamboohr paylocity workable breezy smartrecruiters rippling teamtailor jazzhr recruitee jobvite applicantpro; do
               git show "FETCH_HEAD:$p.json" > "data/ats_harvest/$p.json" 2>/dev/null \
                 && echo "seeded harvest $p" || echo "no published $p.json yet"
-              git show "FETCH_HEAD:dead/$p.json" > "data/dead_slugs/$p.json" 2>/dev/null \
-                && echo "seeded dead $p" || echo "no published dead/$p.json yet"
-              git show "FETCH_HEAD:checked/$p.json" > "data/ats_checked/$p.json" 2>/dev/null \
-                && echo "seeded checked $p" || echo "no published checked/$p.json yet"
             done
             # The crawl-listing cache has to come back too. CI checks out fresh
             # every run, so a cache that is published but never restored is
@@ -213,7 +221,7 @@ jobs:
           python scripts/harvest_ats.py "${args[@]}" > harvest.json
           cat harvest.json
 
-      - name: Verify the collection before validating it
+      - name: Verify the collection before publishing it
         # A collapsed harvest is the failure mode that rots unnoticed: an index
         # returning empty pages, or a URL convention changing under the
         # extractors, both produce a valid file with almost nothing in it. That
@@ -280,96 +288,6 @@ jobs:
           print("collection output parses, is a list, and is sorted")
           PY
 
-      - name: Validate
-        # Bounded per platform so the run stays inside the job timeout. The
-        # validator probes never-checked slugs first and only revisits dead
-        # marks once they age past the recheck window, so successive weekly runs
-        # work through the backlog instead of re-probing the same slugs.
-        env:
-          VALIDATE_LIMIT: ${{ github.event.inputs.validate_limit || '12000' }}
-        run: |
-          set -euo pipefail
-          if [ "$VALIDATE_LIMIT" = "0" ]; then
-            echo "validation disabled by input"
-            echo '{"platforms":{}}' > validate.json
-            exit 0
-          fi
-          # Sized against the measured backlog rather than a guess. There are
-          # currently 61,906 slugs due for a probe, dominated by BambooHR
-          # (20,376) and Paylocity (15,582 -- never validated at scale, and
-          # limited to two workers because it refuses connections under load).
-          # At the previous 900s/6000 the job used 117 minutes of its 330 and
-          # was bound by the slug limit rather than the clock, so doubling both
-          # lands near 222 minutes with margin and roughly halves how long the
-          # backlog takes to clear. Anything deferred is picked up next week --
-          # target selection prefers never-probed slugs, so progress
-          # accumulates rather than restarting.
-          #
-          # --audit-sample additionally probes 100 random slugs per platform,
-          # read-only. The working pass deliberately probes never-probed slugs
-          # first, so its live rate excludes everything already known dead and
-          # reads far too high -- 97.5% against 38.8% on the same data. The
-          # audit is the number the summary reports as the true live rate.
-          python scripts/validate_ats_slugs.py \
-            --limit "$VALIDATE_LIMIT" \
-            --budget-seconds 1800 \
-            --total-budget-seconds 9000 \
-            --audit-sample 100 \
-            --json > validate.json
-          cat validate.json
-
-      - name: Verify the validation before publishing it
-        # The dangerous direction is over-marking: a platform that starts
-        # answering 500 for everything, or an endpoint that moves, would mark
-        # thousands of live companies dead and the bot would stop scraping them
-        # for a week. A wholesale collapse in live rate is the signal, so fail
-        # rather than publish it.
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import json, sys
-
-          # Lowest live rate measured across sources was iCIMS at ~11% for
-          # freshly harvested slugs, so 5% sits comfortably below anything real
-          # while still catching an endpoint that broke entirely.
-          MIN_LIVE_RATE = 5.0
-          # Below this many *definitive* answers the rate is noise, not signal.
-          MIN_SAMPLE = 50
-
-          platforms = json.load(open("validate.json")).get("platforms", {})
-          if not platforms:
-              print("validation skipped - nothing to check")
-              sys.exit(0)
-
-          failed = []
-          for name, d in sorted(platforms.items()):
-              probed, live = d.get("probed", 0), d.get("live", 0)
-              dead, unknown = d.get("dead", 0), d.get("unknown", 0)
-              rate = d.get("live_rate", 0.0)
-              print(f"{name:11} probed={probed:6} live={live:6} dead={dead:6} "
-                    f"unknown={unknown:5} live_rate={rate:5.1f}%")
-              # Measure over answers, not attempts. A platform that was simply
-              # unreachable has live == dead == 0, which reads as a 0% live
-              # rate while telling us nothing at all -- failing on that would
-              # let a transient outage break the weekly run and block the
-              # collection half from publishing too. It changed no marks, so
-              # there is nothing unsafe to publish; warn instead.
-              decided = live + dead
-              if decided >= MIN_SAMPLE and rate < MIN_LIVE_RATE:
-                  failed.append(f"{name}: live rate {rate}% below {MIN_LIVE_RATE}%")
-              if probed and unknown == probed:
-                  print(f"::warning::{name}: every probe was unreachable - "
-                        "no marks changed")
-              elif probed and decided < MIN_SAMPLE:
-                  print(f"::warning::{name}: only {decided} definitive answers "
-                        f"from {probed} probes - live rate not checked")
-
-          if failed:
-              print("::error::validation looks broken: " + "; ".join(failed))
-              sys.exit(1)
-          print("validation within expected bounds")
-          PY
-
       - name: Build the manifest
         # Consumers fetch this first: a few hundred bytes says whether anything
         # changed before they pull the lists.
@@ -380,14 +298,12 @@ jobs:
 
           out = pathlib.Path("publish")
           (out / "dead").mkdir(parents=True, exist_ok=True)
-          # Which slugs were last confirmed live. Without this the validator
-          # forgets every live answer between runs and re-probes companies it
-          # already knows about -- 93% of one run's budget went that way.
-          (out / "checked").mkdir(parents=True, exist_ok=True)
+          # The harvest and the crawl cache, and nothing else. dead_slugs and
+          # ats_checked are produced by the local validation pass and stay on
+          # the host that produced them: publishing a runner's view of which
+          # boards are dead is the poisoning path this workflow exists to avoid.
           files = {}
-          for src, prefix in ((pathlib.Path("data/ats_harvest"), ""),
-                              (pathlib.Path("data/dead_slugs"), "dead/"),
-                              (pathlib.Path("data/ats_checked"), "checked/")):
+          for src, prefix in ((pathlib.Path("data/ats_harvest"), ""),):
               for path in sorted(src.glob("*.json")):
                   raw = path.read_bytes()
                   if path.name.startswith("_") and prefix == "":
@@ -405,7 +321,7 @@ jobs:
                           .strftime("%Y-%m-%dT%H:%M:%SZ"),
               "sources": ["https://index.commoncrawl.org",
                           "http://web.archive.org/cdx"],
-              "generator": "scripts/harvest_ats.py + scripts/validate_ats_slugs.py",
+              "generator": "scripts/harvest_ats.py",
               "files": files,
           }
           (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -420,7 +336,7 @@ jobs:
           set -euo pipefail
           changed=false
           for p in greenhouse lever ashby workday icims bamboohr paylocity workable breezy smartrecruiters rippling teamtailor jazzhr recruitee jobvite applicantpro; do
-            for rel in "$p.json" "dead/$p.json" "checked/$p.json"; do
+            for rel in "$p.json"; do
               [ -f "publish/$rel" ] || continue
               new=$(sha256sum "publish/$rel" | cut -d' ' -f1)
               old=$(git show "FETCH_HEAD:$rel" 2>/dev/null | sha256sum | cut -d' ' -f1 || echo none)
@@ -449,7 +365,7 @@ jobs:
           git checkout -q --orphan ats-harvest
           # ./*.json already covers _crawls.json -- a bash glob matches a
           # leading underscore, unlike a leading dot.
-          git add ./*.json dead/*.json checked/*.json
+          git add ./*.json
           git commit -q -m "ATS harvest + validation $(date -u +%Y-%m-%d)"
           git push -q --force \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
@@ -463,8 +379,8 @@ jobs:
           {
             echo "## ATS harvest"
             echo
-            echo "| platform | harvested | new | total | probed | live | dead | deferred | confirmed | true live rate |"
-            echo "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+            echo "| platform | harvested | new | total |"
+            echo "|---|---:|---:|---:|"
             python - <<'PY'
           import json, pathlib
           def load(name, key):
@@ -476,27 +392,17 @@ jobs:
               except Exception:
                   return {}
           h = load("harvest.json", "platforms")
-          v = load("validate.json", "platforms")
+          # Collection only. There are no probe, live or dead columns because
+          # this job never asks an ATS anything -- validation runs on the bot's
+          # own host, where the platforms answer, and its numbers are reported
+          # there. A live rate printed here would be a runner's opinion of which
+          # companies exist, which is exactly what must not be trusted.
           for name in ["greenhouse", "lever", "ashby", "workday", "icims",
                        "bamboohr", "paylocity", "workable", "breezy",
                        "smartrecruiters", "rippling", "teamtailor", "jazzhr",
                        "recruitee", "jobvite", "applicantpro"]:
-              a, b = h.get(name, {}), v.get(name, {})
-              audit = b.get("audit") or {}
-              # The audit rate, not the working one: the working pass samples
-              # survivors by design and its rate is not the population's.
-              rate = f"{audit['rate']}% (n={audit['sampled']})" if audit else "-"
-              # "confirmed" is how many slugs sit inside their live-recheck
-              # window, and it is the number that says whether the run is
-              # converging. Without it a healthy steady state -- few probes
-              # because most companies were confirmed recently -- reads
-              # identically to a run that did nothing. "deferred" is what the
-              # budget cut off, so a persistently large value means the
-              # platform needs more time rather than that it is finished.
+              a = h.get(name, {})
               print(f"| {name} | {a.get('harvested', 0)} | {a.get('new', 0)} | "
-                    f"{a.get('total', 0)} | {b.get('probed', 0)} | "
-                    f"{b.get('live', 0)} | {b.get('dead', 0)} | "
-                    f"{b.get('deferred', 0)} | {b.get('checked_total', 0)} | "
-                    f"{rate} |")
+                    f"{a.get('total', 0)} |")
           PY
           } >> "$GITHUB_STEP_SUMMARY"
