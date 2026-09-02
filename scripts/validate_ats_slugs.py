@@ -175,9 +175,16 @@ def _decide(status: int | None) -> bool:
         raise Unreachable("no response")
     if status == 200:
         return True
-    if status in (301, 302, 403, 404, 410, 422):
+    if status in (301, 302, 404, 410, 422):
         return False
-    # 5xx and rate limits say nothing about whether the company exists.
+    # 403 says the endpoint refused to answer, not that the company is gone --
+    # it is also what a blocked or rate-limited client is served, so reading it
+    # as "absent" would record a block as a mass closure and suppress live
+    # boards for the full dead TTL. Precautionary rather than observed: sampling
+    # known-dead slugs found greenhouse, ashby and lever answer 404 and workday
+    # 404/422, and no platform returned 403 for a genuinely missing board. So
+    # this costs nothing today and closes the path if one starts blocking.
+    # 5xx and rate limits likewise say nothing about whether the company exists.
     raise Unreachable(f"HTTP {status}")
 
 
@@ -606,6 +613,48 @@ def validate_platform(platform: str, slugs: Iterable[str], *,
             "_live": live, "_dead": dead}
 
 
+ENDPOINT_CANARIES = 6
+COLLAPSE_RATE = 0.5
+
+
+def endpoint_healthy(platform: str, canaries: list[str], log=lambda m: None) -> bool:
+    """Ask whether the platform's endpoint is answering, using slugs already
+    confirmed live as the control.
+
+    A probe that fails returns "not live", and a failure that hits every request
+    -- the endpoint down, DNS dead, the network dropped -- is therefore
+    indistinguishable from every company having closed.
+
+    An absolute floor cannot separate the two, because a collapsed rate is
+    often real: the residual population, once the recently-confirmed are
+    skipped, is mostly boards that are genuinely gone, and workday and bamboohr
+    both validate near 0% on it. Slugs recovered from 2022 crawls come in
+    around 12%. What distinguishes an outage is that companies *known* to be
+    live stop answering, so those are what this asks about -- and on the real
+    near-0% runs the controls answered, so the closures were recorded.
+    """
+    if not canaries:
+        return True  # nothing to compare against; assume healthy rather than stall
+    probe = PROBES[platform]
+    for slug in canaries:
+        try:
+            if probe(slug):
+                return True
+        except Exception:  # noqa: BLE001 - a raising probe is a failed probe
+            continue
+    log(f"[validate] {platform}: {len(canaries)} slugs confirmed live recently "
+        "all failed to answer -- treating the endpoint as down")
+    return False
+
+
+def pick_canaries(checked: dict[str, str], dead_map: dict[str, str],
+                  count: int = ENDPOINT_CANARIES) -> list[str]:
+    """The most recently confirmed-live slugs, newest first."""
+    fresh = [(d, s) for s, d in checked.items() if s not in dead_map]
+    fresh.sort(reverse=True)
+    return [s for _, s in fresh[:count]]
+
+
 def apply_results(dead_map: dict[str, str], result: dict, today: _dt.date) -> dict[str, int]:
     """Fold verdicts into the dead map. Live slugs are cleared, dead ones dated.
 
@@ -690,6 +739,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--budget-seconds", type=float, default=1200.0,
                         help="wall-clock ceiling per platform (0 disables)")
+    parser.add_argument("--total-budget-seconds", type=float, default=0.0,
+                        help="wall-clock ceiling for the whole run; shares the "
+                             "remaining time between the platforms still to go, "
+                             "so a fast one leaves its slack to a slow one")
     parser.add_argument("--audit-sample", type=int, default=0,
                         help="also probe N random slugs per platform, read-only, "
                              "to estimate the true population live rate")
@@ -762,14 +815,46 @@ def _run(args, log: Callable[[str], None], _lock) -> int:
             log(f"[validate] {platform}: {len(unscrapeable)} unscrapeable by "
                 "shape, marked without probing")
 
+        # Share the remaining time between the platforms still to run. A fixed
+        # per-platform ceiling wastes whatever a fast platform does not use,
+        # and since the confirmed-live store landed most platforms finish in
+        # seconds while Paylocity defers thousands of slugs at two workers --
+        # so the slack is exactly what the slow one needs.
+        budget = args.budget_seconds or None
+        if args.total_budget_seconds > 0:
+            left = args.total_budget_seconds - (time.monotonic() - t0)
+            remaining_platforms = len(platforms) - platforms.index(platform)
+            share = max(left, 0.0) / max(remaining_platforms, 1)
+            budget = share if budget is None else max(budget, share)
+
         result = validate_platform(
             platform, targets, workers=args.workers,
-            budget_seconds=args.budget_seconds or None, log=log)
+            budget_seconds=budget, log=log)
         # Marked, but deliberately kept out of the live/dead counts. The rate
         # those feed is what the CI gate reads to detect an endpoint that broke,
         # and it should measure what the network said. Folding in 6,068 Workday
         # entries that were never asked would drive that platform's rate toward
         # zero on the first run and fail the build for a cleanup.
+        # A collapsed live rate is either a real cull or a broken endpoint, and
+        # the counts alone cannot tell them apart. Only ask when it collapses:
+        # the check costs requests, and a healthy run should not pay for them.
+        probed = result["probed"]
+        rate = (result["live"] / probed) if probed else 1.0
+        if probed >= 20 and rate < COLLAPSE_RATE:
+            canaries = pick_canaries(load_checked(platform), dead_map)
+            if not endpoint_healthy(platform, canaries, log=log):
+                log(f"[validate] {platform}: live rate {rate:.1%} over {probed} "
+                    f"probes with the endpoint down -- discarding this "
+                    f"platform's results instead of marking them dead")
+                summary[platform] = {
+                    "probed": probed, "live": result["live"], "dead": 0,
+                    "unknown": result["unknown"], "live_rate": round(100 * rate, 1),
+                    "known": total, "deferred": result.get("deferred", 0),
+                    "dead_total": len(dead_map), "expired": expired,
+                    "added": 0, "revived": 0, "endpoint_down": True,
+                }
+                continue
+
         result["_dead"] = list(result["_dead"]) + unscrapeable
         result["unscrapeable"] = len(unscrapeable)
         if result["probed"] and result["unknown"] < result["probed"]:

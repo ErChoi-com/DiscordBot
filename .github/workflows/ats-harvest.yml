@@ -293,6 +293,7 @@ jobs:
           python scripts/validate_ats_slugs.py \
             --limit "$VALIDATE_LIMIT" \
             --budget-seconds 1800 \
+            --total-budget-seconds 10800 \
             --audit-sample 100 \
             --json > validate.json
           cat validate.json

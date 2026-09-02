@@ -27,13 +27,13 @@ TODAY = _dt.date(2026, 9, 1)
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("status,expected", [
-    (200, True), (404, False), (410, False), (403, False), (422, False),
+    (200, True), (404, False), (410, False), (422, False),
 ])
 def test_decide_definitive(status, expected):
     assert v._decide(status) is expected
 
 
-@pytest.mark.parametrize("status", [None, 500, 502, 503, 429])
+@pytest.mark.parametrize("status", [None, 500, 502, 503, 429, 403])
 def test_decide_treats_ambiguous_as_unreachable(status):
     """A 5xx or a timeout says nothing about whether the company exists.
 
@@ -97,7 +97,11 @@ def _seed(tmp_path, monkeypatch, platform, companies, harvest=(), dead=None):
     (tmp_path / "ats_companies").mkdir(parents=True, exist_ok=True)
     (tmp_path / "ats_harvest").mkdir(parents=True, exist_ok=True)
     (tmp_path / "dead_slugs").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "ats_companies" / f"{platform}_companies.json").write_text(
+    # Go through COMPANY_FILES rather than assuming "{platform}_companies.json":
+    # paylocity's upstream list is named differently, so seeding it by the
+    # default pattern writes a file nothing reads and the platform silently
+    # validates zero companies.
+    (tmp_path / "ats_companies" / v.COMPANY_FILES[platform]).write_text(
         json.dumps(list(companies)))
     (tmp_path / "ats_harvest" / f"{platform}.json").write_text(json.dumps(list(harvest)))
     if dead is not None:
@@ -772,3 +776,184 @@ def test_a_slug_found_dead_stops_counting_as_confirmed(tmp_path, monkeypatch):
     v.save_dead_merged("lever", result, TODAY, ttl_days=90)
     assert "was-alive" not in v.load_checked("lever")
     assert "was-alive" in v.load_dead("lever")
+
+
+# --------------------------------------------------------------------------
+# Shared time budget
+# --------------------------------------------------------------------------
+
+def test_slack_from_fast_platforms_reaches_the_slow_one(tmp_path, monkeypatch):
+    """A fixed per-platform ceiling wastes what a fast platform does not use.
+
+    Since the confirmed-live store landed, five platforms finish in seconds
+    while Paylocity defers thousands of slugs at two workers -- so the unused
+    time is exactly what the slow one needs.
+    """
+    budgets = {}
+    real = v.validate_platform
+
+    def spy(platform, slugs, **kwargs):
+        budgets[platform] = kwargs.get("budget_seconds")
+        return real(platform, slugs, **kwargs)
+
+    for p in v.PLATFORMS:
+        slug = "acme|wd1|external" if p == "workday" else "acmecorp"
+        _seed(tmp_path, monkeypatch, p, [slug])
+        monkeypatch.setitem(v.PROBES, p, lambda s: True)
+    monkeypatch.setattr(v, "validate_platform", spy)
+
+    v.main(["--budget-seconds", "10", "--total-budget-seconds", "700"])
+    # Seven platforms, 700s: the first is offered a seventh of the whole, and
+    # the last is offered nearly all of it, because the six before it returned
+    # instantly and their unused time stayed in the pool.
+    assert 90 <= budgets["greenhouse"] <= 100
+    assert budgets["paylocity"] > 600
+    assert budgets["paylocity"] > 5 * budgets["greenhouse"]
+
+
+def test_per_platform_ceiling_still_applies_without_a_total(tmp_path, monkeypatch):
+    seen = {}
+    real = v.validate_platform
+
+    def spy(platform, slugs, **kwargs):
+        seen[platform] = kwargs.get("budget_seconds")
+        return real(platform, slugs, **kwargs)
+
+    _seed(tmp_path, monkeypatch, "lever", ["a"])
+    monkeypatch.setitem(v.PROBES, "lever", lambda s: True)
+    monkeypatch.setattr(v, "validate_platform", spy)
+    v.main(["--platform", "lever", "--budget-seconds", "42"])
+    assert seen["lever"] == 42
+
+
+def test_a_total_budget_never_shortens_the_per_platform_one(tmp_path, monkeypatch):
+    """The total is there to hand out slack, not to take time away -- a run
+    that sets both should not probe less than one that sets only the
+    per-platform ceiling."""
+    seen = {}
+    real = v.validate_platform
+
+    def spy(platform, slugs, **kwargs):
+        seen[platform] = kwargs.get("budget_seconds")
+        return real(platform, slugs, **kwargs)
+
+    _seed(tmp_path, monkeypatch, "lever", ["a"])
+    monkeypatch.setitem(v.PROBES, "lever", lambda s: True)
+    monkeypatch.setattr(v, "validate_platform", spy)
+    v.main(["--platform", "lever", "--budget-seconds", "500",
+            "--total-budget-seconds", "10"])
+    assert seen["lever"] >= 500
+
+
+# --------------------------------------------------------------------------
+# An endpoint outage must not be recorded as a mass closure
+# --------------------------------------------------------------------------
+
+def _dead_now(tmp_path):
+    """Dead marks on disk; absent means none were recorded."""
+    f = tmp_path / "dead_slugs" / "greenhouse.json"
+    return json.loads(f.read_text()) if f.exists() else {}
+
+
+def _collapse_setup(tmp_path, monkeypatch, probe, checked_live=True):
+    slugs = [f"co{i}" for i in range(40)]
+    _seed(tmp_path, monkeypatch, "greenhouse", slugs)
+    if checked_live:
+        # Confirmed live long enough ago to be due again, so they are probed
+        # rather than skipped -- but still the best control the run has.
+        _seed_checked(tmp_path, "greenhouse", {s: "2026-01-01" for s in slugs})
+    monkeypatch.setitem(v.PROBES, "greenhouse", probe)
+    return slugs
+
+
+def test_a_dead_endpoint_does_not_mark_every_company_dead(tmp_path, monkeypatch):
+    """Nothing in the counts distinguishes a dead endpoint from a mass
+    closure: a failed probe and an absent company are both "not live"."""
+    _collapse_setup(tmp_path, monkeypatch, lambda s: False)
+    v.main(["--platform", "greenhouse"])
+    assert _dead_now(tmp_path) == {}
+
+
+def test_a_genuine_cull_is_still_recorded(tmp_path, monkeypatch):
+    """The guard must not swallow real closures. Here the endpoint answers --
+    the slugs it confirmed most recently still come back live -- so a low rate
+    is the truth and the dead marks have to land."""
+    slugs = [f"co{i:02d}" for i in range(40)]
+    _seed(tmp_path, monkeypatch, "greenhouse", slugs)
+    # Distinct dates, so which slugs serve as the control is deterministic
+    # rather than whatever a tie-break happens to order first.
+    _seed_checked(tmp_path, "greenhouse",
+                  {s: f"2026-01-{i + 1:02d}" for i, s in enumerate(slugs)})
+    survivors = set(slugs[-v.ENDPOINT_CANARIES:])
+    monkeypatch.setitem(v.PROBES, "greenhouse", lambda s: s in survivors)
+    v.main(["--platform", "greenhouse"])
+    dead = _dead_now(tmp_path)
+    assert not (survivors & set(dead))
+    assert len(dead) == len(slugs) - len(survivors)
+
+
+def test_a_refusal_is_not_a_closure():
+    """403 is what a blocked or rate-limited client is served, so it cannot
+    mean the company is gone -- reading it as "absent" would record a block as
+    a mass closure and suppress live boards for the whole dead TTL.
+
+    Precautionary: sampling known-dead slugs found greenhouse, ashby and lever
+    answer 404 and workday 404/422, so no platform currently returns 403 for a
+    missing board."""
+    with pytest.raises(v.Unreachable):
+        v._decide(403)
+
+
+@pytest.mark.parametrize("status", [404, 410, 422])
+def test_a_real_absence_is_still_a_closure(status):
+    assert v._decide(status) is False
+
+
+def test_a_healthy_run_pays_nothing_for_the_guard(tmp_path, monkeypatch):
+    """The check costs live requests, so it must only fire on a collapse."""
+    calls = []
+
+    def probe(slug):
+        calls.append(slug)
+        return True
+
+    slugs = _collapse_setup(tmp_path, monkeypatch, probe)
+    v.main(["--platform", "greenhouse"])
+    assert len(calls) == len(slugs), "guard probed on a healthy run"
+
+
+def test_a_small_batch_is_not_second_guessed(tmp_path, monkeypatch):
+    """Three slugs all dead is unremarkable; the guard is for collapses large
+    enough to mean something."""
+    _seed(tmp_path, monkeypatch, "greenhouse", ["aco", "bco", "cco"])
+    _seed_checked(tmp_path, "greenhouse", {"aco": "2026-01-01"})
+    monkeypatch.setitem(v.PROBES, "greenhouse", lambda s: False)
+    v.main(["--platform", "greenhouse"])
+    assert len(json.loads(
+        (tmp_path / "dead_slugs" / "greenhouse.json").read_text())) == 3
+
+
+def test_a_raising_probe_counts_as_a_failed_canary(tmp_path, monkeypatch):
+    """A network drop raises rather than returning False; if that escaped, the
+    guard would crash on exactly the outage it exists to catch."""
+    def probe(slug):
+        raise OSError("network down")
+
+    _collapse_setup(tmp_path, monkeypatch, probe)
+    v.main(["--platform", "greenhouse"])
+    assert _dead_now(tmp_path) == {}
+
+
+def test_the_guard_reports_itself(tmp_path, monkeypatch):
+    """A silently discarded platform looks identical to one with nothing to do,
+    so the run has to say the endpoint was down."""
+    _collapse_setup(tmp_path, monkeypatch, lambda s: False)
+    out = json.loads(v.main(["--platform", "greenhouse", "--json"]) or "{}") \
+        if False else None
+    # main prints; capture via the summary file path instead
+    import io, contextlib
+    buf = io.StringIO()
+    _collapse_setup(tmp_path, monkeypatch, lambda s: False)
+    with contextlib.redirect_stdout(buf):
+        v.main(["--platform", "greenhouse", "--json"])
+    assert json.loads(buf.getvalue())["platforms"]["greenhouse"]["endpoint_down"]

@@ -61,6 +61,17 @@ def test_validation_passes_a_time_budget(steps):
     assert "--budget-seconds" in _joined(steps["Validate"])
 
 
+def test_validation_shares_its_time_between_platforms(steps):
+    """Per-platform ceilings alone waste whatever a fast platform leaves.
+
+    Five platforms now finish in seconds because the confirmed-live store
+    stops them re-probing known companies, while Paylocity defers thousands
+    of slugs at two workers. Without a total, that slack is unreachable and
+    Paylocity stays capped at its own 1800s regardless.
+    """
+    assert "--total-budget-seconds" in _joined(steps["Validate"])
+
+
 def test_validation_requests_the_audit_sample(steps):
     """The summary prints an audit-derived 'true live rate' column. Without
     the flag that column is a dash for every platform, and the only rate
