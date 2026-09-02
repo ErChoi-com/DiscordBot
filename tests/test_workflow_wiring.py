@@ -239,3 +239,21 @@ def test_summary_reports_convergence(steps):
     summary = steps["Summary"]
     assert "checked_total" in summary
     assert "deferred" in summary
+
+
+def test_the_validation_budget_fits_inside_the_job_timeout(workflow, steps):
+    """The budget is a promise the job has to be able to keep.
+
+    GitHub hard-kills a job at timeout-minutes, mid-write and without running
+    later steps, so a validation budget that does not leave room for collection
+    and publishing turns a raised limit into a killed run rather than a slow
+    one. Nothing else ties the two numbers together: they sit in different
+    steps and each looks reasonable alone.
+    """
+    joined = _joined(steps["Validate"])
+    budget = float(joined.split("--total-budget-seconds")[1].split()[0])
+    timeout = float(workflow["jobs"]["harvest"]["timeout-minutes"]) * 60
+    # Collection, pruning and publishing share the same job. Half the wall
+    # clock is the most validation can claim and still leave room for them.
+    assert budget <= timeout / 2, (
+        f"validation may run {budget}s of a {timeout}s job")
