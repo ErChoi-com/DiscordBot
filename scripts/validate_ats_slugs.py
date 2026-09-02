@@ -378,11 +378,25 @@ def live_breezy(slug: str) -> bool:
 
 
 def live_smartrecruiters(slug: str) -> bool:
-    # The public postings API answers 404 for an unknown company. Verified on
-    # 25 harvested slugs, all live.
-    status, _, _ = _request(
+    # The postings API answers 200 for anything, so status says nothing: an
+    # unknown company returns a well-formed {"totalFound":0,"content":[]}. Only
+    # the count separates it from a real board. The /companies/{slug} endpoint
+    # would be the honest test but 404s without credentials, including for
+    # companies that certainly exist.
+    #
+    # This conflates "no such company" with "a real company advertising nothing
+    # today", and there is no unauthenticated way to tell them apart. The
+    # conflation is in the right direction for this bot -- a board with no
+    # postings yields no jobs either way -- and the 90-day recheck picks the
+    # company back up when it advertises again.
+    status, body, _ = _request(
         f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=1")
-    return _decide(status)
+    if status != 200:
+        return _decide(status)
+    try:
+        return int(json.loads(body or b"{}").get("totalFound", 0)) > 0
+    except (ValueError, TypeError, AttributeError):
+        raise Unreachable("unparseable postings response")
 
 
 def live_rippling(slug: str) -> bool:
@@ -396,8 +410,13 @@ def live_teamtailor(slug: str) -> bool:
 
 
 def live_jazzhr(slug: str) -> bool:
-    status, _, _ = _request(f"https://{slug}.applytojob.com/apply")
-    return _decide(status)
+    # Every subdomain answers 200; an unknown one is bounced to
+    # www.jazzhr.com/job-seekers. The tell is whether the response is still on
+    # the tenant's own host, the same shape as bamboohr.
+    status, _, final = _request(f"https://{slug}.applytojob.com/apply")
+    if status != 200:
+        return _decide(status)
+    return f"{slug}.applytojob.com" in final
 
 
 def live_recruitee(slug: str) -> bool:
@@ -406,13 +425,26 @@ def live_recruitee(slug: str) -> bool:
 
 
 def live_jobvite(slug: str) -> bool:
-    status, _, _ = _request(f"https://jobs.jobvite.com/{slug}")
-    return _decide(status)
+    # An unknown company is redirected to the marketing site's support page
+    # with an "invalid" marker; a real one stays on jobs.jobvite.com.
+    status, _, final = _request(f"https://jobs.jobvite.com/{slug}")
+    if status != 200:
+        return _decide(status)
+    return "jobs.jobvite.com" in final
 
 
 def live_applicantpro(slug: str) -> bool:
-    status, _, _ = _request(f"https://{slug}.applicantpro.com/jobs/")
-    return _decide(status)
+    # Wildcard DNS, so an unknown tenant resolves and answers 200 on its own
+    # host -- the final-URL trick that works for jazzhr does not apply. What
+    # separates them is the body: a real board serves an HTML document, while
+    # both failure modes serve a bare sentence. "This career site has been
+    # disabled" is a real company that switched its board off, and "You may
+    # have typed the url ... incorrectly" is no such tenant. Neither can be
+    # scraped, so both are not-live.
+    status, body, _ = _request(f"https://{slug}.applicantpro.com/jobs/")
+    if status != 200:
+        return _decide(status)
+    return body.lstrip()[:9].lower() == b"<!doctype"
 
 
 PROBES: dict[str, Callable[[str], bool]] = {

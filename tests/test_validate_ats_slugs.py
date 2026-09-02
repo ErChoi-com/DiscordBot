@@ -1096,3 +1096,83 @@ def test_the_deferred_remainder_is_picked_up_next_run(tmp_path, monkeypatch):
     second = seen[len(first):]
     assert len(second) == 10
     assert not (set(first) & set(second)), "re-probed what it already confirmed"
+
+
+# --------------------------------------------------------------------------
+# A probe that cannot say "no" is not a probe
+# --------------------------------------------------------------------------
+#
+# Four platforms were added with probes that returned True for every input.
+# Their first validation pass reported jazzhr 100.0% live over 2,683 slugs and
+# smartrecruiters 100.0% over 1,317, with zero dead -- which is what a working
+# probe on a perfect population and a broken probe on any population both look
+# like. The tell was the zero, not the rate.
+#
+# Each of these pins the actual discriminator against the shape a missing
+# company really returns, so a probe that degrades back to "always yes" fails
+# here rather than in a run that quietly confirms thousands of dead boards.
+
+def test_jazzhr_rejects_a_bounced_subdomain(monkeypatch):
+    """Every subdomain answers 200; an unknown one lands on the marketing
+    site."""
+    monkeypatch.setattr(v, "_request", lambda *a, **k: (
+        200, b"", "https://www.jazzhr.com/job-seekers"))
+    assert v.live_jazzhr("nosuchco") is False
+
+
+def test_jazzhr_accepts_a_board_that_stays_on_its_own_host(monkeypatch):
+    monkeypatch.setattr(v, "_request", lambda *a, **k: (
+        200, b"", "https://acme.applytojob.com/apply"))
+    assert v.live_jazzhr("acme") is True
+
+
+def test_jobvite_rejects_the_invalid_redirect(monkeypatch):
+    monkeypatch.setattr(v, "_request", lambda *a, **k: (
+        200, b"", "https://www.jobvite.com/support/job-seeker-support/?invalid"))
+    assert v.live_jobvite("nosuchco") is False
+
+
+def test_jobvite_accepts_a_board_that_stays_put(monkeypatch):
+    monkeypatch.setattr(v, "_request", lambda *a, **k: (
+        200, b"", "https://jobs.jobvite.com/acme"))
+    assert v.live_jobvite("acme") is True
+
+
+def test_smartrecruiters_rejects_an_empty_result(monkeypatch):
+    """An unknown company returns a well-formed empty page, not an error."""
+    monkeypatch.setattr(v, "_request", lambda *a, **k: (
+        200, b'{"offset":0,"limit":1,"totalFound":0,"content":[]}', "x"))
+    assert v.live_smartrecruiters("nosuchco") is False
+
+
+def test_smartrecruiters_accepts_a_board_with_postings(monkeypatch):
+    monkeypatch.setattr(v, "_request", lambda *a, **k: (
+        200, b'{"totalFound":9,"content":[{"id":"1"}]}', "x"))
+    assert v.live_smartrecruiters("acme") is True
+
+
+def test_smartrecruiters_treats_junk_as_unknown(monkeypatch):
+    """A body that will not parse says nothing about the company, and must not
+    be read as a closure."""
+    monkeypatch.setattr(v, "_request", lambda *a, **k: (200, b"<html>", "x"))
+    with pytest.raises(v.Unreachable):
+        v.live_smartrecruiters("acme")
+
+
+@pytest.mark.parametrize("body", [
+    b"You may have typed the url for this website incorrectly.",
+    b"This career site has been disabled. Contact the Sales Representative",
+])
+def test_applicantpro_rejects_both_failure_pages(monkeypatch, body):
+    """Wildcard DNS means an unknown tenant resolves and answers 200 on its own
+    host, so the final-URL trick does not apply here -- the body is the only
+    signal. One page is a real company that switched its board off and the
+    other is no such tenant; neither can be scraped."""
+    monkeypatch.setattr(v, "_request", lambda *a, **k: (200, body, "x"))
+    assert v.live_applicantpro("nosuchco") is False
+
+
+def test_applicantpro_accepts_a_real_document(monkeypatch):
+    monkeypatch.setattr(v, "_request", lambda *a, **k: (
+        200, b"<!DOCTYPE html>\n<html>...", "x"))
+    assert v.live_applicantpro("acme") is True
