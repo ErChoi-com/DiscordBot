@@ -57,6 +57,9 @@ DATA_DIR = REPO_ROOT / "data"
 COMPANY_DIR = DATA_DIR / "ats_companies"
 HARVEST_DIR = DATA_DIR / "ats_harvest"
 DEAD_DIR = DATA_DIR / "dead_slugs"
+# Slugs confirmed live, and when. Separate from dead_slugs because ats_service
+# owns that directory and reads every file in it by platform name.
+CHECKED_DIR = DATA_DIR / "ats_checked"
 
 PLATFORMS = ("greenhouse", "lever", "ashby", "workday", "icims", "bamboohr",
              "paylocity")
@@ -70,6 +73,20 @@ COMPANY_FILES["paylocity"] = "paylocity_companies_clean.json"
 # than this is not re-probed, so repeated runs cost nothing for known-dead
 # companies while still letting them back in eventually.
 RECHECK_DAYS = 7
+
+# How long a confirmed-live slug is left alone before being probed again.
+#
+# Without this the validator has no memory of a live answer, so every run
+# re-probes every slug it has ever confirmed. Measured on a full run: 39,043
+# probes, 36,438 of them live, and the due count afterwards was unchanged --
+# lever probed 2,469 slugs and still reported 2,469 due. The budget was being
+# spent almost entirely on re-confirming companies already known to be there,
+# which is why the backlog never moved.
+#
+# Thirty days is well inside the 90-day dead TTL, so a board that closes is
+# still noticed within a month, and it leaves each run free to spend its budget
+# on slugs nobody has checked.
+LIVE_RECHECK_DAYS = 30
 
 REQUEST_TIMEOUT = 25
 
@@ -315,6 +332,32 @@ def load_candidates(platform: str) -> list[str]:
     return out
 
 
+def load_checked(platform: str) -> dict[str, str]:
+    """Slugs last confirmed live, and the date. Same shape as the dead map."""
+    path = CHECKED_DIR / f"{platform}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+def save_checked(platform: str, checked: dict[str, str]) -> None:
+    CHECKED_DIR.mkdir(parents=True, exist_ok=True)
+    target = CHECKED_DIR / f"{platform}.json"
+    tmp = target.with_suffix(f".json.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(checked, indent=2, sort_keys=True),
+                       encoding="utf-8")
+        os.replace(tmp, target)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
 def load_dead(platform: str) -> dict[str, str]:
     path = DEAD_DIR / f"{platform}.json"
     try:
@@ -373,8 +416,25 @@ def save_dead_merged(platform: str, result: dict, today: _dt.date,
     expired = purge_expired(dead_map, today, ttl_days)
     changes = apply_results(dead_map, result, today)
     save_dead(platform, dead_map)
+
+    # Record the live answers too, so the next run does not spend its budget
+    # re-confirming them. Read-modify-write for the same reason as the dead
+    # map, and a slug found dead drops out of here so it is never treated as
+    # recently-confirmed.
+    checked = load_checked(platform)
+    stamp = today.isoformat()
+    for slug in result["_live"]:
+        checked[slug] = stamp
+    for slug in result["_dead"]:
+        checked.pop(slug, None)
+    cutoff = (today - _dt.timedelta(days=LIVE_RECHECK_DAYS * 2)).isoformat()
+    for slug in [s for s, when in checked.items() if when < cutoff]:
+        del checked[slug]
+    save_checked(platform, checked)
+
     changes["expired"] = expired
     changes["dead_total"] = len(dead_map)
+    changes["checked_total"] = len(checked)
     return changes
 
 
@@ -420,7 +480,15 @@ def select_targets(platform: str, dead: dict[str, str], *, recheck_dead: bool,
     # This changes the order, never the set.
     upstream = set(_read_list(COMPANY_DIR / COMPANY_FILES[platform]))
     harvested = set(_read_list(HARVEST_DIR / f"{platform}.json"))
-    fresh = [s for s in candidates if s not in dead]
+    # Skip slugs confirmed live recently. A live answer used to be recorded
+    # nowhere, so every run re-probed every company it had ever confirmed and
+    # the due count never fell -- lever probed 2,469 slugs and still reported
+    # 2,469 due afterwards.
+    checked = load_checked(platform)
+    fresh = [s for s in candidates
+             if s not in dead
+             and (recheck_dead
+                  or _stale(checked.get(s, ""), today, LIVE_RECHECK_DAYS))]
     fresh.sort(key=lambda s: s in upstream and s in harvested)
     stale = [s for s in candidates
              if s in dead and (recheck_dead or _stale(dead[s], today, recheck_days))]

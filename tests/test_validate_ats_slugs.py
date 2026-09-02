@@ -105,6 +105,9 @@ def _seed(tmp_path, monkeypatch, platform, companies, harvest=(), dead=None):
     monkeypatch.setattr(v, "COMPANY_DIR", tmp_path / "ats_companies")
     monkeypatch.setattr(v, "HARVEST_DIR", tmp_path / "ats_harvest")
     monkeypatch.setattr(v, "DEAD_DIR", tmp_path / "dead_slugs")
+    # Redirect this too, or a test that persists results writes fixture slugs
+    # into the repository's real data -- which is exactly what happened.
+    monkeypatch.setattr(v, "CHECKED_DIR", tmp_path / "ats_checked")
 
 
 def test_candidates_union_upstream_and_harvest(tmp_path, monkeypatch):
@@ -707,3 +710,65 @@ def test_other_probes_still_follow_redirects(monkeypatch):
     monkeypatch.setattr(v, "_request", fake)
     assert v.live_bamboohr("acme") is True
     assert seen["follow"] is True
+
+
+# --------------------------------------------------------------------------
+# Memory of live answers
+# --------------------------------------------------------------------------
+
+def _seed_checked(tmp_path, platform, checked):
+    d = tmp_path / "ats_checked"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{platform}.json").write_text(json.dumps(checked))
+
+
+def test_recently_confirmed_slugs_are_not_reprobed(tmp_path, monkeypatch):
+    """A live answer used to be recorded nowhere, so every run re-probed every
+    company it had ever confirmed. Measured on a full run: 39,043 probes,
+    36,438 live, and the due count unchanged -- lever probed 2,469 slugs and
+    still reported 2,469 due. The budget went almost entirely on re-confirming
+    companies already known to be there."""
+    _seed(tmp_path, monkeypatch, "lever", ["confirmed", "never-checked"])
+    _seed_checked(tmp_path, "lever", {"confirmed": "2026-08-30"})
+    targets = v.select_targets("lever", {}, recheck_dead=False, limit=None,
+                               sample=None, today=TODAY)
+    assert targets == ["never-checked"]
+
+
+def test_confirmation_expires_so_closures_are_noticed(tmp_path, monkeypatch):
+    """Thirty days sits well inside the 90-day dead TTL, so a board that closes
+    is still caught within a month."""
+    _seed(tmp_path, monkeypatch, "lever", ["old-confirmation"])
+    _seed_checked(tmp_path, "lever", {"old-confirmation": "2026-06-01"})
+    targets = v.select_targets("lever", {}, recheck_dead=False, limit=None,
+                               sample=None, today=TODAY)
+    assert targets == ["old-confirmation"]
+
+
+def test_recheck_dead_still_forces_everything(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch, "lever", ["confirmed"])
+    _seed_checked(tmp_path, "lever", {"confirmed": "2026-08-30"})
+    targets = v.select_targets("lever", {}, recheck_dead=True, limit=None,
+                               sample=None, today=TODAY)
+    assert targets == ["confirmed"]
+
+
+def test_live_answers_are_recorded(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch, "lever", ["alive", "gone"])
+    result = v.validate_platform("lever", ["alive", "gone"],
+                                 probe=lambda s: s == "alive", workers=2,
+                                 log=lambda m: None)
+    v.save_dead_merged("lever", result, TODAY, ttl_days=90)
+    assert v.load_checked("lever") == {"alive": "2026-09-01"}
+
+
+def test_a_slug_found_dead_stops_counting_as_confirmed(tmp_path, monkeypatch):
+    """Otherwise a company that closes would be skipped as recently-confirmed
+    while also carrying a dead mark."""
+    _seed(tmp_path, monkeypatch, "lever", ["was-alive"])
+    _seed_checked(tmp_path, "lever", {"was-alive": "2026-08-30"})
+    result = v.validate_platform("lever", ["was-alive"], probe=lambda s: False,
+                                 workers=1, log=lambda m: None)
+    v.save_dead_merged("lever", result, TODAY, ttl_days=90)
+    assert "was-alive" not in v.load_checked("lever")
+    assert "was-alive" in v.load_dead("lever")
