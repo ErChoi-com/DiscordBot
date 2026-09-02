@@ -743,6 +743,8 @@ def test_every_wayback_query_host_has_a_matching_extractor():
         "bamboohr": ("https://acme.{host}/careers/list", "acme"),
         # Paylocity's identifier is a GUID, not a name.
         "paylocity": ("https://{host}/recruiting/jobs/All/" + guid + "/X", guid),
+        "workable": ("https://{host}/acme/j/abc", "acme"),
+        "breezy": ("https://acme.{host}/p/abc", "acme"),
     }
     for name, queries in hc.WAYBACK_QUERIES.items():
         if name == "workday":

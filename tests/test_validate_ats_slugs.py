@@ -802,13 +802,18 @@ def test_slack_from_fast_platforms_reaches_the_slow_one(tmp_path, monkeypatch):
         monkeypatch.setitem(v.PROBES, p, lambda s: True)
     monkeypatch.setattr(v, "validate_platform", spy)
 
-    v.main(["--budget-seconds", "10", "--total-budget-seconds", "700"])
-    # Seven platforms, 700s: the first is offered a seventh of the whole, and
-    # the last is offered nearly all of it, because the six before it returned
-    # instantly and their unused time stayed in the pool.
-    assert 90 <= budgets["greenhouse"] <= 100
-    assert budgets["paylocity"] > 600
-    assert budgets["paylocity"] > 5 * budgets["greenhouse"]
+    total = 700.0
+    v.main(["--budget-seconds", "10", "--total-budget-seconds", str(total)])
+    # The first platform is offered an equal share of the whole; the last is
+    # offered nearly all of it, because the ones before it returned instantly
+    # and their unused time stayed in the pool. Derived from the platform count
+    # rather than written in, so adding a platform does not silently retune
+    # what this asserts.
+    share = total / len(v.PLATFORMS)
+    first, last = v.PLATFORMS[0], v.PLATFORMS[-1]
+    assert 0.9 * share <= budgets[first] <= share
+    assert budgets[last] > 0.85 * total
+    assert budgets[last] > 5 * budgets[first]
 
 
 def test_per_platform_ceiling_still_applies_without_a_total(tmp_path, monkeypatch):

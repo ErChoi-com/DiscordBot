@@ -420,6 +420,28 @@ PLATFORMS: tuple[Platform, ...] = (
         (("recruiting.paylocity.com/*", "prefix"),),
         _extract_paylocity,
     ),
+    # Workable and Breezy are new here rather than replacements. The seven
+    # platforms above are saturated: re-sweeping the newest crawl for each
+    # returned exactly zero companies not already held, so no amount of
+    # additional crawling produces another one. New companies have to come from
+    # hosts nobody has swept yet.
+    #
+    # Both were measured against CC-MAIN-2026-34 before being added: workable
+    # yields 3,158 companies and breezy 2,063, and a sample of 25 each probed
+    # 100% and 96% live. That is far above the harvested pools for the older
+    # platforms, which run 36-52% because they are thick with expired archival
+    # boards -- these hosts are recent enough that most of what they carry is
+    # still hiring.
+    Platform(
+        "workable",
+        (("apply.workable.com/*", "prefix"),),
+        _path_segment_extractor("workable.com"),
+    ),
+    Platform(
+        "breezy",
+        (("breezy.hr", "domain"),),
+        _subdomain_extractor("breezy.hr"),
+    ),
 )
 
 PLATFORM_BY_NAME = {p.name: p for p in PLATFORMS}
@@ -1133,6 +1155,8 @@ WAYBACK_QUERIES: dict[str, tuple[str, ...]] = {
     "icims": (),
     "paylocity": ("recruiting.paylocity.com/*",),
     "bamboohr": ("*.bamboohr.com/*",),
+    "workable": ("apply.workable.com/*",),
+    "breezy": ("*.breezy.hr/*",),
 }
 
 # Rows per request. Wayback truncates large responses reliably, so this stays
@@ -1456,6 +1480,8 @@ _IDENTIFIER_PROBES: dict[str, Callable[[str], str | None]] = {
     "greenhouse": lambda s: f"https://job-boards.greenhouse.io/{s}/jobs/1",
     "lever": lambda s: f"https://jobs.lever.co/{s}/abc",
     "ashby": lambda s: f"https://jobs.ashbyhq.com/{s}/abc",
+    "workable": lambda s: f"https://apply.workable.com/{s}/j/abc",
+    "breezy": lambda s: f"https://{s}.breezy.hr/p/abc",
     "icims": lambda s: f"https://{s}.icims.com/jobs/1",
     "bamboohr": lambda s: f"https://{s}.bamboohr.com/careers/list",
     "workday": _workday_probe_url,

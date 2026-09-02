@@ -62,7 +62,7 @@ DEAD_DIR = DATA_DIR / "dead_slugs"
 CHECKED_DIR = DATA_DIR / "ats_checked"
 
 PLATFORMS = ("greenhouse", "lever", "ashby", "workday", "icims", "bamboohr",
-             "paylocity")
+             "paylocity", "workable", "breezy")
 
 COMPANY_FILES = {p: f"{p}_companies.json" for p in PLATFORMS}
 # Upstream ships this one under a different name, and as {guid, name, jobs}
@@ -119,7 +119,10 @@ WORKERS = {"greenhouse": 16, "lever": 16, "ashby": 8, "workday": 12,
            # extra concurrency buys refusals. A refusal is recorded unknown and
            # changes no marks, so the cost is wasted requests rather than wrong
            # answers -- but the slug still has to be probed again later.
-           "paylocity": 2}
+           "paylocity": 2,
+           # No measured concurrency curve for these two yet, so they take the
+           # conservative default rather than a guess that reads as evidence.
+           "workable": 8, "breezy": 8}
 
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36")
@@ -317,10 +320,28 @@ def live_workday(slug: str) -> bool:
     return _decide(status)
 
 
+def live_workable(slug: str) -> bool:
+    # The board page itself is a JS shell that answers 200 for anything; the
+    # widget account endpoint is what separates a real account from a missing
+    # one. Verified against 25 harvested slugs, all 25 live.
+    status, _, _ = _request(
+        f"https://apply.workable.com/api/v1/widget/accounts/{slug}")
+    return _decide(status)
+
+
+def live_breezy(slug: str) -> bool:
+    # Breezy gives each company a subdomain and 404s an unknown one outright,
+    # so the status is the whole answer. Verified against 25 harvested slugs,
+    # 24 live.
+    status, _, _ = _request(f"https://{slug}.breezy.hr/")
+    return _decide(status)
+
+
 PROBES: dict[str, Callable[[str], bool]] = {
     "greenhouse": live_greenhouse, "lever": live_lever, "ashby": live_ashby,
     "workday": live_workday, "icims": live_icims, "bamboohr": live_bamboohr,
-    "paylocity": live_paylocity,
+    "paylocity": live_paylocity, "workable": live_workable,
+    "breezy": live_breezy,
 }
 
 
