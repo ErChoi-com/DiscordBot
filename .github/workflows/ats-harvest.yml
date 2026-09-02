@@ -102,13 +102,15 @@ jobs:
         # last.
         run: |
           set -euo pipefail
-          mkdir -p data/ats_harvest data/dead_slugs
+          mkdir -p data/ats_harvest data/dead_slugs data/ats_checked
           if git fetch --depth=1 origin ats-harvest 2>/dev/null; then
             for p in greenhouse lever ashby workday icims bamboohr paylocity; do
               git show "FETCH_HEAD:$p.json" > "data/ats_harvest/$p.json" 2>/dev/null \
                 && echo "seeded harvest $p" || echo "no published $p.json yet"
               git show "FETCH_HEAD:dead/$p.json" > "data/dead_slugs/$p.json" 2>/dev/null \
                 && echo "seeded dead $p" || echo "no published dead/$p.json yet"
+              git show "FETCH_HEAD:checked/$p.json" > "data/ats_checked/$p.json" 2>/dev/null \
+                && echo "seeded checked $p" || echo "no published checked/$p.json yet"
             done
             # The crawl-listing cache has to come back too. CI checks out fresh
             # every run, so a cache that is published but never restored is
@@ -357,9 +359,14 @@ jobs:
 
           out = pathlib.Path("publish")
           (out / "dead").mkdir(parents=True, exist_ok=True)
+          # Which slugs were last confirmed live. Without this the validator
+          # forgets every live answer between runs and re-probes companies it
+          # already knows about -- 93% of one run's budget went that way.
+          (out / "checked").mkdir(parents=True, exist_ok=True)
           files = {}
           for src, prefix in ((pathlib.Path("data/ats_harvest"), ""),
-                              (pathlib.Path("data/dead_slugs"), "dead/")):
+                              (pathlib.Path("data/dead_slugs"), "dead/"),
+                              (pathlib.Path("data/ats_checked"), "checked/")):
               for path in sorted(src.glob("*.json")):
                   raw = path.read_bytes()
                   if path.name.startswith("_") and prefix == "":
@@ -392,7 +399,7 @@ jobs:
           set -euo pipefail
           changed=false
           for p in greenhouse lever ashby workday icims bamboohr paylocity; do
-            for rel in "$p.json" "dead/$p.json"; do
+            for rel in "$p.json" "dead/$p.json" "checked/$p.json"; do
               [ -f "publish/$rel" ] || continue
               new=$(sha256sum "publish/$rel" | cut -d' ' -f1)
               old=$(git show "FETCH_HEAD:$rel" 2>/dev/null | sha256sum | cut -d' ' -f1 || echo none)
@@ -421,7 +428,7 @@ jobs:
           git checkout -q --orphan ats-harvest
           # ./*.json already covers _crawls.json -- a bash glob matches a
           # leading underscore, unlike a leading dot.
-          git add ./*.json dead/*.json
+          git add ./*.json dead/*.json checked/*.json
           git commit -q -m "ATS harvest + validation $(date -u +%Y-%m-%d)"
           git push -q --force \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \

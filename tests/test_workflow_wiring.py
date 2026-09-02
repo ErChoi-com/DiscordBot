@@ -92,6 +92,39 @@ def test_prune_targets_the_harvest_directory(steps):
 # Publish and restore agree
 # --------------------------------------------------------------------------
 
+@pytest.mark.parametrize("directory,prefix", [
+    ("data/ats_harvest", ""),
+    ("data/dead_slugs", "dead/"),
+    ("data/ats_checked", "checked/"),
+])
+def test_every_state_directory_survives_a_run(steps, directory, prefix):
+    """Each directory the tools write must be created, restored and published.
+
+    CI checks out fresh, so a state directory that is written but not seeded
+    back starts empty every week and whatever it was for silently does not
+    work. That has happened twice: the crawl cache was published and never
+    restored, and ats_checked -- which stops the validator re-probing companies
+    it has already confirmed, 93% of one run's budget -- was not referenced by
+    the workflow at all when it was added.
+    """
+    seed = steps["Fetch the previously published state"]
+    manifest = steps["Build the manifest"]
+    publish = steps["Publish to the ats-harvest branch"]
+    assert directory in seed, f"{directory} is not created or restored"
+    assert directory in manifest, f"{directory} is not published"
+    if prefix:
+        assert f"FETCH_HEAD:{prefix}" in seed, f"{prefix} is not seeded back"
+        assert prefix.rstrip("/") + "/*.json" in publish,             f"{prefix} is not committed"
+
+
+def test_change_detection_sees_every_state_directory(steps):
+    """A directory left out here is republished only when something else
+    changed, so its updates can sit unpublished indefinitely."""
+    changed = steps["Skip when nothing changed"]
+    for rel in ("$p.json", "dead/$p.json", "checked/$p.json"):
+        assert rel in changed, rel
+
+
 def test_every_published_artefact_is_restored(steps):
     """The round trip has to close.
 
