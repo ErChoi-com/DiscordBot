@@ -126,7 +126,7 @@ WORKERS = {"greenhouse": 16, "lever": 16, "ashby": 8, "workday": 12,
            # conservative default rather than a guess that reads as evidence.
            "breezy": 8, "smartrecruiters": 8, "rippling": 8,
            "teamtailor": 8, "jazzhr": 8, "recruitee": 8, "jobvite": 8,
-           "applicantpro": 8,
+           "applicantpro": 8, "recruitee": 4,
            # Paced rather than throttled down. See DELAYS below.
            "workable": 4}
 
@@ -145,7 +145,7 @@ WORKERS = {"greenhouse": 16, "lever": 16, "ashby": 8, "workday": 12,
 # So four workers with a quarter-second pace, rather than the one worker a
 # guess had put here -- same safety, four times the throughput. Eight workers
 # with a delay is untested; the unpaced eight-worker run is the one that broke.
-DELAYS: dict[str, float] = {"workable": 0.25}
+DELAYS: dict[str, float] = {"workable": 0.25, "recruitee": 0.25}
 
 # Most probes a single run may spend on a platform, for endpoints that meter a
 # quota rather than a rate. Workable is the case: pacing alone does not buy
@@ -162,7 +162,12 @@ DELAYS: dict[str, float] = {"workable": 0.25}
 # deferred, and target selection prefers never-probed slugs, so the platform
 # still converges. It just converges over several runs instead of burning nine
 # tenths of each one.
-MAX_PROBES: dict[str, int] = {"workable": 600}
+# Recruitee meters the same way: a full pass probed 2,581 and answered 718 --
+# 716 live, 2 dead -- with the remaining 1,863 refused. Back-to-back rate tests
+# could not size it any more precisely, because each test runs inside the
+# throttle the previous one earned; the allowance from a cold start is the only
+# figure worth trusting.
+MAX_PROBES: dict[str, int] = {"workable": 600, "recruitee": 700}
 
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36")
