@@ -1698,3 +1698,32 @@ def test_prune_releases_the_lock(tmp_path):
     hc.write_slugs(out / "lever.json", {"acme"})
     assert hc.main(["--prune", "--out", str(out)]) == 0
     assert not (out / hc.LOCK_NAME).exists()
+
+
+# --------------------------------------------------------------------------
+# The crawl cache must not shrink to whatever one run looked for
+# --------------------------------------------------------------------------
+
+def test_saving_a_narrow_discovery_keeps_the_wider_cache(tmp_path):
+    """Discovery is normally scoped to a year or two, so a replacing write
+    would cut the cache down to that scope. The cache is what a run falls back
+    on when collinfo.json is unreachable, so the loss would only surface in
+    the situation it exists for."""
+    cache = tmp_path / "_crawls.json"
+    hc._save_crawl_cache(cache, ["CC-MAIN-2024-10", "CC-MAIN-2025-05",
+                                 "CC-MAIN-2026-30"])
+    hc._save_crawl_cache(cache, ["CC-MAIN-2026-34", "CC-MAIN-2026-30"])
+    assert set(hc._load_crawl_cache(cache)) == {
+        "CC-MAIN-2024-10", "CC-MAIN-2025-05", "CC-MAIN-2026-30",
+        "CC-MAIN-2026-34"}
+
+
+def test_the_cache_stays_newest_first(tmp_path):
+    """Callers slice the front of this list to pick recent crawls, and recent
+    crawls are where the live boards are: 12 recent crawls yielded 90.7% live
+    against 11.7% for 2022-23."""
+    cache = tmp_path / "_crawls.json"
+    hc._save_crawl_cache(cache, ["CC-MAIN-2024-10", "CC-MAIN-2026-34"])
+    hc._save_crawl_cache(cache, ["CC-MAIN-2025-05"])
+    assert hc._load_crawl_cache(cache) == [
+        "CC-MAIN-2026-34", "CC-MAIN-2025-05", "CC-MAIN-2024-10"]

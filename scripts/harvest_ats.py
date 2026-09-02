@@ -763,9 +763,19 @@ def _load_crawl_cache(cache_path: Path | None) -> list[str]:
 
 
 def _save_crawl_cache(cache_path: Path | None, ids: list[str]) -> None:
+    """Merge into the cache rather than replacing it.
+
+    Discovery is usually scoped to a year or two, so a plain overwrite shrinks
+    the cache to whatever that run happened to look for -- a 2026-only probe
+    would cut 124 known crawls to 8. The cache exists for the case where
+    collinfo.json is unreachable, so the loss stays invisible until the run
+    that needed it. Crawl ids are CC-MAIN-YYYY-NN, which sorts newest-first in
+    reverse, matching the order callers expect.
+    """
     if cache_path is None:
         return
     try:
+        ids = sorted(set(ids) | set(_load_crawl_cache(cache_path)), reverse=True)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
         tmp.write_text(json.dumps(ids, indent=1) + "\n", encoding="utf-8")
