@@ -957,3 +957,24 @@ def test_the_guard_reports_itself(tmp_path, monkeypatch):
     with contextlib.redirect_stdout(buf):
         v.main(["--platform", "greenhouse", "--json"])
     assert json.loads(buf.getvalue())["platforms"]["greenhouse"]["endpoint_down"]
+
+
+def test_a_bamboohr_board_that_demands_a_login_is_not_live(monkeypatch):
+    """401 has no rule in _decide, so it used to raise and leave the slug
+    permanently unknown -- 358 of one run's 1,012 bamboohr probes, re-probed
+    every run and unable to ever resolve.
+
+    Measured before treating it as a closure: 40 such slugs returned 401 on two
+    passes twenty seconds apart, identical both times, while fifteen
+    confirmed-live and fifteen known-dead tenants answered 200. The 401 belongs
+    to the tenant, not the client.
+    """
+    monkeypatch.setattr(v, "_request", lambda *a, **k: (401, b"", "x"))
+    assert v.live_bamboohr("acme") is False
+
+
+def test_a_bamboohr_outage_is_still_unknown(monkeypatch):
+    """Resolving 401 must not turn every other failure into a closure."""
+    monkeypatch.setattr(v, "_request", lambda *a, **k: (503, b"", "x"))
+    with pytest.raises(v.Unreachable):
+        v.live_bamboohr("acme")

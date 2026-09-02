@@ -228,6 +228,21 @@ def live_bamboohr(slug: str) -> bool:
     status, body, final = _request(f"https://{slug}.bamboohr.com/careers/list")
     if status is None:
         raise Unreachable("no response")
+    if status == 401:
+        # A board that demands authentication is one the bot can never read, so
+        # it is unusable rather than unknown. Without this the answer falls
+        # through to _decide, which has no rule for 401 and raises -- leaving
+        # these permanently unresolved and re-probed every run. That was 358 of
+        # bamboohr's 1,012 probes in one run, a third of the platform's budget
+        # spent on slugs that cannot produce an answer.
+        #
+        # Measured before changing the meaning: 40 such slugs returned 401 on
+        # two passes twenty seconds apart, identical both times, while fifteen
+        # confirmed-live and fifteen known-dead tenants all answered 200. So
+        # 401 is a property of these tenants, not of the client or the moment.
+        # Marking them dead rather than unscrapeable keeps the 90-day recheck,
+        # which is what should happen if a board is later made public.
+        return False
     if status != 200:
         return _decide(status)
     if f"{slug}.bamboohr.com" not in final:
