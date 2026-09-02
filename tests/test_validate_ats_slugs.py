@@ -1050,3 +1050,49 @@ def test_workable_is_paced_by_default():
     # eight-worker unpaced run that triggered the throttle. Four workers at a
     # quarter-second measured 10/s with zero refusals.
     assert v.WORKERS["workable"] <= 4
+
+
+# --------------------------------------------------------------------------
+# Endpoints that meter a quota rather than a rate
+# --------------------------------------------------------------------------
+
+def test_a_metered_platform_stops_at_its_allowance(tmp_path, monkeypatch):
+    """Workable meters a quota, so pacing alone does not buy more answers --
+    it only spreads the same allowance out. Two full runs measured it: 601
+    answers of 6,843 attempted, then 437 of 3,056 when paced. Everything after
+    the allowance is spent being refused, and refusals deepen the throttle for
+    the next run."""
+    probed = []
+    _seed(tmp_path, monkeypatch, "workable", [f"co{i:04d}" for i in range(100)])
+    monkeypatch.setitem(v.MAX_PROBES, "workable", 10)
+    monkeypatch.setitem(v.PROBES, "workable", lambda s: probed.append(s) or True)
+    monkeypatch.setitem(v.DELAYS, "workable", 0.0)
+    v.main(["--platform", "workable"])
+    assert len(probed) == 10
+
+
+def test_an_unmetered_platform_probes_everything(tmp_path, monkeypatch):
+    """The cap is per-platform and must not leak into platforms that answer
+    every request they are given."""
+    probed = []
+    _seed(tmp_path, monkeypatch, "greenhouse", [f"co{i:04d}" for i in range(50)])
+    monkeypatch.setitem(v.PROBES, "greenhouse", lambda s: probed.append(s) or True)
+    v.main(["--platform", "greenhouse"])
+    assert len(probed) == 50
+
+
+def test_the_deferred_remainder_is_picked_up_next_run(tmp_path, monkeypatch):
+    """Capping is only safe because the rest is deferred rather than dropped,
+    and target selection prefers never-probed slugs -- so the platform still
+    converges, just over several runs."""
+    seen = []
+    _seed(tmp_path, monkeypatch, "workable", [f"co{i:04d}" for i in range(30)])
+    monkeypatch.setitem(v.MAX_PROBES, "workable", 10)
+    monkeypatch.setitem(v.DELAYS, "workable", 0.0)
+    monkeypatch.setitem(v.PROBES, "workable", lambda s: seen.append(s) or True)
+    v.main(["--platform", "workable"])
+    first = list(seen)
+    v.main(["--platform", "workable"])
+    second = seen[len(first):]
+    assert len(second) == 10
+    assert not (set(first) & set(second)), "re-probed what it already confirmed"

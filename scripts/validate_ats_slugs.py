@@ -147,6 +147,23 @@ WORKERS = {"greenhouse": 16, "lever": 16, "ashby": 8, "workday": 12,
 # with a delay is untested; the unpaced eight-worker run is the one that broke.
 DELAYS: dict[str, float] = {"workable": 0.25}
 
+# Most probes a single run may spend on a platform, for endpoints that meter a
+# quota rather than a rate. Workable is the case: pacing alone does not buy
+# more answers, it only spreads the same allowance out.
+#
+# Two full runs measured the size of that allowance. The first answered 601 of
+# 6,843 before every later request came back 429; the second, paced to a
+# quarter-second across four workers, answered 437 of 3,056 before the same
+# thing happened. So roughly 500-600 answers are available per window, and the
+# 5,000-odd requests after that are spent to be refused -- and refusals are
+# what deepens the throttle for the run after.
+#
+# Capping at the measured allowance costs nothing: whatever is not probed is
+# deferred, and target selection prefers never-probed slugs, so the platform
+# still converges. It just converges over several runs instead of burning nine
+# tenths of each one.
+MAX_PROBES: dict[str, int] = {"workable": 600}
+
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36")
 
@@ -940,6 +957,11 @@ def _run(args, log: Callable[[str], None], _lock) -> int:
         # cost a request here and one per scrape cycle in the bot until a mark
         # lands, for an answer their shape already gives.
         unscrapeable, targets = partition_unscrapeable(platform, targets)
+        cap = MAX_PROBES.get(platform)
+        if cap is not None and len(targets) > cap:
+            log(f"[validate] {platform}: metered endpoint, probing {cap} of "
+                f"{len(targets)} this run and deferring the rest")
+            targets = targets[:cap]
         if unscrapeable:
             log(f"[validate] {platform}: {len(unscrapeable)} unscrapeable by "
                 "shape, marked without probing")
