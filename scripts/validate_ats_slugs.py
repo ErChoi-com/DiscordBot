@@ -559,6 +559,9 @@ def partition_unscrapeable(platform: str, slugs: Iterable[str]) -> tuple[list[st
     return unscrapeable, probe_me
 
 
+PROGRESS_SECONDS = 60.0
+
+
 def validate_platform(platform: str, slugs: Iterable[str], *,
                       probe: Callable[[str], bool] | None = None,
                       workers: int | None = None,
@@ -608,9 +611,24 @@ def validate_platform(platform: str, slugs: Iterable[str], *,
     chunk = max(workers * 4, 1)
     probed = 0
     stopped_early = False
+    last_beat = started
     if slugs:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             for start in range(0, len(slugs), chunk):
+                # Say something periodically. A platform emitted nothing between
+                # its first line and its last, so a paylocity pass that takes
+                # forty minutes at two workers was indistinguishable in the log
+                # from one that had hung -- and the counts on disk are no help
+                # either, since results are written when the platform finishes.
+                # Twice that ambiguity had to be resolved by inspecting process
+                # tables, and once it was resolved wrongly.
+                if now() - last_beat >= PROGRESS_SECONDS:
+                    last_beat = now()
+                    elapsed = last_beat - started
+                    rate = probed / elapsed if elapsed else 0.0
+                    log(f"[validate] {platform}: {probed}/{len(slugs)} probed, "
+                        f"{len(live)} live, {len(dead)} dead, "
+                        f"{rate:.1f}/s after {elapsed:.0f}s")
                 if budget_seconds is not None and start and                         now() - started > budget_seconds:
                     stopped_early = True
                     break

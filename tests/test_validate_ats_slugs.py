@@ -978,3 +978,32 @@ def test_a_bamboohr_outage_is_still_unknown(monkeypatch):
     monkeypatch.setattr(v, "_request", lambda *a, **k: (503, b"", "x"))
     with pytest.raises(v.Unreachable):
         v.live_bamboohr("acme")
+
+
+# --------------------------------------------------------------------------
+# A long pass has to be distinguishable from a hung one
+# --------------------------------------------------------------------------
+
+def test_a_long_pass_reports_progress(monkeypatch):
+    """Between its first and last line a platform used to emit nothing, so a
+    forty-minute paylocity pass looked exactly like a hang. The counts on disk
+    do not help either: results are written when the platform finishes."""
+    clock = iter(range(0, 10_000, 30))  # 30s per call, so beats every other one
+    lines = []
+    v.validate_platform("greenhouse", [f"co{i}" for i in range(40)],
+                        probe=lambda s: True, workers=1,
+                        now=lambda: next(clock), log=lines.append)
+    beats = [l for l in lines if "probed," in l]
+    assert beats, "a long pass said nothing until it finished"
+    assert "/s after" in beats[0]
+
+
+def test_a_short_pass_stays_quiet(monkeypatch):
+    """The heartbeat is for runs long enough to be ambiguous. A fast platform
+    emitting one line per chunk would bury the summaries it matters to read."""
+    clock = iter([0.0] * 500)
+    lines = []
+    v.validate_platform("greenhouse", [f"co{i}" for i in range(40)],
+                        probe=lambda s: True, workers=1,
+                        now=lambda: next(clock), log=lines.append)
+    assert not [l for l in lines if "probed," in l]
