@@ -35,6 +35,16 @@ on:
     # pick up a new crawl within days of release. The odd minute avoids the
     # top-of-hour spike when GitHub delays scheduled jobs.
     - cron: "41 3 * * 2"
+  # Temporary, for first-run validation. workflow_dispatch only works for
+  # workflows present on the default branch, and this one lives on a feature
+  # branch, so a push trigger scoped to that branch is what lets it run at all
+  # before merge. Remove once this is on main.
+  push:
+    branches: [ats-commoncrawl-harvest]
+    paths:
+      - .github/workflows/ats-harvest.yml
+      - scripts/harvest_ats.py
+      - scripts/validate_ats_slugs.py
   workflow_dispatch:
     inputs:
       crawls:
