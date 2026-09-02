@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -649,7 +650,7 @@ def test_a_second_validation_run_is_refused(tmp_path, monkeypatch):
     _seed(tmp_path, monkeypatch, "lever", ["a"])
     monkeypatch.setitem(v.PROBES, "lever", lambda s: True)
     dead_dir = tmp_path / "dead_slugs"
-    (dead_dir / v._harvest.LOCK_NAME).write_text("99999")
+    (dead_dir / v._harvest.LOCK_NAME).write_text(str(os.getpid()))
     assert v.main(["--platform", "lever"]) == 2
 
 
@@ -660,7 +661,7 @@ def test_a_dry_run_takes_no_lock(tmp_path, monkeypatch):
     _seed(tmp_path, monkeypatch, "lever", ["a"])
     monkeypatch.setitem(v.PROBES, "lever", lambda s: True)
     dead_dir = tmp_path / "dead_slugs"
-    (dead_dir / v._harvest.LOCK_NAME).write_text("99999")
+    (dead_dir / v._harvest.LOCK_NAME).write_text(str(os.getpid()))
     assert v.main(["--platform", "lever", "--dry-run"]) == 0
 
 

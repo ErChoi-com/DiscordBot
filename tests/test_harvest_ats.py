@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -1642,14 +1643,14 @@ def test_a_stale_lock_is_taken_over(tmp_path):
     """A process killed mid-run leaves its lock behind. Treating that as fatal
     would block every run after one crash -- which is how the harvest died in
     the first place."""
-    (tmp_path / hc.LOCK_NAME).write_text("99999")
+    (tmp_path / hc.LOCK_NAME).write_text(str(os.getpid()))
     later = time.time() + hc.LOCK_STALE_SECONDS + 1
     with hc.output_lock(tmp_path, now=lambda: later):
         pass
 
 
 def test_a_fresh_lock_is_respected(tmp_path):
-    (tmp_path / hc.LOCK_NAME).write_text("99999")
+    (tmp_path / hc.LOCK_NAME).write_text(str(os.getpid()))
     with pytest.raises(hc.HarvestLocked):
         with hc.output_lock(tmp_path, now=time.time):
             pass
@@ -1658,7 +1659,7 @@ def test_a_fresh_lock_is_respected(tmp_path):
 def test_main_exits_rather_than_racing(tmp_path, monkeypatch):
     out = tmp_path / "out"
     out.mkdir()
-    (out / hc.LOCK_NAME).write_text("99999")
+    (out / hc.LOCK_NAME).write_text(str(os.getpid()))
     _offline_bulk(monkeypatch)
     assert hc.main(["--index", "ccbulk", "--crawl", "CC-MAIN-2026-34",
                     "--platform", "lever", "--out", str(out)]) == 2
@@ -1696,7 +1697,7 @@ def test_prune_holds_the_output_lock(tmp_path, monkeypatch):
     out = tmp_path / "out"
     out.mkdir()
     hc.write_slugs(out / "lever.json", {"acme", "al-"})
-    (out / hc.LOCK_NAME).write_text("99999")
+    (out / hc.LOCK_NAME).write_text(str(os.getpid()))
     assert hc.main(["--prune", "--out", str(out)]) == 2
     # Refused, so the file is untouched.
     assert hc.load_existing(out / "lever.json") == {"acme", "al-"}
@@ -1736,3 +1737,58 @@ def test_the_cache_stays_newest_first(tmp_path):
     hc._save_crawl_cache(cache, ["CC-MAIN-2025-05"])
     assert hc._load_crawl_cache(cache) == [
         "CC-MAIN-2026-34", "CC-MAIN-2025-05", "CC-MAIN-2024-10"]
+
+
+# --------------------------------------------------------------------------
+# A crashed run must not block the next one
+# --------------------------------------------------------------------------
+
+def test_a_lock_left_by_a_dead_process_is_taken_over(tmp_path):
+    """Staleness used to be judged by age alone, so a killed harvest blocked
+    every later run for six hours. Measured: a harvest killed mid-sweep left a
+    lock whose pid was already gone, and the next run refused at 40 seconds
+    old. Unattended, one crash becomes a week with no harvest."""
+    lock = tmp_path / hc.LOCK_NAME
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("999999999")          # a pid that cannot be running
+    with hc.output_lock(tmp_path):
+        assert lock.read_text().strip() == str(os.getpid())
+
+
+def test_a_lock_held_by_a_living_process_is_respected(tmp_path):
+    """The guard must not steal a lock from a running harvest -- two processes
+    writing the same files is the whole reason the lock exists."""
+    lock = tmp_path / hc.LOCK_NAME
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(str(os.getpid()))     # this test itself is alive
+    with pytest.raises(hc.HarvestLocked):
+        with hc.output_lock(tmp_path):
+            pass
+
+
+def test_an_unreadable_holder_falls_back_to_the_age_rule(tmp_path):
+    """An empty or corrupt lock says nothing about who holds it, so the safe
+    reading is that someone does."""
+    lock = tmp_path / hc.LOCK_NAME
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("not-a-pid")
+    with pytest.raises(hc.HarvestLocked):
+        with hc.output_lock(tmp_path):
+            pass
+
+
+def test_an_old_lock_is_still_taken_over_by_age(tmp_path):
+    """The age rule stays as the backstop for a holder that cannot be checked."""
+    lock = tmp_path / hc.LOCK_NAME
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(str(os.getpid()))
+    with hc.output_lock(tmp_path, now=lambda: time.time() + hc.LOCK_STALE_SECONDS + 60):
+        assert lock.exists()
+
+
+def test_pid_alive_answers_for_this_process():
+    assert hc._pid_alive(os.getpid()) is True
+    assert hc._pid_alive(999999999) is False
+    # An unknown pid resolves to "held" rather than "free": waiting costs time,
+    # stealing costs two runs dropping each other's finds.
+    assert hc._pid_alive(0) is True

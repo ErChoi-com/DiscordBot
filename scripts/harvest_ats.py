@@ -1555,6 +1555,43 @@ class HarvestLocked(RuntimeError):
     """Another harvest is already writing to this output directory."""
 
 
+def _pid_alive(pid: int) -> bool:
+    """Whether a process id is currently running.
+
+    Used to decide whether a lock left on disk still belongs to anyone. Both
+    unknown answers are resolved conservatively: a pid that cannot be checked
+    counts as alive, so the caller falls back to the age rule rather than
+    stealing a lock from a running harvest.
+
+    A recycled pid can make a dead lock look held, which costs a wait. The
+    opposite mistake -- deciding a running harvest is dead -- costs two
+    processes writing the same files and silently dropping each other's finds,
+    which is the failure this lock exists to prevent.
+    """
+    if pid <= 0:
+        return True
+    if os.name == "nt":
+        import ctypes
+
+        # SYNCHRONIZE. Enough to learn whether the process exists without
+        # asking for rights that a foreign process would refuse.
+        handle = ctypes.windll.kernel32.OpenProcess(0x00100000, False, pid)
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        # 5 is ERROR_ACCESS_DENIED: it exists, we simply may not open it.
+        return ctypes.windll.kernel32.GetLastError() == 5
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
 @contextlib.contextmanager
 def output_lock(out_dir: Path, *, now: Callable[[], float] = time.time):
     """Refuse to run two harvests against the same output directory.
@@ -1581,7 +1618,19 @@ def output_lock(out_dir: Path, *, now: Callable[[], float] = time.time):
             age = now() - lock.stat().st_mtime
         except OSError:
             age = 0.0
-        if age < LOCK_STALE_SECONDS:
+        # The lock records the pid that took it, so ask whether that process is
+        # still there rather than waiting out the age. Age alone meant a killed
+        # run blocked every later one for six hours -- measured: a harvest
+        # killed mid-sweep left a lock whose pid was already gone, and the next
+        # run refused at 40 seconds old. Unattended, that turns one crash into
+        # a week with no harvest.
+        holder = 0
+        try:
+            holder = int((lock.read_text(encoding="utf-8") or "0").strip() or 0)
+        except (OSError, ValueError):
+            holder = 0
+        abandoned = holder > 0 and not _pid_alive(holder)
+        if age < LOCK_STALE_SECONDS and not abandoned:
             raise HarvestLocked(
                 f"another harvest holds {lock} (age {age:.0f}s). "
                 "Concurrent runs silently drop each other's finds; wait for it "
