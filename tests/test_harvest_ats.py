@@ -630,19 +630,41 @@ def test_lever_is_wayback_only_in_practice():
     assert "jobs.lever.co/*" in hc.WAYBACK_QUERIES["lever"]
 
 
-def test_every_platform_has_a_wayback_query_except_icims():
-    """iCIMS is deliberately empty: Wayback sorts "com,icims)" (the www
-    marketing site) ahead of every "com,icims,<tenant>)", so a wildcard sweep
-    pages through tens of thousands of www asset URLs and stalls before
-    reaching a tenant. A real run harvested 856 entries and 0 new companies.
-    Common Crawl covers the platform, so the query only burned time."""
-    for platform in hc.PLATFORMS:
-        queries = hc.WAYBACK_QUERIES.get(platform.name)
-        assert queries is not None, platform.name
-        if platform.name == "icims":
-            assert queries == ()
-        else:
-            assert queries, platform.name
+# Wayback is opt-in per platform, not the default. It earns its place only
+# where the archive holds something Common Crawl does not, and it is expensive
+# everywhere else -- measured on teamtailor, the bulk index returned 2,057
+# companies in seconds while Wayback ground out 212 slugs in seven minutes
+# without finishing.
+_WAYBACK_PLATFORMS = {"greenhouse", "lever", "ashby", "workday", "bamboohr",
+                      "paylocity"}
+
+
+@pytest.mark.parametrize("platform", [p.name for p in hc.PLATFORMS])
+def test_wayback_is_queried_only_where_it_pays(platform):
+    """Every platform must have an entry, and the entry must match the reason.
+
+    iCIMS is empty because Wayback sorts "com,icims)" -- the www marketing site
+    -- ahead of every "com,icims,<tenant>)", so a wildcard sweep pages through
+    tens of thousands of asset URLs and stalls before reaching a tenant: 856
+    entries and 0 new companies on a real run.
+
+    The nine platforms harvested from the bulk index are empty for a different
+    reason. Common Crawl covers them well, so Wayback adds slow archival slugs
+    that are mostly dead -- and this repo already measured what that costs: a
+    2022-23 sweep bought 145 live boards and 1,114 dead ones, each of which the
+    bot re-probes forever. Fifteen platforms sweeping Wayback is also what took
+    a Collect step from minutes to still-running at forty-five, found on the
+    first real CI run.
+
+    An entry must exist either way, so a platform added without a decision
+    fails here rather than silently inheriting one.
+    """
+    queries = hc.WAYBACK_QUERIES.get(platform)
+    assert queries is not None, f"{platform} has no Wayback decision recorded"
+    if platform in _WAYBACK_PLATFORMS:
+        assert queries, f"{platform} should sweep Wayback"
+    else:
+        assert queries == (), f"{platform} should not sweep Wayback"
 
 
 def test_wayback_query_stops_when_its_time_budget_is_spent():

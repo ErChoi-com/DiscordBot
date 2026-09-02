@@ -1195,15 +1195,29 @@ WAYBACK_QUERIES: dict[str, tuple[str, ...]] = {
     "icims": (),
     "paylocity": ("recruiting.paylocity.com/*",),
     "bamboohr": ("*.bamboohr.com/*",),
-    "workable": ("apply.workable.com/*",),
-    "breezy": ("*.breezy.hr/*",),
-    "smartrecruiters": ("jobs.smartrecruiters.com/*",),
-    "rippling": ("ats.rippling.com/*",),
-    "teamtailor": ("*.teamtailor.com/*",),
-    "jazzhr": ("*.applytojob.com/*",),
-    "recruitee": ("*.recruitee.com/*",),
-    "jobvite": ("jobs.jobvite.com/*",),
-    "applicantpro": ("*.applicantpro.com/*",),
+    # No Wayback queries for the platforms added from the bulk index, on the
+    # same grounds the iCIMS entry above records. Measured on teamtailor: the
+    # bulk index returns 2,057 companies in seconds, while Wayback ground out
+    # 212 slugs in seven minutes and had not finished. Fifteen platforms doing
+    # that turned a Collect step that takes minutes into one still running at
+    # forty-five, which is how this was found -- the first real CI run.
+    #
+    # The yield is also the wrong kind. Wayback reaches back years, and this
+    # workflow already records that archival slugs keep getting deader: a
+    # 2022-23 sweep bought 145 live boards and 1,114 dead ones, and every dead
+    # slug costs the bot a probe every recheck period, permanently.
+    #
+    # Lever remains the reason Wayback exists here at all: it blocks CCBot, so
+    # the archive is its only source. Common Crawl covers these nine.
+    "workable": (),
+    "breezy": (),
+    "smartrecruiters": (),
+    "rippling": (),
+    "teamtailor": (),
+    "jazzhr": (),
+    "recruitee": (),
+    "jobvite": (),
+    "applicantpro": (),
 }
 
 # Rows per request. Wayback truncates large responses reliably, so this stays
