@@ -1,0 +1,70 @@
+name: ATS runner probe check
+
+# Answers one question: can a GitHub runner tell whether an ATS board is alive?
+#
+# The standing decision (2026-08-24) is that ATS validation must not run on
+# Actions, because runner IPs are Azure datacenter ranges that Workday and iCIMS
+# rate-limit or block. Validation writes its misses into dead_slugs, the bot
+# reads those files, so a blocked run marks live boards dead and the corruption
+# travels home.
+#
+# That is a claim about what a runner is told, and it is measurable. This job
+# measures it against a control set of 128 boards confirmed live from the bot's
+# own host, where the same script scores 128/128. Any shortfall here is the
+# runner's address, because nothing else differs.
+#
+# It writes nothing. No dead marks, no confirmed-live marks, no published files,
+# no commits. Reading the result is the entire purpose, so it cannot poison
+# anything even if every probe fails.
+
+on:
+  push:
+    branches: [ats-commoncrawl-harvest]
+    paths:
+      - .github/workflows/ats-runner-probe.yml
+      - scripts/runner_probe_check.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ats-runner-probe
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Probe the control set
+        # No pip install: validate_ats_slugs is stdlib-only, and the control
+        # set is embedded in the script, so nothing here depends on the repo's
+        # data directories -- which are gitignored and absent on a runner.
+        run: python scripts/runner_probe_check.py
+
+      - name: What the result means
+        if: always()
+        run: |
+          {
+            echo "## ATS runner probe"
+            echo
+            echo "Control set: 128 boards confirmed live from the bot's own host,"
+            echo "where this same script scores 128/128."
+            echo
+            echo "- Agreement near 128/128 means the platforms do not care that the"
+            echo "  request came from a runner, and the 2026-08-24 decision could be"
+            echo "  revisited for the platforms that agree."
+            echo "- Shortfalls, especially 403 or 429, are the block the decision"
+            echo "  records. Those platforms must keep validating on the bot's host."
+            echo
+            echo "Nothing was written either way: this job publishes no marks."
+          } >> "$GITHUB_STEP_SUMMARY"
