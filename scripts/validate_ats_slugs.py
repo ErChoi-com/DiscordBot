@@ -86,6 +86,12 @@ RECHECK_DAYS = 7
 # Thirty days is well inside the 90-day dead TTL, so a board that closes is
 # still noticed within a month, and it leaves each run free to spend its budget
 # on slugs nobody has checked.
+#
+# Measured after: the next full run took the due count from 53,498 to 15,429 in
+# 45 minutes, against 2,229 in 49 minutes for the run before it. Five of the
+# seven platforms went to zero or single digits; what remains is BambooHR and
+# Paylocity, the two largest, and Paylocity only because it defers most of its
+# work at two workers.
 LIVE_RECHECK_DAYS = 30
 
 REQUEST_TIMEOUT = 25
