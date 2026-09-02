@@ -104,7 +104,7 @@ jobs:
           set -euo pipefail
           mkdir -p data/ats_harvest data/dead_slugs data/ats_checked
           if git fetch --depth=1 origin ats-harvest 2>/dev/null; then
-            for p in greenhouse lever ashby workday icims bamboohr paylocity workable breezy; do
+            for p in greenhouse lever ashby workday icims bamboohr paylocity workable breezy smartrecruiters rippling teamtailor jazzhr recruitee jobvite applicantpro; do
               git show "FETCH_HEAD:$p.json" > "data/ats_harvest/$p.json" 2>/dev/null \
                 && echo "seeded harvest $p" || echo "no published $p.json yet"
               git show "FETCH_HEAD:dead/$p.json" > "data/dead_slugs/$p.json" 2>/dev/null \
@@ -224,7 +224,10 @@ jobs:
           #   workable   3,158   breezy  2,063   (measured on CC-MAIN-2026-34)
           FLOORS = {"greenhouse": 1200, "ashby": 700, "workday": 500,
                     "icims": 700, "bamboohr": 1200, "paylocity": 300,
-                    "workable": 1200, "breezy": 800}
+                    "workable": 1200, "breezy": 800,
+                    "smartrecruiters": 200, "rippling": 350,
+                    "teamtailor": 350, "jazzhr": 200, "recruitee": 200,
+                    "jobvite": 240, "applicantpro": 160}
 
           platforms = json.load(open("harvest.json"))["platforms"]
           failed = []
@@ -401,7 +404,7 @@ jobs:
         run: |
           set -euo pipefail
           changed=false
-          for p in greenhouse lever ashby workday icims bamboohr paylocity workable breezy; do
+          for p in greenhouse lever ashby workday icims bamboohr paylocity workable breezy smartrecruiters rippling teamtailor jazzhr recruitee jobvite applicantpro; do
             for rel in "$p.json" "dead/$p.json" "checked/$p.json"; do
               [ -f "publish/$rel" ] || continue
               new=$(sha256sum "publish/$rel" | cut -d' ' -f1)
@@ -460,7 +463,9 @@ jobs:
           h = load("harvest.json", "platforms")
           v = load("validate.json", "platforms")
           for name in ["greenhouse", "lever", "ashby", "workday", "icims",
-                       "bamboohr", "paylocity", "workable", "breezy"]:
+                       "bamboohr", "paylocity", "workable", "breezy",
+                       "smartrecruiters", "rippling", "teamtailor", "jazzhr",
+                       "recruitee", "jobvite", "applicantpro"]:
               a, b = h.get(name, {}), v.get(name, {})
               audit = b.get("audit") or {}
               # The audit rate, not the working one: the working pass samples

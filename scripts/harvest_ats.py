@@ -442,6 +442,46 @@ PLATFORMS: tuple[Platform, ...] = (
         (("breezy.hr", "domain"),),
         _subdomain_extractor("breezy.hr"),
     ),
+    # A second wave, all measured against CC-MAIN-2026-34 and all probing 100%
+    # live on a 20-slug sample. Recency is why: these hosts are young enough
+    # that the index carries mostly current boards, where the older platforms'
+    # harvested pools are 36-52% live because they reach back through years of
+    # expired ones.
+    Platform(
+        "smartrecruiters",
+        (("jobs.smartrecruiters.com/*", "prefix"),),
+        _path_segment_extractor("smartrecruiters.com"),
+    ),
+    Platform(
+        "rippling",
+        (("ats.rippling.com/*", "prefix"),),
+        _path_segment_extractor("rippling.com"),
+    ),
+    Platform(
+        "teamtailor",
+        (("teamtailor.com", "domain"),),
+        _subdomain_extractor("teamtailor.com"),
+    ),
+    Platform(
+        "jazzhr",
+        (("applytojob.com", "domain"),),
+        _subdomain_extractor("applytojob.com"),
+    ),
+    Platform(
+        "recruitee",
+        (("recruitee.com", "domain"),),
+        _subdomain_extractor("recruitee.com"),
+    ),
+    Platform(
+        "jobvite",
+        (("jobs.jobvite.com/*", "prefix"),),
+        _path_segment_extractor("jobvite.com"),
+    ),
+    Platform(
+        "applicantpro",
+        (("applicantpro.com", "domain"),),
+        _subdomain_extractor("applicantpro.com"),
+    ),
 )
 
 PLATFORM_BY_NAME = {p.name: p for p in PLATFORMS}
@@ -1157,6 +1197,13 @@ WAYBACK_QUERIES: dict[str, tuple[str, ...]] = {
     "bamboohr": ("*.bamboohr.com/*",),
     "workable": ("apply.workable.com/*",),
     "breezy": ("*.breezy.hr/*",),
+    "smartrecruiters": ("jobs.smartrecruiters.com/*",),
+    "rippling": ("ats.rippling.com/*",),
+    "teamtailor": ("*.teamtailor.com/*",),
+    "jazzhr": ("*.applytojob.com/*",),
+    "recruitee": ("*.recruitee.com/*",),
+    "jobvite": ("jobs.jobvite.com/*",),
+    "applicantpro": ("*.applicantpro.com/*",),
 }
 
 # Rows per request. Wayback truncates large responses reliably, so this stays
@@ -1482,6 +1529,13 @@ _IDENTIFIER_PROBES: dict[str, Callable[[str], str | None]] = {
     "ashby": lambda s: f"https://jobs.ashbyhq.com/{s}/abc",
     "workable": lambda s: f"https://apply.workable.com/{s}/j/abc",
     "breezy": lambda s: f"https://{s}.breezy.hr/p/abc",
+    "smartrecruiters": lambda s: f"https://jobs.smartrecruiters.com/{s}/abc",
+    "rippling": lambda s: f"https://ats.rippling.com/{s}/jobs",
+    "teamtailor": lambda s: f"https://{s}.teamtailor.com/jobs",
+    "jazzhr": lambda s: f"https://{s}.applytojob.com/apply",
+    "recruitee": lambda s: f"https://{s}.recruitee.com/o/abc",
+    "jobvite": lambda s: f"https://jobs.jobvite.com/{s}/job/abc",
+    "applicantpro": lambda s: f"https://{s}.applicantpro.com/jobs/",
     "icims": lambda s: f"https://{s}.icims.com/jobs/1",
     "bamboohr": lambda s: f"https://{s}.bamboohr.com/careers/list",
     "workday": _workday_probe_url,

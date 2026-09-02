@@ -62,7 +62,9 @@ DEAD_DIR = DATA_DIR / "dead_slugs"
 CHECKED_DIR = DATA_DIR / "ats_checked"
 
 PLATFORMS = ("greenhouse", "lever", "ashby", "workday", "icims", "bamboohr",
-             "paylocity", "workable", "breezy")
+             "paylocity", "workable", "breezy", "smartrecruiters",
+             "rippling", "teamtailor", "jazzhr", "recruitee", "jobvite",
+             "applicantpro")
 
 COMPANY_FILES = {p: f"{p}_companies.json" for p in PLATFORMS}
 # Upstream ships this one under a different name, and as {guid, name, jobs}
@@ -122,7 +124,18 @@ WORKERS = {"greenhouse": 16, "lever": 16, "ashby": 8, "workday": 12,
            "paylocity": 2,
            # No measured concurrency curve for these two yet, so they take the
            # conservative default rather than a guess that reads as evidence.
-           "workable": 8, "breezy": 8}
+           "breezy": 8, "smartrecruiters": 8, "rippling": 8,
+           "teamtailor": 8, "jazzhr": 8, "recruitee": 8, "jobvite": 8,
+           "applicantpro": 8,
+           # Workable refuses anything quicker. See DELAYS below.
+           "workable": 1}
+
+# Seconds to wait before each probe, per platform. Only for endpoints that
+# refuse a normal pace: an unpaced Workable pass was 91% refused and left the
+# address throttled afterwards. A slow platform is not a problem on its own --
+# whatever a run does not reach is deferred to the next one, and the target
+# selection prefers never-probed slugs, so the population still converges.
+DELAYS: dict[str, float] = {"workable": 1.0}
 
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36")
@@ -337,11 +350,52 @@ def live_breezy(slug: str) -> bool:
     return _decide(status)
 
 
+def live_smartrecruiters(slug: str) -> bool:
+    # The public postings API answers 404 for an unknown company. Verified on
+    # 25 harvested slugs, all live.
+    status, _, _ = _request(
+        f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=1")
+    return _decide(status)
+
+
+def live_rippling(slug: str) -> bool:
+    status, _, _ = _request(f"https://ats.rippling.com/{slug}/jobs")
+    return _decide(status)
+
+
+def live_teamtailor(slug: str) -> bool:
+    status, _, _ = _request(f"https://{slug}.teamtailor.com/jobs")
+    return _decide(status)
+
+
+def live_jazzhr(slug: str) -> bool:
+    status, _, _ = _request(f"https://{slug}.applytojob.com/apply")
+    return _decide(status)
+
+
+def live_recruitee(slug: str) -> bool:
+    status, _, _ = _request(f"https://{slug}.recruitee.com/")
+    return _decide(status)
+
+
+def live_jobvite(slug: str) -> bool:
+    status, _, _ = _request(f"https://jobs.jobvite.com/{slug}")
+    return _decide(status)
+
+
+def live_applicantpro(slug: str) -> bool:
+    status, _, _ = _request(f"https://{slug}.applicantpro.com/jobs/")
+    return _decide(status)
+
+
 PROBES: dict[str, Callable[[str], bool]] = {
     "greenhouse": live_greenhouse, "lever": live_lever, "ashby": live_ashby,
     "workday": live_workday, "icims": live_icims, "bamboohr": live_bamboohr,
     "paylocity": live_paylocity, "workable": live_workable,
-    "breezy": live_breezy,
+    "breezy": live_breezy, "smartrecruiters": live_smartrecruiters,
+    "rippling": live_rippling, "teamtailor": live_teamtailor,
+    "jazzhr": live_jazzhr, "recruitee": live_recruitee,
+    "jobvite": live_jobvite, "applicantpro": live_applicantpro,
 }
 
 
@@ -587,6 +641,7 @@ def validate_platform(platform: str, slugs: Iterable[str], *,
                       probe: Callable[[str], bool] | None = None,
                       workers: int | None = None,
                       budget_seconds: float | None = None,
+                      delay: float | None = None,
                       now: Callable[[], float] = time.monotonic,
                       log: Callable[[str], None] = print) -> dict[str, int]:
     """Probe slugs concurrently. Returns counts and the resulting verdicts.
@@ -602,6 +657,8 @@ def validate_platform(platform: str, slugs: Iterable[str], *,
         probe = PROBES[platform]
     if workers is None:
         workers = WORKERS.get(platform, 8)
+    if delay is None:
+        delay = DELAYS.get(platform, 0.0)
     started = now()
 
     live: list[str] = []
@@ -610,6 +667,14 @@ def validate_platform(platform: str, slugs: Iterable[str], *,
     lock = threading.Lock()
 
     def one(slug: str) -> None:
+        # Pace the request if this platform demands it. Workable answers 429 to
+        # anything faster: an eight-worker pass over 6,843 slugs came back 6,242
+        # unknown -- 91% refused -- and left the address throttled for minutes
+        # afterwards, so even a serial retry was refused. Nothing was corrupted,
+        # because 429 is unreachable rather than dead, but the whole pass was
+        # wasted and the next one would be too.
+        if delay:
+            time.sleep(delay)
         try:
             ok = probe(slug)
         except Unreachable:

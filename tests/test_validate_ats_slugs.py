@@ -1012,3 +1012,38 @@ def test_a_short_pass_stays_quiet(monkeypatch):
                         probe=lambda s: True, workers=1,
                         now=lambda: next(clock), log=lines.append)
     assert not [l for l in lines if "probed," in l]
+
+
+# --------------------------------------------------------------------------
+# Pacing for endpoints that refuse a normal rate
+# --------------------------------------------------------------------------
+
+def test_a_rate_limited_platform_is_paced(monkeypatch):
+    """Workable answers 429 to anything quicker. An eight-worker pass over
+    6,843 slugs came back 6,242 unknown -- 91% refused -- and left the address
+    throttled for minutes, so even a serial retry was refused. Nothing was
+    corrupted, since 429 is unreachable rather than dead, but the entire pass
+    was wasted and the next would have been too."""
+    slept = []
+    monkeypatch.setattr(v.time, "sleep", slept.append)
+    monkeypatch.setitem(v.DELAYS, "workable", 0.5)
+    v.validate_platform("workable", ["a", "b", "c"], probe=lambda s: True,
+                        workers=1, log=lambda m: None)
+    assert slept == [0.5, 0.5, 0.5]
+
+
+def test_platforms_that_answer_normally_are_not_slowed(monkeypatch):
+    """Pacing every platform would turn a run that finishes in seconds into
+    one that does not finish at all."""
+    slept = []
+    monkeypatch.setattr(v.time, "sleep", slept.append)
+    v.validate_platform("greenhouse", ["a", "b", "c"], probe=lambda s: True,
+                        workers=1, log=lambda m: None)
+    assert slept == []
+
+
+def test_workable_is_paced_by_default():
+    """The pacing has to be the default, not something a caller remembers:
+    the unpaced run is the one that gets the address throttled."""
+    assert v.DELAYS.get("workable", 0) > 0
+    assert v.WORKERS["workable"] == 1

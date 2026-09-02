@@ -745,6 +745,13 @@ def test_every_wayback_query_host_has_a_matching_extractor():
         "paylocity": ("https://{host}/recruiting/jobs/All/" + guid + "/X", guid),
         "workable": ("https://{host}/acme/j/abc", "acme"),
         "breezy": ("https://acme.{host}/p/abc", "acme"),
+        "smartrecruiters": ("https://{host}/acme/abc", "acme"),
+        "rippling": ("https://{host}/acme/jobs", "acme"),
+        "teamtailor": ("https://acme.{host}/jobs", "acme"),
+        "jazzhr": ("https://acme.{host}/apply", "acme"),
+        "recruitee": ("https://acme.{host}/o/abc", "acme"),
+        "jobvite": ("https://{host}/acme/job/abc", "acme"),
+        "applicantpro": ("https://acme.{host}/jobs/", "acme"),
     }
     for name, queries in hc.WAYBACK_QUERIES.items():
         if name == "workday":
