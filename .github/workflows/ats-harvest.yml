@@ -102,8 +102,13 @@ jobs:
           PYTHONPATH: src
         run: |
           python -m pip install --upgrade pip
-          pip install pytest
-          pytest tests/test_harvest_ats.py tests/test_validate_ats_slugs.py -q
+          # The scripts themselves are stdlib-only on purpose, but tests/conftest.py
+          # has autouse fixtures that import the bot to keep tests off real state,
+          # and those need the bot's own dependencies. Installing them is the
+          # honest fix: loosening the fixtures would trade a red CI for silent
+          # pollution of the real caches, which is what they exist to prevent.
+          pip install pytest requests pyyaml beautifulsoup4
+          pytest tests/test_harvest_ats.py tests/test_validate_ats_slugs.py                  tests/test_workflow_wiring.py -q
 
       - name: Fetch the previously published state
         # The harvester merges into whatever is already in --out, and the
