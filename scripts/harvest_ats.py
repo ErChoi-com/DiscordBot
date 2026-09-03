@@ -1541,6 +1541,26 @@ def prune_existing(out_dir: Path, platforms: Iterable[Platform], *,
                 # is what a fresh harvest of the same capture yields.
                 rewritten[slug] = current
                 kept.add(current)
+        # Percent-encoding residue that survived the per-slug rule, which is
+        # deliberately conservative: it only fires when the stripped remainder
+        # is a reserved word, so a company genuinely starting with "2f" cannot
+        # be eaten. Here there is file context, and that gives a decisive test
+        # -- if the stripped form is already held as its own entry, the pair can
+        # only be one company recorded twice, once through an undecoded %2f.
+        #
+        # Measured before relying on it: every one of bamboohr's 56 residue
+        # slugs had its stripped form present, and 28 of icims' 31. The three
+        # that did not are left alone rather than guessed at.
+        for slug in sorted(kept):
+            for residue in ("252f", "2f"):
+                if not slug.startswith(residue) or len(slug) <= len(residue) + 1:
+                    continue
+                stripped = slug[len(residue):]
+                if stripped in kept:
+                    kept.discard(slug)
+                    dropped.add(slug)
+                break
+
         report[platform.name] = {
             "before": len(before), "kept": len(kept), "dropped": len(dropped),
             "rewritten": len(rewritten),

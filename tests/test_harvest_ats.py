@@ -1880,3 +1880,27 @@ def test_a_company_that_really_starts_with_2f_survives():
 def test_the_new_rules_keep_real_companies(slug):
     """Every one of these is a real board held in the harvest."""
     assert hc._looks_like_company(slug) is True
+
+
+def test_prune_drops_encoding_residue_that_duplicates_a_real_slug(tmp_path):
+    """The per-slug rule is deliberately conservative -- it only fires when the
+    stripped remainder is a reserved word, so a company genuinely starting with
+    "2f" survives. Pruning has file context, which gives a decisive test: if the
+    stripped form is already held, the pair is one company recorded twice.
+
+    Measured before relying on it: all 56 of bamboohr's residue slugs had their
+    stripped form present, and 28 of icims' 31."""
+    path = tmp_path / "bamboohr.json"
+    path.write_text(json.dumps(sorted([
+        "fairtradeusa", "2ffairtradeusa",      # residue + the real slug
+        "rocketdoctor", "2frocketdoctor",
+        "2forphanonly",                        # no stripped twin: left alone
+        "2fast",                               # a real company starting with 2f
+    ])))
+    hc.prune_existing(tmp_path, [hc.PLATFORM_BY_NAME["bamboohr"]],
+                      log=lambda m: None)
+    kept = set(json.loads(path.read_text()))
+    assert "2ffairtradeusa" not in kept and "fairtradeusa" in kept
+    assert "2frocketdoctor" not in kept and "rocketdoctor" in kept
+    assert "2forphanonly" in kept, "dropped a slug with no evidence it is residue"
+    assert "2fast" in kept, "ate a real company that starts with 2f"
