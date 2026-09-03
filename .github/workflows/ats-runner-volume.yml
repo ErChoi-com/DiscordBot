@@ -1,0 +1,69 @@
+name: ATS runner volume check
+
+# Can a runner validate ATS boards *under load*?
+#
+# The low-volume check found 128/128 agreement from a runner, which ruled out a
+# blanket block on the address but not the thing that actually decides this:
+# rate-limiting is triggered by volume, not identity. This runs 3,700 probes --
+# every one a board confirmed live from the bot's own host -- at the concurrency
+# the validator really uses.
+#
+# The number to read is FALSE_DEAD: boards known to exist that a runner scores
+# as gone. That is the failure the 2026-08-24 decision is about, because
+# validate_ats_slugs writes exactly that into dead_slugs and the bot reads those
+# files. "unreachable" is a refusal, which writes no mark and costs only a
+# wasted request -- a throughput problem rather than a correctness one.
+#
+# Writes nothing. No marks, no files, no commits, no published state. Even a
+# total failure here cannot corrupt anything, which is what makes it safe to run
+# the experiment at all.
+
+on:
+  push:
+    branches: [ats-commoncrawl-harvest]
+    paths:
+      - .github/workflows/ats-runner-volume.yml
+      - scripts/runner_volume_check.py
+      - scripts/runner_volume_control.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ats-runner-volume
+  cancel-in-progress: true
+
+jobs:
+  volume:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Probe 3,700 known-live boards
+        run: python scripts/runner_volume_check.py
+
+      - name: What the result means
+        if: always()
+        run: |
+          {
+            echo "## ATS runner volume check"
+            echo
+            echo "3,700 boards, all confirmed live from the bot's own host."
+            echo
+            echo "- **FALSE_DEAD** is the number that decides this. A board known"
+            echo "  to exist, scored as gone. Those are the verdicts that would be"
+            echo "  written into dead_slugs and suppress a live company."
+            echo "- **unreachable** is a refusal or timeout. It writes no mark, so"
+            echo "  it costs throughput rather than correctness."
+            echo
+            echo "Compare against the same script run on the bot's host."
+            echo "Nothing was written by this job either way."
+          } >> "$GITHUB_STEP_SUMMARY"
