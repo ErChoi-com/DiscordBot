@@ -1814,3 +1814,69 @@ def test_pid_alive_answers_for_this_process():
     # An unknown pid resolves to "held" rather than "free": waiting costs time,
     # stealing costs two runs dropping each other's finds.
     assert hc._pid_alive(0) is True
+
+
+# --------------------------------------------------------------------------
+# Shapes that reached the company slot and are not companies
+# --------------------------------------------------------------------------
+#
+# Each of these was counted in the harvested files before the rule existed, so
+# the numbers are what was actually collected rather than hypotheses. They
+# matter because ats_service probes every slug it holds on a recheck cycle, so
+# junk is not inert -- it is a permanent request cost.
+
+@pytest.mark.parametrize("slug", ["100", "104", "103644278", "3876393"])
+def test_a_bare_number_is_not_a_company(slug):
+    """Greenhouse URLs also take the form /<board>/jobs/<numeric-id>, and 325
+    ids reached the company slot that way. Every platform here identifies
+    companies by name; paylocity is keyed by an opaque id but has its own
+    extractor that never reaches this check."""
+    assert hc._looks_like_company(slug) is False
+
+
+@pytest.mark.parametrize("slug", ["llms.txt", "favicon.png", "index.css",
+                                  "sitemap_index.xml", "analytics.min.js"])
+def test_an_asset_filename_is_not_a_company(slug):
+    """The dot rule cannot catch these: txt, png and xml are all valid
+    two-or-more-letter TLDs, so they read as a company using its own domain.
+    27 were harvested, and llms.txt appeared on four separate platforms --
+    which is what gave it away."""
+    assert hc._looks_like_company(slug) is False
+
+
+@pytest.mark.parametrize("slug", ["en-us", "de-de", "pt-br", "fr-ca", "nl-nl"])
+def test_a_locale_is_not_a_company(slug):
+    """Rippling puts the locale in the same path position as the company, so
+    twelve of these were harvested as employers."""
+    assert hc._looks_like_company(slug) is False
+
+
+def test_a_two_and_two_name_is_not_mistaken_for_a_locale():
+    """The language half is checked against a real list rather than by shape,
+    because a shape rule would also reject a legitimate two-and-two name."""
+    assert hc._looks_like_company("go-go") is True
+    assert hc._looks_like_company("hi-fi") is True
+
+
+@pytest.mark.parametrize("slug", ["2fwww", "252fwww", "2fcareers-aei",
+                                  "252fcareers-mortensontest"])
+def test_percent_encoding_residue_is_not_a_company(slug):
+    """A %2f that was never decoded leaves a literal "2f" glued to the real
+    label, so www becomes 2fwww. 93 of these were harvested across bamboohr,
+    icims and applicantpro, each a duplicate of a slug already held under its
+    right name."""
+    assert hc._looks_like_company(slug) is False
+
+
+def test_a_company_that_really_starts_with_2f_survives():
+    """The residue rule only fires when what remains is itself a reserved word
+    or an obvious host label, so it cannot eat a real company."""
+    assert hc._looks_like_company("2fast") is True
+    assert hc._looks_like_company("2fresh") is True
+
+
+@pytest.mark.parametrize("slug", ["harrison&star", "affinity.co", "l-oreal",
+                                  "top_agency", "n1", "adept.ai"])
+def test_the_new_rules_keep_real_companies(slug):
+    """Every one of these is a real board held in the harvest."""
+    assert hc._looks_like_company(slug) is True

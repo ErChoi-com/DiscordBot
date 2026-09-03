@@ -115,6 +115,39 @@ def _normalise_slug(slug: str) -> str:
     return slug.rstrip(".-_")
 
 
+# Filenames that reach the company slot when a board host also serves assets
+# from its root. The dot rule above cannot catch them, because "txt", "png" and
+# "xml" are all valid two-or-more-letter TLDs and so read as a company using its
+# own domain. 27 of these were harvested -- llms.txt alone appeared on four
+# platforms, which is what gave it away.
+_ASSET_SUFFIX_RE = re.compile(
+    r"\.(?:txt|xml|png|jpe?g|svg|ico|css|js|html?|json|webp|gif|map|woff2?)$")
+
+# Web locales that appear in a company-shaped path position. Rippling puts the
+# locale in the same slot as the company, so twelve of these were harvested as
+# employers.
+#
+# A curated set rather than a language-plus-region shape rule, because the shape
+# is indistinguishable from a real name: "hi-fi" is Hindi plus Finland by that
+# test, and "no-go" is Norwegian plus Norway. This repo has already paid for a
+# blanket rejection once -- _WORKDAY_SITE_REJECT had to be carved back because
+# "jobs" is a real site name for 33 tenants -- so the trade is deliberate. A
+# locale not on this list survives as a slug and costs one probe; a real company
+# wrongly rejected is invisible forever.
+_LOCALE_SLUGS = frozenset("""
+    en-us en-gb en-ca en-au en-nz en-ie en-in en-za
+    de-de de-at de-ch fr-fr fr-ca fr-be fr-ch es-es es-mx es-ar es-cl es-co
+    pt-br pt-pt it-it nl-nl nl-be pl-pl sv-se da-dk fi-fi nb-no nn-no
+    cs-cz sk-sk hu-hu ro-ro bg-bg el-gr tr-tr ru-ru uk-ua
+    ja-jp ko-kr zh-cn zh-tw zh-hk th-th vi-vn id-id ms-my hi-in
+    he-il ar-ae ar-sa
+""".split())
+
+
+def _is_locale(slug: str) -> bool:
+    return slug in _LOCALE_SLUGS
+
+
 def _looks_like_company(slug: str) -> bool:
     """Structural plausibility check for a harvested slug.
 
@@ -136,6 +169,29 @@ def _looks_like_company(slug: str) -> bool:
     # companies.
     if not re.fullmatch(r"[a-z0-9][a-z0-9._&+-]*", slug):
         return False
+    # All digits. Every platform here identifies companies by name; a bare
+    # number is a job id or a page number that reached the company slot.
+    # Greenhouse harvested 325 of them -- "100", "104", "103644278" -- because
+    # its URLs also take the form /<board>/jobs/<numeric-id>. Paylocity is the
+    # one platform keyed by an opaque id, and it has its own extractor that
+    # never reaches this check.
+    if slug.isdigit():
+        return False
+    if _ASSET_SUFFIX_RE.search(slug):
+        return False
+    if _is_locale(slug):
+        return False
+    # Percent-encoding that was never decoded: a "%2f" in the source URL leaves
+    # a literal "2f" glued to the front of the real label, so www becomes 2fwww
+    # and careers-aei becomes 2fcareers-aei. 93 of these were harvested across
+    # bamboohr, icims and applicantpro, each one a duplicate of a slug already
+    # held under its right name. Only stripped when what remains is itself
+    # plausible, so a company legitimately starting with "2f" survives.
+    for residue in ("252f", "2f"):
+        if slug.startswith(residue) and len(slug) > len(residue) + 1:
+            rest = slug[len(residue):]
+            if rest in RESERVED_SEGMENTS or rest.startswith(("www", "careers-")):
+                return False
     # A dotted slug is usually a company using its own domain -- affinity.co,
     # akasa.com, alignment.org and adept.ai are all live boards -- so dots
     # cannot simply be rejected. What separates them from version strings is

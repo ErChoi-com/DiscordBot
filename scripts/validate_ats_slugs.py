@@ -189,7 +189,8 @@ _NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect)
 
 def _request(url: str, *, method: str = "GET", payload: dict | None = None,
              timeout: int = REQUEST_TIMEOUT,
-             follow_redirects: bool = True) -> tuple[int | None, bytes, str]:
+             follow_redirects: bool = True,
+             read_bytes: int = 2048) -> tuple[int | None, bytes, str]:
     """Returns (status, first bytes, final url). None status means no answer.
 
     The final URL matters: BambooHR answers an unknown tenant with a 200 that
@@ -203,7 +204,7 @@ def _request(url: str, *, method: str = "GET", payload: dict | None = None,
     opener = urllib.request.urlopen if follow_redirects else _NO_REDIRECT_OPENER.open
     try:
         with opener(req, timeout=timeout) as resp:
-            return resp.status, resp.read(2048), resp.geturl()
+            return resp.status, resp.read(read_bytes), resp.geturl()
     except urllib.error.HTTPError as exc:
         return exc.code, b"", url
     except Exception:
@@ -256,8 +257,14 @@ def live_lever(slug: str) -> bool:
                 return True
         except Unreachable:
             unreachable += 1
-    if unreachable == len(LEVER_API_HOSTS):
-        raise Unreachable("no region answered")
+    # Dead only when every region gave a definite answer and all of them said
+    # absent. A region that refused told us nothing, and the company may live
+    # there: one refusal paired with one 404 used to fall through to "dead",
+    # which is a false closure produced by load rather than by the company
+    # going away -- and refusals are most likely exactly when a pass is running
+    # sixteen workers against the API.
+    if unreachable:
+        raise Unreachable(f"{unreachable} region(s) did not answer")
     return False
 
 
@@ -312,8 +319,13 @@ def live_icims(slug: str) -> bool:
                 return True
         except Unreachable:
             unreachable += 1
-    if unreachable == len(forms):
-        raise Unreachable("no form answered")
+    # Same rule as lever: the two host forms are mutually exclusive, so a 404
+    # on one form is only evidence of absence if the other form actually
+    # answered. iCIMS has the lowest live rate and the most refusals of any
+    # platform here, so this is where a partial-answer false closure was most
+    # likely to happen.
+    if unreachable:
+        raise Unreachable(f"{unreachable} host form(s) did not answer")
     return False
 
 
@@ -394,8 +406,17 @@ def live_smartrecruiters(slug: str) -> bool:
     # conflation is in the right direction for this bot -- a board with no
     # postings yields no jobs either way -- and the 90-day recheck picks the
     # company back up when it advertises again.
+    # Read past the default cap. The verdict depends on parsing the body, and a
+    # truncated JSON document raises, which this turns into "unknown". That
+    # failure is not neutral: a company with postings returns the long response
+    # and would go unknown, while one with none returns a short
+    # {"totalFound":0,...} that parses cleanly and is marked dead. So truncation
+    # would bias the platform toward dead precisely where it matters. Measured
+    # at limit=1 across twenty real companies, none truncated at 2048 -- but the
+    # margin is not worth relying on when the fix is a larger read.
     status, body, _ = _request(
-        f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=1")
+        f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=1",
+        read_bytes=16384)
     if status != 200:
         return _decide(status)
     try:
@@ -425,7 +446,16 @@ def live_jazzhr(slug: str) -> bool:
 
 
 def live_recruitee(slug: str) -> bool:
-    status, _, _ = _request(f"https://{slug}.recruitee.com/")
+    # The careers page answers 200 for anything: an unknown subdomain is
+    # redirected to recruitee.com and, because redirects are followed, arrives
+    # as a 200 like any real board. Probing it could only ever say "live" --
+    # three invented company names all came back live, which is the same
+    # signature that four other probes were fixed for.
+    #
+    # The offers API 404s an unknown company outright, so the status is the
+    # whole answer. It is also the endpoint _scrape_recruitee reads, so a
+    # company this calls live is one the scraper can actually pull jobs from.
+    status, _, _ = _request(f"https://{slug}.recruitee.com/api/offers/")
     return _decide(status)
 
 

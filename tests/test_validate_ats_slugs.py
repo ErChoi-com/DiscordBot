@@ -1177,3 +1177,70 @@ def test_applicantpro_accepts_a_real_document(monkeypatch):
     monkeypatch.setattr(v, "_request", lambda *a, **k: (
         200, b"<!DOCTYPE html>\n<html>...", "x"))
     assert v.live_applicantpro("acme") is True
+
+
+# --------------------------------------------------------------------------
+# A partial answer is not a closure
+# --------------------------------------------------------------------------
+
+def test_lever_does_not_mark_dead_when_a_region_refused(monkeypatch):
+    """One region refused, the other 404d. The company may live in the region
+    that never answered, so this is not evidence of absence -- and refusals are
+    likeliest exactly when a pass runs sixteen workers at the API, so the false
+    closures arrive in bulk when they arrive at all."""
+    seen = iter([(429, b"", ""), (404, b"", "")])
+    monkeypatch.setattr(v, "_request", lambda *a, **k: next(seen))
+    with pytest.raises(v.Unreachable):
+        v.live_lever("acme")
+
+
+def test_lever_marks_dead_when_every_region_answered_absent(monkeypatch):
+    seen = iter([(404, b"", ""), (404, b"", "")])
+    monkeypatch.setattr(v, "_request", lambda *a, **k: next(seen))
+    assert v.live_lever("acme") is False
+
+
+def test_icims_does_not_mark_dead_when_a_host_form_refused(monkeypatch):
+    """The two iCIMS host forms are mutually exclusive, so a 404 on one is only
+    evidence of absence if the other actually answered."""
+    seen = iter([(503, b"", ""), (404, b"", "")])
+    monkeypatch.setattr(v, "_request", lambda *a, **k: next(seen))
+    with pytest.raises(v.Unreachable):
+        v.live_icims("acme")
+
+
+def test_icims_marks_dead_when_both_forms_answered_absent(monkeypatch):
+    seen = iter([(404, b"", ""), (404, b"", "")])
+    monkeypatch.setattr(v, "_request", lambda *a, **k: next(seen))
+    assert v.live_icims("acme") is False
+
+
+def test_recruitee_rejects_a_company_that_does_not_exist(monkeypatch):
+    """The careers page answers 200 for anything -- an unknown subdomain is
+    redirected to recruitee.com and, redirects being followed, arrives as a 200.
+    Probing it could only ever say live: three invented names all came back
+    live. The offers API 404s instead, and is what the scraper reads."""
+    monkeypatch.setattr(v, "_request", lambda *a, **k: (404, b"", ""))
+    assert v.live_recruitee("nosuchco") is False
+
+
+def test_recruitee_accepts_a_company_with_an_offers_feed(monkeypatch):
+    monkeypatch.setattr(v, "_request", lambda *a, **k: (200, b'{"offers":[]}', ""))
+    assert v.live_recruitee("acme") is True
+
+
+def test_smartrecruiters_reads_past_the_default_cap(monkeypatch):
+    """The verdict depends on parsing the body, and a truncated document raises
+    -- which becomes "unknown". That is not neutral: a company with postings
+    sends the long response and would go unknown, while one with none sends a
+    short empty result that parses and is marked dead. Truncation would bias
+    the platform toward dead."""
+    seen = {}
+
+    def fake(url, **kw):
+        seen["read_bytes"] = kw.get("read_bytes")
+        return (200, b'{"totalFound":1,"content":[{"id":"1"}]}', "x")
+
+    monkeypatch.setattr(v, "_request", fake)
+    v.live_smartrecruiters("acme")
+    assert seen["read_bytes"] > 2048
