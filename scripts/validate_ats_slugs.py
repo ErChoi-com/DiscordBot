@@ -592,6 +592,29 @@ def save_dead(platform: str, dead: dict[str, str]) -> None:
                 pass
 
 
+def apply_checked(checked: dict[str, str], result: dict,
+                  today: _dt.date) -> dict[str, str]:
+    """Fold this run's live answers into the confirmed-live map, in place.
+
+    Split out so a dry run can report the same numbers a real one would write
+    without re-implementing the rules here -- two copies of this would drift,
+    and a dry run that disagrees with the real run is worse than no dry run.
+
+    A slug found dead drops out, so it is never treated as recently-confirmed,
+    and entries past twice the recheck window are dropped so the store cannot
+    grow without bound.
+    """
+    stamp = today.isoformat()
+    for slug in result["_live"]:
+        checked[slug] = stamp
+    for slug in result["_dead"]:
+        checked.pop(slug, None)
+    cutoff = (today - _dt.timedelta(days=LIVE_RECHECK_DAYS * 2)).isoformat()
+    for slug in [s for s, when in checked.items() if when < cutoff]:
+        del checked[slug]
+    return checked
+
+
 def save_dead_merged(platform: str, result: dict, today: _dt.date,
                      ttl_days: int) -> dict[str, int]:
     """Re-read the on-disk marks, apply this run's verdicts, then write.
@@ -618,15 +641,7 @@ def save_dead_merged(platform: str, result: dict, today: _dt.date,
     # re-confirming them. Read-modify-write for the same reason as the dead
     # map, and a slug found dead drops out of here so it is never treated as
     # recently-confirmed.
-    checked = load_checked(platform)
-    stamp = today.isoformat()
-    for slug in result["_live"]:
-        checked[slug] = stamp
-    for slug in result["_dead"]:
-        checked.pop(slug, None)
-    cutoff = (today - _dt.timedelta(days=LIVE_RECHECK_DAYS * 2)).isoformat()
-    for slug in [s for s, when in checked.items() if when < cutoff]:
-        del checked[slug]
+    checked = apply_checked(load_checked(platform), result, today)
     save_checked(platform, checked)
 
     changes["expired"] = expired
@@ -1099,9 +1114,16 @@ def _run(args, log: Callable[[str], None], _lock) -> int:
         elif unscrapeable:
             any_probed = True
         if args.dry_run:
-            changes = apply_results(dict(dead_map), result, today)
+            # Against a copy, and then reported *from the copy*. Reading the
+            # count off the untouched map made a dry run report the dead total
+            # from before its own verdicts -- 0 where the real run wrote 1 --
+            # so the one number someone previews a run for was the wrong one.
+            preview = dict(dead_map)
+            changes = apply_results(preview, result, today)
             changes["expired"] = expired
-            changes["dead_total"] = len(dead_map)
+            changes["dead_total"] = len(preview)
+            changes["checked_total"] = len(
+                apply_checked(load_checked(platform), result, today))
         else:
             # Re-read before writing: the bot marks these same files from its
             # own scrape cycles while this runs.

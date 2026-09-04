@@ -15,6 +15,7 @@ Everything here is hermetic: PROBES is stubbed, so no network.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import sys
 from pathlib import Path
 
@@ -161,3 +162,93 @@ def test_unknown_slugs_are_left_exactly_as_they_were():
     assert dead == {"already": "2026-01-01"}, "an unresolved slug was re-dated"
     assert "timed-out" not in dead, "a timeout was recorded as dead"
     assert counts == {"added": 0, "revived": 0, "redated": 0}
+
+
+# ── --dry-run must report what a real run would do, and write nothing ───────
+#
+# Two separate promises, and the second is the one that rots quietly: a dry run
+# that writes nothing but reports different numbers than the real run is worse
+# than no dry run, because it is trusted. dead_total was read off the map from
+# *before* the run's own verdicts (0 where the real run wrote 1), and
+# checked_total was missing from dry runs altogether -- so the JSON summary,
+# which is consumed by tooling, had a different shape depending on the flag.
+
+@pytest.fixture()
+def sandbox(tmp_path, monkeypatch):
+    """Redirect every data directory the validator touches into tmp_path."""
+    for name in ("harvest", "dead", "checked", "company"):
+        (tmp_path / name).mkdir()
+    monkeypatch.setattr(v, "HARVEST_DIR", tmp_path / "harvest")
+    monkeypatch.setattr(v, "DEAD_DIR", tmp_path / "dead")
+    monkeypatch.setattr(v, "CHECKED_DIR", tmp_path / "checked")
+    monkeypatch.setattr(v, "COMPANY_DIR", tmp_path / "company")
+    (tmp_path / "harvest" / "lever.json").write_text(
+        json.dumps(["alive", "alive2", "gone"]), encoding="utf-8")
+    monkeypatch.setitem(v.PROBES, "lever", lambda slug: slug.startswith("alive"))
+    return tmp_path
+
+
+def _summary(capsys, dry):
+    args = ["--platform", "lever", "--json", "--budget-seconds", "0"]
+    if dry:
+        args.append("--dry-run")
+    assert v.main(args) == 0
+    out = capsys.readouterr().out
+    return json.loads(out[out.index("{"):])["platforms"]["lever"]
+
+
+def test_dry_run_writes_nothing(sandbox, capsys):
+    _summary(capsys, dry=True)
+    assert list((sandbox / "dead").iterdir()) == []
+    assert list((sandbox / "checked").iterdir()) == []
+
+
+def test_a_real_run_does_write(sandbox, capsys):
+    """The guard must not disable validation outright."""
+    _summary(capsys, dry=False)
+    assert (sandbox / "dead" / "lever.json").exists()
+    assert (sandbox / "checked" / "lever.json").exists()
+
+
+def test_dry_run_summary_matches_the_real_one(sandbox, capsys):
+    """Same keys and same values -- this is what makes a preview worth reading."""
+    dry = _summary(capsys, dry=True)
+    real = _summary(capsys, dry=False)
+    assert dry == real
+
+
+def test_dry_run_reports_the_dead_total_it_would_leave_behind(sandbox, capsys):
+    """Not the total from before its own verdicts.
+
+    "How many will be dead after this" is the question a dry run is run to
+    answer, and it was answered with the count from before the run.
+    """
+    dry = _summary(capsys, dry=True)
+    assert dry["dead_total"] == 1
+    assert dry["added"] == 1
+
+
+def test_dry_run_reports_the_confirmed_live_total(sandbox, capsys):
+    """checked_total was absent on dry runs, so the shape depended on the flag."""
+    dry = _summary(capsys, dry=True)
+    assert dry["checked_total"] == 2
+
+
+# ── the shared confirmed-live update ────────────────────────────────────────
+
+def test_apply_checked_records_live_and_drops_dead():
+    checked = {"stale-dead": "2026-09-01"}
+    out = v.apply_checked(
+        checked, {"_live": ["a", "b"], "_dead": ["stale-dead"]},
+        dt.date(2026, 9, 4))
+    assert out["a"] == "2026-09-04" and out["b"] == "2026-09-04"
+    assert "stale-dead" not in out, "a slug found dead is still confirmed-live"
+
+
+def test_apply_checked_expires_entries_past_twice_the_recheck_window():
+    today = dt.date(2026, 9, 4)
+    old = (today - dt.timedelta(days=v.LIVE_RECHECK_DAYS * 2 + 1)).isoformat()
+    recent = (today - dt.timedelta(days=1)).isoformat()
+    out = v.apply_checked({"old": old, "recent": recent},
+                          {"_live": [], "_dead": []}, today)
+    assert "old" not in out and "recent" in out
