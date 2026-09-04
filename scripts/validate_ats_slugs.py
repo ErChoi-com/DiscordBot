@@ -828,6 +828,25 @@ def validate_platform(platform: str, slugs: Iterable[str], *,
 
 ENDPOINT_CANARIES = 6
 COLLAPSE_RATE = 0.5
+#: Below this many probes a collapsed rate is not yet evidence of anything, and
+#: the damage a wrong call could do is bounded by the same number.
+COLLAPSE_MIN_PROBES = 20
+
+
+def collapse_suspected(probed: int, live: int) -> bool:
+    """Whether this platform's live rate collapsed far enough to be suspicious.
+
+    Split out of the run loop so it can be tested: it is the gate in front of
+    the only path that discards a platform's results, and everything behind it
+    -- endpoint_healthy, the canaries -- is unreachable when this is wrong.
+
+    A zero-probe run is not a collapse. Reading it as one (0/0 as a 0% rate)
+    would send every skipped platform down the outage path and cost a round of
+    canary probes each time.
+    """
+    if probed < COLLAPSE_MIN_PROBES:
+        return False
+    return (live / probed) < COLLAPSE_RATE
 
 
 def endpoint_healthy(platform: str, canaries: list[str], log=lambda m: None) -> bool:
@@ -1058,7 +1077,7 @@ def _run(args, log: Callable[[str], None], _lock) -> int:
         # the check costs requests, and a healthy run should not pay for them.
         probed = result["probed"]
         rate = (result["live"] / probed) if probed else 1.0
-        if probed >= 20 and rate < COLLAPSE_RATE:
+        if collapse_suspected(probed, result["live"]):
             canaries = pick_canaries(load_checked(platform), dead_map)
             if not endpoint_healthy(platform, canaries, log=log):
                 log(f"[validate] {platform}: live rate {rate:.1%} over {probed} "
