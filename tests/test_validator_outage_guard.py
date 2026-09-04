@@ -339,3 +339,109 @@ def test_sample_verdicts_are_recorded(sandbox, capsys):
                    "--budget-seconds", "0"]) == 0
     assert (sandbox / "dead" / "lever.json").exists(), (
         "--sample stopped recording; it is a working pass, not an audit")
+
+
+# ── reconciling the stores against the company lists ────────────────────────
+#
+# prune_existing makes filter fixes retroactive by removing junk from the
+# harvest. Nothing removed the marks that junk had already collected, so they
+# sat in the files the bot loads on every scrape until the 90-day TTL happened
+# to reach them: 539 orphaned dead marks and 19 orphaned confirmed-live ones,
+# and the sample is exactly the junk list -- '100', 'ads.txt', '2fwww',
+# 'en-ca', 'llms.txt'.
+
+def test_marks_for_slugs_no_longer_harvested_are_dropped():
+    dead = {"real": "2026-09-01", "ads.txt": "2026-09-01", "100": "2026-09-01"}
+    checked = {"real2": "2026-09-01", "favicon.png": "2026-09-01"}
+    stats = reconcile = v.reconcile_stores(
+        dead, checked, ["real", "real2"] + [f"pad{i}" for i in range(100)])
+    assert set(dead) == {"real"}
+    assert set(checked) == {"real2"}
+    assert stats["dead_orphans"] == 2 and stats["checked_orphans"] == 1
+    assert reconcile["refused"] == 0
+
+
+def test_an_empty_candidate_list_refuses_instead_of_deleting_everything():
+    """The catastrophic case, and the reason this function has a guard.
+
+    A missing or unreadable harvest file makes load_candidates return nothing,
+    which makes *every* mark look orphaned. Deleting on that input would wipe
+    the platform's entire memory of what is dead, silently, and the next scrape
+    would re-probe tens of thousands of known-dead boards.
+    """
+    dead = {"a": "2026-09-01", "b": "2026-09-01"}
+    checked = {"c": "2026-09-01"}
+    stats = v.reconcile_stores(dead, checked, [])
+    assert stats["refused"] == 1
+    assert set(dead) == {"a", "b"} and set(checked) == {"c"}
+
+
+def test_an_implausible_drop_share_refuses():
+    """A truncated candidate list is not empty, so the empty check alone is not
+    enough -- the share of the store being dropped is the real signal."""
+    dead = {f"s{i}": "2026-09-01" for i in range(100)}
+    checked = {}
+    stats = v.reconcile_stores(dead, checked, ["s0", "s1", "s2"])
+    assert stats["refused"] == 1
+    assert len(dead) == 100, "a truncated candidate list deleted 97 marks"
+
+
+def test_a_handful_of_orphans_is_allowed_on_a_small_store():
+    """A rate-only guard leaves small stores permanently un-reconcilable.
+
+    rippling holds 35 dead marks, so four orphans is 11% and would be refused
+    forever. Dropping at most RECONCILE_MIN_DROP cannot do real damage even if
+    the candidate list is wrong, and the empty-list check still covers the
+    catastrophic case.
+    """
+    dead = {f"s{i}": "2026-09-01" for i in range(8)}
+    stats = v.reconcile_stores(dead, {}, ["s0", "s1", "s2", "s3", "s4"])
+    assert stats["refused"] == 0 and stats["dead_orphans"] == 3
+    assert len(dead) == 5
+
+
+def test_a_drop_share_within_the_cap_proceeds():
+    """The real numbers are ~1%, so the cap must not block ordinary use."""
+    dead = {f"s{i}": "2026-09-01" for i in range(100)}
+    stats = v.reconcile_stores(dead, {}, [f"s{i}" for i in range(95)])
+    assert stats["refused"] == 0 and stats["dead_orphans"] == 5
+    assert len(dead) == 95
+
+
+def test_reconciliation_refusal_is_logged():
+    """A silent refusal looks identical to nothing needing reconciliation."""
+    lines: list[str] = []
+    v.reconcile_stores({"a": "2026-09-01"}, {}, [], log=lines.append,
+                       platform="lever")
+    assert lines and "refusing" in lines[-1]
+
+
+def test_reconciliation_is_reported_in_both_run_modes(sandbox, capsys):
+    """Same dry/real parity rule as the rest of the summary."""
+    (sandbox / "dead" / "lever.json").write_text(
+        json.dumps({"alive": "2026-09-01", "ads.txt": "2026-09-01"}),
+        encoding="utf-8")
+    dry = _summary(capsys, dry=True)
+    assert dry["dead_orphans"] == 1
+
+    (sandbox / "dead" / "lever.json").write_text(
+        json.dumps({"alive": "2026-09-01", "ads.txt": "2026-09-01"}),
+        encoding="utf-8")
+    real = _summary(capsys, dry=False)
+    assert real["dead_orphans"] == 1
+
+
+def test_a_dry_run_does_not_write_the_reconciled_stores(sandbox, capsys):
+    original = json.dumps({"alive": "2026-09-01", "ads.txt": "2026-09-01"})
+    (sandbox / "dead" / "lever.json").write_text(original, encoding="utf-8")
+    _summary(capsys, dry=True)
+    assert (sandbox / "dead" / "lever.json").read_text(encoding="utf-8") == original
+
+
+def test_a_real_run_persists_the_reconciled_stores(sandbox, capsys):
+    (sandbox / "dead" / "lever.json").write_text(
+        json.dumps({"alive": "2026-09-01", "ads.txt": "2026-09-01"}),
+        encoding="utf-8")
+    _summary(capsys, dry=False)
+    on_disk = json.loads((sandbox / "dead" / "lever.json").read_text(encoding="utf-8"))
+    assert "ads.txt" not in on_disk, "the orphan survived a real run"

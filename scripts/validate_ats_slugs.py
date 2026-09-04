@@ -592,6 +592,72 @@ def save_dead(platform: str, dead: dict[str, str]) -> None:
                 pass
 
 
+#: Refuse to reconcile if it would drop more than this share of a store. The
+#: candidate list is read from files, and a missing or truncated one reads as
+#: "few candidates", which would orphan -- and therefore delete -- most of the
+#: store. Same shape as COLLAPSE_RATE: the destructive path asks whether the
+#: input is plausible before acting on it.
+RECONCILE_MAX_DROP_RATE = 0.10
+#: ...but always allow a handful. On a small store any real orphan breaches the
+#: rate -- rippling holds 35 dead marks, so 4 orphans is 11% -- and a rate-only
+#: guard would leave those there permanently. Dropping at most this many cannot
+#: do meaningful damage even if the candidate list is wrong.
+RECONCILE_MIN_DROP = 5
+
+
+def reconcile_stores(dead: dict[str, str], checked: dict[str, str],
+                     candidates: Iterable[str],
+                     log: Callable[[str], None] = lambda _m: None,
+                     platform: str = "") -> dict[str, int]:
+    """Drop marks for slugs that are no longer in any company list.
+
+    `prune_existing` makes filter fixes retroactive by removing junk from the
+    harvest -- bare numbers, ads.txt, favicon.png, locale segments, undecoded
+    percent-encoding. Nothing removed the marks those slugs had already
+    collected, so they sit in the files the bot loads on every scrape until the
+    90-day TTL happens to reach them. Measured before writing this: 539 orphaned
+    dead marks and 19 orphaned confirmed-live entries, and the sample is exactly
+    the junk list ('100', 'ads.txt', '2fwww', 'en-ca', 'llms.txt').
+
+    Refuses rather than acts when the candidate list looks implausible. An
+    empty or truncated harvest file makes *every* mark look orphaned, and this
+    deletes what it is given -- so "no candidates" must never read as "nothing
+    is real". That failure would be silent and would take the whole platform's
+    memory of what is dead with it.
+    """
+    known = set(candidates)
+    stats = {"dead_orphans": 0, "checked_orphans": 0, "refused": 0}
+    if not known:
+        log(f"[validate] {platform}: no candidates loaded -- refusing to "
+            f"reconcile {len(dead)} dead / {len(checked)} confirmed-live marks")
+        stats["refused"] = 1
+        return stats
+
+    dead_gone = [s for s in dead if s not in known]
+    checked_gone = [s for s in checked if s not in known]
+    for store, gone, label in ((dead, dead_gone, "dead"),
+                               (checked, checked_gone, "confirmed-live")):
+        if (store and len(gone) > RECONCILE_MIN_DROP
+                and len(gone) / len(store) > RECONCILE_MAX_DROP_RATE):
+            log(f"[validate] {platform}: {len(gone)} of {len(store)} {label} "
+                f"marks look orphaned -- refusing, the candidate list is "
+                f"probably incomplete")
+            stats["refused"] = 1
+            return stats
+
+    for slug in dead_gone:
+        del dead[slug]
+    for slug in checked_gone:
+        del checked[slug]
+    stats["dead_orphans"] = len(dead_gone)
+    stats["checked_orphans"] = len(checked_gone)
+    if dead_gone or checked_gone:
+        log(f"[validate] {platform}: dropped {len(dead_gone)} dead and "
+            f"{len(checked_gone)} confirmed-live marks for slugs no longer "
+            f"in any company list")
+    return stats
+
+
 def apply_checked(checked: dict[str, str], result: dict,
                   today: _dt.date) -> dict[str, str]:
     """Fold this run's live answers into the confirmed-live map, in place.
@@ -1047,9 +1113,19 @@ def _run(args, log: Callable[[str], None], _lock) -> int:
     for platform in platforms:
         dead_map = load_dead(platform)
         expired = purge_expired(dead_map, today, args.ttl_days)
+        # Before selecting targets: a mark for a slug that is no longer in any
+        # company list can never be re-probed, so it would otherwise sit in the
+        # file the bot loads until the TTL happened to reach it.
+        candidates = load_candidates(platform)
+        checked_map = load_checked(platform)
+        recon = reconcile_stores(dead_map, checked_map, candidates,
+                                 log=log, platform=platform)
+        if (recon["dead_orphans"] or recon["checked_orphans"]) and not args.dry_run:
+            save_dead(platform, dead_map)
+            save_checked(platform, checked_map)
         targets = select_targets(platform, dead_map, recheck_dead=args.recheck_dead,
                                  limit=args.limit, sample=args.sample, today=today)
-        total = len(load_candidates(platform))
+        total = len(candidates)
         if targets:
             any_targets = True
         if not targets:
@@ -1057,7 +1133,7 @@ def _run(args, log: Callable[[str], None], _lock) -> int:
                 f"({total} known, {len(dead_map)} dead)")
             summary[platform] = {"probed": 0, "live": 0, "dead": 0, "unknown": 0,
                                  "known": total, "dead_total": len(dead_map),
-                                 "expired": expired}
+                                 "expired": expired, **recon}
             if expired and not args.dry_run:
                 # Same race as the probing path: re-read so a TTL purge does
                 # not roll back marks the bot made while this was running.
@@ -1151,7 +1227,7 @@ def _run(args, log: Callable[[str], None], _lock) -> int:
             "dead": result["dead"], "unknown": result["unknown"],
             "live_rate": round(rate, 1), "known": total,
             "deferred": result.get("deferred", 0),
-            "dead_total": len(dead_map), "expired": expired, **changes,
+            "dead_total": len(dead_map), "expired": expired, **recon, **changes,
         }
 
     if args.audit_sample > 0:
