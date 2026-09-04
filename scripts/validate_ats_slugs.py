@@ -476,7 +476,23 @@ def _smartrecruiters_company_exists(slug: str) -> bool:
 
 
 def live_rippling(slug: str) -> bool:
-    status, _, _ = _request(f"https://ats.rippling.com/{slug}/jobs")
+    # The board page and the API disagree, and the API is the one that matters:
+    # it is what _scrape_rippling reads, so a company this calls live is one the
+    # bot can actually pull jobs from.
+    #
+    # The board page 200s for companies whose API board 404s. That produced a
+    # loop rather than a one-off wrong answer: this probe revived the mark, the
+    # scraper's next pass got a 404 from the API and marked it dead again, and
+    # the pair traded the same three slugs indefinitely, spending requests on
+    # both sides each cycle. qucareers, rabot-energy and whitehatgaming were
+    # each marked dead on 2026-09-03 and answering "live" here the next day.
+    #
+    # Verified: the API 404s invented slugs and answers 200 for all ten
+    # known-live companies sampled, including ones advertising nothing -- so
+    # this does not reintroduce the "no jobs means no company" conflation that
+    # smartrecruiters had.
+    status, _, _ = _request(
+        f"https://api.rippling.com/platform/api/ats/v1/board/{slug}/jobs")
     return _decide(status)
 
 

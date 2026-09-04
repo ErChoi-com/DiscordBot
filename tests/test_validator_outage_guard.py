@@ -898,3 +898,69 @@ def test_the_budget_message_and_the_storm_message_are_distinct():
     v.validate_platform("workable", [f"s{i}" for i in range(60)],
                         probe=_storm_probe(), workers=2, log=lines.append)
     assert not any("budget spent" in line for line in lines)
+
+
+# ── rippling: probe the endpoint the scraper reads ──────────────────────────
+#
+# The public board page and the ATS API disagree: the page 200s for companies
+# whose API board 404s. Because the probe read the page and _scrape_rippling
+# reads the API, the two traded the same slugs indefinitely -- the validator
+# revived the mark, the scraper's next pass got a 404 and marked it dead again.
+# qucareers, rabot-energy and whitehatgaming were each marked dead on
+# 2026-09-03 and reported live the following day, three times out of three.
+#
+# This is the same rule live_recruitee already states: a company the probe calls
+# live has to be one the bot can actually pull jobs from.
+
+def test_rippling_probes_the_api_not_the_board_page(monkeypatch):
+    asked: list[str] = []
+
+    def fake(url, **kwargs):
+        asked.append(url)
+        return 200, b"[]", url
+
+    monkeypatch.setattr(v, "_request", fake)
+    v.live_rippling("acme")
+    assert asked, "no request was made"
+    assert "api.rippling.com" in asked[0], asked
+    assert "ats.rippling.com" not in asked[0], (
+        "the board page 200s for companies the scraper cannot read")
+
+
+def test_a_company_the_scraper_cannot_read_stays_dead(monkeypatch):
+    """The API 404 is the verdict that matters -- reviving on the board page is
+    what created the loop."""
+    monkeypatch.setattr(v, "_request", lambda url, **kw: (404, b"", url))
+    assert v.live_rippling("qucareers") is False
+
+
+def test_a_rippling_board_with_no_jobs_is_still_live(monkeypatch):
+    """The API answers 200 with an empty list for a real company advertising
+    nothing. Reading that as dead would reintroduce exactly the conflation
+    smartrecruiters was fixed for."""
+    monkeypatch.setattr(v, "_request", lambda url, **kw: (200, b"[]", url))
+    assert v.live_rippling("webber-restaurant-group") is True
+
+
+def test_a_rippling_refusal_is_unreachable(monkeypatch):
+    for status in (403, 429, 503):
+        monkeypatch.setattr(v, "_request", lambda url, **kw: (status, b"", url))
+        with pytest.raises(v.Unreachable):
+            v.live_rippling("acme")
+
+
+def test_the_rippling_probe_and_scraper_share_an_endpoint():
+    """Pins the alignment itself.
+
+    Either side drifting to a different URL brings the loop back, and the loop
+    is invisible in any single run -- each side looks locally correct.
+    """
+    import inspect
+
+    from services import ats_service
+
+    probe_src = inspect.getsource(v.live_rippling)
+    scraper_src = inspect.getsource(ats_service._scrape_rippling)
+    path = "/platform/api/ats/v1/board/"
+    assert path in probe_src, "the probe stopped using the ATS API"
+    assert path in scraper_src, "the scraper moved off the ATS API"
