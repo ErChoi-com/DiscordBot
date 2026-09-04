@@ -313,7 +313,15 @@ def live_icims(slug: str) -> bool:
     forms = [slug] if slug.startswith("careers-") else [f"careers-{slug}", slug]
     unreachable = 0
     for host in forms:
-        status, _, _ = _request(f"https://{host}.icims.com/sitemap.xml")
+        status, _, final = _request(f"https://{host}.icims.com/sitemap.xml")
+        # An iCIMS infrastructure host answers 200 and redirects to the vendor's
+        # own site: www4.icims.com/sitemap.xml ends at www.icims.com. Without
+        # this the probe reads that as a live board, which is how www4 came to
+        # sit in the candidate list looking valid. Real tenants stay on their
+        # own host -- measured across four of them, every 200 kept its hostname.
+        # Same tell live_bamboohr uses, for the same reason.
+        if status == 200 and final and f"{host}.icims.com" not in final:
+            continue
         try:
             if _decide(status):
                 return True
@@ -786,6 +794,31 @@ def select_targets(platform: str, dead: dict[str, str], *, recheck_dead: bool,
     return ordered
 
 
+def _only_guessed_infra(slug: str) -> bool:
+    """Whether the extractor's sole objection to *slug* is a guess about names.
+
+    The harvester drops subdomains like www, api and cdn, plus numbered forms
+    of them, as infrastructure. As a harvest-time filter that is sound: www4 and
+    api2 both redirect to the vendor's own marketing site, so nothing is lost by
+    never collecting them.
+
+    Retiring an *existing* candidate on the same rule is a different act. This
+    function's caller marks slugs dead without probing, on the contract that
+    they cannot correspond to a board whatever the network says -- and a numbered
+    label can. mx51.bamboohr.com serves tenant JSON from its own host and had
+    been dead-marked since 2026-09-01 while answering. A bare label cannot: www,
+    api and cdn are host roles, not tenants, so those stay retired.
+
+    So the guess costs one probe instead of a dead mark, and the answer then
+    comes from the network. Restating the pattern here rather than asking the
+    extractor is deliberate and narrow: the extractor cannot report *why* it
+    refused, and the two uses genuinely want different answers.
+    """
+    if not _harvest._INFRA_SUBDOMAIN_RE.match(slug):
+        return False
+    return any(ch.isdigit() for ch in slug)
+
+
 def partition_unscrapeable(platform: str, slugs: Iterable[str]) -> tuple[list[str], list[str]]:
     """Split slugs into (unscrapeable, worth probing).
 
@@ -809,7 +842,7 @@ def partition_unscrapeable(platform: str, slugs: Iterable[str]) -> tuple[list[st
     unscrapeable: list[str] = []
     probe_me: list[str] = []
     for slug in slugs:
-        if _harvest._current_identifier(plat, slug) is None:
+        if _harvest._current_identifier(plat, slug) is None and not _only_guessed_infra(slug):
             unscrapeable.append(slug)
         else:
             probe_me.append(slug)

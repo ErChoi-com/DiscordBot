@@ -445,3 +445,91 @@ def test_a_real_run_persists_the_reconciled_stores(sandbox, capsys):
     _summary(capsys, dry=False)
     on_disk = json.loads((sandbox / "dead" / "lever.json").read_text(encoding="utf-8"))
     assert "ads.txt" not in on_disk, "the orphan survived a real run"
+
+
+# ── live_icims must not mistake iCIMS's own site for a tenant ───────────────
+#
+# An iCIMS infrastructure host answers 200 and redirects to the vendor's site:
+# www4.icims.com/sitemap.xml ends at www.icims.com. live_icims trusted the
+# status alone, so it read that as a live board -- the same failure live_bamboohr
+# already guards against by checking the final URL. Invented slugs 404 properly,
+# which is why the probe-discrimination check never caught this: the blind spot
+# is real hostnames that are not tenants.
+
+def _icims_request(monkeypatch, table):
+    """Stub _request as {host: (status, final_url)}."""
+    def fake(url, **kwargs):
+        host = url.split("//", 1)[1].split(".icims.com", 1)[0]
+        status, final = table.get(host, (404, url))
+        return status, b"", final
+    monkeypatch.setattr(v, "_request", fake)
+
+
+def test_a_200_that_redirects_off_the_tenant_host_is_not_a_board(monkeypatch):
+    _icims_request(monkeypatch, {
+        "www4": (200, "https://www.icims.com/"),
+        "careers-www4": (404, "https://careers-www4.icims.com/sitemap.xml"),
+    })
+    assert v.live_icims("www4") is False
+
+
+def test_a_real_tenant_keeps_its_hostname_and_is_live(monkeypatch):
+    _icims_request(monkeypatch, {
+        "careers-kearneyco": (200, "https://careers-kearneyco.icims.com/sitemap.xml"),
+    })
+    assert v.live_icims("kearneyco") is True
+
+
+def test_the_second_host_form_is_still_tried_after_a_redirect(monkeypatch):
+    """The redirect rules out that form, not the company.
+
+    Returning False on the first form would lose every board whose other form
+    is the live one -- and the two forms are mutually exclusive, so that is
+    roughly half of them.
+    """
+    _icims_request(monkeypatch, {
+        "careers-acme": (200, "https://www.icims.com/"),
+        "acme": (200, "https://acme.icims.com/sitemap.xml"),
+    })
+    assert v.live_icims("acme") is True
+
+
+def test_an_unreachable_form_still_raises_rather_than_reporting_dead(monkeypatch):
+    """Unchanged behaviour, pinned: a refusal is not evidence of absence."""
+    _icims_request(monkeypatch, {
+        "careers-acme": (None, None),
+        "acme": (404, "https://acme.icims.com/sitemap.xml"),
+    })
+    with pytest.raises(v.Unreachable):
+        v.live_icims("acme")
+
+
+# ── partition_unscrapeable must not condemn a guess ─────────────────────────
+
+@pytest.mark.parametrize("platform, slug", [("bamboohr", "mx51"), ("icims", "www4")])
+def test_a_numbered_infra_label_is_probed_not_retired(platform, slug):
+    """mx51.bamboohr.com serves tenant JSON from its own host and had been
+    dead-marked since 2026-09-01 without ever being asked.
+
+    The harvest-time filter that drops these is sound -- nothing is lost by not
+    collecting www4. Retiring an *existing* candidate on the same guess is not:
+    the contract for that is "cannot correspond to a board whatever the network
+    says", and a numbered label can. Now it costs one probe and the network
+    answers.
+    """
+    retired, _ = v.partition_unscrapeable(platform, [slug])
+    assert retired == []
+
+
+@pytest.mark.parametrize("slug", ["www", "api", "cdn", "embed"])
+def test_a_bare_infra_label_is_still_retired_without_a_probe(slug):
+    """Bare labels are host roles, not tenants -- the guess is safe there."""
+    retired, _ = v.partition_unscrapeable("bamboohr", [slug])
+    assert retired == [slug]
+
+
+def test_the_workday_impossibility_is_still_retired():
+    """The case this function exists for: wd1|wd1|careers would have to resolve
+    wd1.wd1.myworkdayjobs.com, which cannot exist. Not a guess."""
+    retired, _ = v.partition_unscrapeable("workday", ["wd1|wd1|careers"])
+    assert retired == ["wd1|wd1|careers"]
