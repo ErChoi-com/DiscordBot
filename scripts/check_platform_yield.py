@@ -53,6 +53,17 @@ NO_COVERAGE = "no-coverage"
 #: status useless for gating.
 MIN_DESCRIPTION_PCT = 20.0
 
+#: What actually happens to a job missing each field. Spelled out because the
+#: two directions are opposite, and reading one as the other sends someone
+#: looking for missing jobs when the problem is stale ones being shown.
+FIELD_CONSEQUENCE: dict[str, str] = {
+    "description": "invisible to semantic matching, which reads this field.",
+    "location": "DROPPED from every location-scoped search: an empty location "
+                "matches nothing.",
+    "date_posted": "EXEMPT from the 'newer than N hours' filter, so an old "
+                   "posting is shown as though it were fresh.",
+}
+
 
 def confirmed_live(platform: str, checked_dir: Path | None = None) -> int:
     """How many companies this platform has that were confirmed live.
@@ -90,29 +101,56 @@ def count_by_platform(records: Iterable[dict[str, Any]],
     return counts
 
 
-def describe_coverage(records: Iterable[dict[str, Any]],
-                      platforms: Iterable[str]) -> dict[str, tuple[int, int]]:
-    """(jobs, jobs carrying a description) per platform.
+#: Fields the pipeline acts on, and the way each one fails when it is blank.
+#: They are reported separately because they are not the same failure:
+#:
+#:   description -- SEMANTIC_MATCH_TARGET reads it, so a blank one makes the job
+#:                  invisible to semantic matching.
+#:   location    -- _matches_location returns False for an empty location, so
+#:                  the job is *dropped* from every location-scoped search. This
+#:                  is the shape that hid 8,747 iCIMS companies.
+#:   date_posted -- _posting_age_ok returns True when the field is blank ("rows
+#:                  with no date_posted always pass"), so the job is *exempt*
+#:                  from "newer than N hours" rather than filtered out. The
+#:                  opposite direction: nothing is lost, but a years-old posting
+#:                  is shown as though it were fresh.
+TRACKED_FIELDS: tuple[str, ...] = ("description", "location", "date_posted")
 
-    Counted together with the totals rather than separately so the two can never
+
+def field_coverage(records: Iterable[dict[str, Any]],
+                   platforms: Iterable[str],
+                   fields: Iterable[str] = TRACKED_FIELDS,
+                   ) -> dict[str, dict[str, int]]:
+    """Per platform: total jobs, and how many carry each tracked field.
+
+    One pass over the records, so the totals and the per-field counts can never
     disagree about which records belong to a platform.
     """
     names = {p.lower() for p in platforms}
-    out = {p: [0, 0] for p in names}
+    fields = tuple(fields)
+    out = {p: dict({"jobs": 0}, **{f: 0 for f in fields}) for p in names}
     for record in records:
         if not isinstance(record, dict):
             continue
         site = str(record.get("_source_site") or "").strip().lower()
         if site not in out:
             continue
-        out[site][0] += 1
-        if str(record.get("description") or "").strip():
-            out[site][1] += 1
-    return {p: (n, d) for p, (n, d) in out.items()}
+        out[site]["jobs"] += 1
+        for field in fields:
+            if str(record.get(field) or "").strip():
+                out[site][field] += 1
+    return out
+
+
+def describe_coverage(records: Iterable[dict[str, Any]],
+                      platforms: Iterable[str]) -> dict[str, tuple[int, int]]:
+    """(jobs, jobs carrying a description) per platform."""
+    cov = field_coverage(records, platforms, ("description",))
+    return {p: (c["jobs"], c["description"]) for p, c in cov.items()}
 
 
 def description_pct(jobs: int, described: int) -> float:
-    """Share of a platform's jobs carrying a description, 0.0 when it has none."""
+    """Share of a platform's jobs carrying a field, 0.0 when it has none."""
     return (100.0 * described / jobs) if jobs else 0.0
 
 
@@ -154,39 +192,47 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:  # a corrupt zip must not hide the rest
             print(f"[yield] could not read {date_key}: {exc}", file=sys.stderr)
 
-    coverage = describe_coverage(records, ats_service.ATS_PLATFORMS)
-    counts = {p: n for p, (n, _d) in coverage.items()}
+    coverage = field_coverage(records, ats_service.ATS_PLATFORMS)
     rows = []
     silent = []
-    thin = []
+    thin: dict[str, list[str]] = {f: [] for f in TRACKED_FIELDS}
     for platform in sorted(ats_service.ATS_PLATFORMS):
         live = confirmed_live(platform)
-        jobs, described = coverage.get(platform, (0, 0))
+        counts = coverage.get(platform, {})
+        jobs = counts.get("jobs", 0)
         verdict = assess(live, jobs, args.min_live)
-        pct = description_pct(jobs, described)
-        rows.append({"platform": platform, "confirmed_live": live,
-                     "archived_jobs": jobs, "with_description": described,
-                     "description_pct": round(pct, 1), "verdict": verdict})
+        row: dict[str, Any] = {"platform": platform, "confirmed_live": live,
+                               "archived_jobs": jobs, "verdict": verdict}
+        for field in TRACKED_FIELDS:
+            pct = description_pct(jobs, counts.get(field, 0))
+            row[f"{field}_pct"] = round(pct, 1)
+            if verdict == OK and pct < args.min_description_pct:
+                thin[field].append(f"{platform} ({pct:.0f}%)")
+        rows.append(row)
         if verdict == SILENT:
             silent.append(platform)
-        elif verdict == OK and pct < args.min_description_pct:
-            thin.append(f"{platform} ({pct:.0f}%)")
 
     if args.json:
         print(json.dumps({"days": args.days, "platforms": rows}, indent=2))
     else:
-        print(f"{'platform':<16}{'live':>8}{'jobs':>8}{'desc':>7}  verdict")
+        print(f"{'platform':<16}{'live':>8}{'jobs':>7}{'desc':>7}{'loc':>7}"
+              f"{'date':>7}  verdict")
         for row in rows:
             note = "" if row["verdict"] == OK else f"  <-- {row['verdict'].upper()}"
             print(f"{row['platform']:<16}{row['confirmed_live']:>8}"
-                  f"{row['archived_jobs']:>8}{row['description_pct']:>6.0f}%{note}")
+                  f"{row['archived_jobs']:>7}"
+                  f"{row['description_pct']:>6.0f}%"
+                  f"{row['location_pct']:>6.0f}%"
+                  f"{row['date_posted_pct']:>6.0f}%{note}")
 
-    if thin:
+    for field in TRACKED_FIELDS:
+        if thin[field]:
+            print()
+            print(f"Thin {field}: " + ", ".join(thin[field]))
+            print("  -> " + FIELD_CONSEQUENCE[field])
+    if any(thin.values()):
         print()
-        print("Thin descriptions: " + ", ".join(thin))
-        print("job_service matches semantically against the description field, "
-              "so these platforms are invisible to matching rather than merely "
-              "sparse. Not fatal -- unlike a silent platform, they are still "
+        print("Not fatal -- unlike a silent platform, these are still "
               "delivering jobs.")
 
     if silent:

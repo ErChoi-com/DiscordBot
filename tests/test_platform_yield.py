@@ -191,7 +191,8 @@ def test_thin_descriptions_are_reported_but_do_not_fail_the_run(
     rc = y.main(["--days", "1", "--min-live", "100"])
     out = capsys.readouterr().out
     assert rc == 0, "a thin description failed the run"
-    assert "Thin descriptions" in out and "greenhouse" in out.split("Thin")[1]
+    assert "Thin description" in out
+    assert "greenhouse" in out.split("Thin description")[1]
 
 
 def test_a_silent_platform_is_not_also_reported_as_thin(
@@ -205,7 +206,7 @@ def test_a_silent_platform_is_not_also_reported_as_thin(
     y.main(["--days", "1", "--min-live", "100"])
     out = capsys.readouterr().out
     assert "paylocity" in out.split("Silent:")[1]
-    assert "Thin descriptions" not in out
+    assert "Thin description" not in out
 
 
 def test_a_well_described_platform_is_not_flagged(archive, monkeypatch, capsys):
@@ -216,3 +217,93 @@ def test_a_well_described_platform_is_not_flagged(archive, monkeypatch, capsys):
         {"_source_site": "paylocity", "description": "y"}])
     assert y.main(["--days", "1", "--min-live", "100"]) == 0
     assert "Thin descriptions" not in capsys.readouterr().out
+
+
+# ── location and date coverage ──────────────────────────────────────────────
+#
+# Three fields, three different consequences when blank, and two of them fail in
+# opposite directions -- which is why they are reported separately rather than
+# as one "incomplete" number:
+#
+#   location    blank -> _matches_location returns False, so the job is DROPPED
+#               from every location-scoped search. Measured: iCIMS at 2%.
+#   date_posted blank -> _posting_age_ok returns True ("rows with no date_posted
+#               always pass"), so the job is EXEMPT from the age filter and a
+#               stale posting reads as fresh. Measured: Ashby at 4%.
+
+def test_all_three_fields_are_counted_in_one_pass():
+    records = [
+        {"_source_site": "ashby", "description": "d", "location": "Toronto",
+         "date_posted": "2026-09-01"},
+        {"_source_site": "ashby", "location": "Berlin"},
+    ]
+    cov = y.field_coverage(records, ["ashby"])
+    assert cov["ashby"] == {"jobs": 2, "description": 1, "location": 2,
+                            "date_posted": 1}
+
+
+def test_the_tracked_fields_are_the_ones_the_pipeline_acts_on():
+    """Dropping one silently stops reporting a whole failure mode."""
+    assert set(y.TRACKED_FIELDS) == {"description", "location", "date_posted"}
+    for field in y.TRACKED_FIELDS:
+        assert field in y.FIELD_CONSEQUENCE, f"{field} has no stated consequence"
+
+
+def test_each_consequence_says_what_actually_happens():
+    """The two directions must not read the same.
+
+    Someone told only "location is thin" goes looking for missing jobs; someone
+    told only "date is thin" needs to know stale jobs are being shown instead.
+    """
+    assert "DROPPED" in y.FIELD_CONSEQUENCE["location"]
+    assert "EXEMPT" in y.FIELD_CONSEQUENCE["date_posted"]
+    assert y.FIELD_CONSEQUENCE["location"] != y.FIELD_CONSEQUENCE["date_posted"]
+
+
+def test_a_thin_location_is_reported_with_its_own_consequence(
+        archive, monkeypatch, capsys):
+    import services.jba.merge_data as merge
+
+    monkeypatch.setattr(merge, "load_daily_log", lambda d: [
+        {"_source_site": "greenhouse", "description": "d", "date_posted": "x"},
+        {"_source_site": "paylocity", "description": "d", "location": "Toronto",
+         "date_posted": "x"}])
+    rc = y.main(["--days", "1", "--min-live", "100"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Thin location" in out and "greenhouse" in out.split("Thin location")[1]
+    assert "DROPPED" in out
+
+
+def test_a_thin_date_is_reported_as_an_exemption_not_a_loss(
+        archive, monkeypatch, capsys):
+    import services.jba.merge_data as merge
+
+    monkeypatch.setattr(merge, "load_daily_log", lambda d: [
+        {"_source_site": "greenhouse", "description": "d", "location": "Toronto"},
+        {"_source_site": "paylocity", "description": "d", "location": "Toronto",
+         "date_posted": "x"}])
+    y.main(["--days", "1", "--min-live", "100"])
+    out = capsys.readouterr().out
+    assert "Thin date_posted" in out
+    assert "EXEMPT" in out
+
+
+def test_a_platform_complete_on_every_field_is_not_flagged(
+        archive, monkeypatch, capsys):
+    import services.jba.merge_data as merge
+
+    full = {"description": "d", "location": "Toronto", "date_posted": "x"}
+    monkeypatch.setattr(merge, "load_daily_log", lambda d: [
+        dict(full, _source_site="greenhouse"),
+        dict(full, _source_site="paylocity")])
+    assert y.main(["--days", "1", "--min-live", "100"]) == 0
+    assert "Thin" not in capsys.readouterr().out
+
+
+def test_describe_coverage_still_agrees_with_the_general_counter():
+    """The old helper is now a view over field_coverage; they must not drift."""
+    records = [{"_source_site": "lever", "description": "x"},
+               {"_source_site": "lever"}]
+    assert y.describe_coverage(records, ["lever"]) == {"lever": (2, 1)}
+    assert y.field_coverage(records, ["lever"])["lever"]["description"] == 1
