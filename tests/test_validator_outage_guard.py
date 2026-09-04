@@ -617,3 +617,109 @@ def test_a_refusal_is_unreachable_even_when_the_final_url_is_elsewhere(
     monkeypatch.setattr(v, "_request", lambda url, **kw: (status, b"", elsewhere))
     with pytest.raises(v.Unreachable):
         getattr(v, fn_name)("acme")
+
+
+# ── smartrecruiters: existence, not "has jobs" ──────────────────────────────
+#
+# The postings API answers 200 for anything, so the probe read totalFound and
+# a zero ended it -- conflating "no such company" with "a real company
+# advertising nothing today". Measured: of six candidates returning zero, four
+# had a real careers page. The bot skips dead slugs, so the first job each of
+# them posted would have been missed until a recheck cleared the mark.
+
+def _sr_responses(monkeypatch, postings_body, careers=None):
+    def fake(url, **kwargs):
+        if "api.smartrecruiters.com" in url:
+            return 200, postings_body, url
+        status, final = careers or (200, "https://jobs.smartrecruiters.com")
+        return status, b"", final
+    monkeypatch.setattr(v, "_request", fake)
+
+
+def test_a_company_with_postings_needs_no_second_request(monkeypatch):
+    """The ordinary case must still cost one request."""
+    calls: list[str] = []
+
+    def fake(url, **kwargs):
+        calls.append(url)
+        return 200, b'{"totalFound": 3}', url
+
+    monkeypatch.setattr(v, "_request", fake)
+    assert v.live_smartrecruiters("acme") is True
+    assert len(calls) == 1, "the careers page was fetched despite a live count"
+
+
+def test_zero_postings_but_a_real_careers_page_is_live(monkeypatch):
+    _sr_responses(monkeypatch, b'{"totalFound": 0}',
+                  careers=(200, "https://careers.smartrecruiters.com/acme"))
+    assert v.live_smartrecruiters("acme") is True
+
+
+def test_zero_postings_and_a_bounce_to_the_root_is_dead(monkeypatch):
+    """An unknown slug is redirected to the bare jobs host, losing the slug."""
+    _sr_responses(monkeypatch, b'{"totalFound": 0}',
+                  careers=(200, "https://jobs.smartrecruiters.com"))
+    assert v.live_smartrecruiters("acme") is False
+
+
+def test_the_careers_page_match_is_case_insensitive(monkeypatch):
+    """SmartRecruiters echoes the slug with its own capitalisation."""
+    _sr_responses(monkeypatch, b'{"totalFound": 0}',
+                  careers=(200, "https://careers.smartrecruiters.com/AcMe"))
+    assert v.live_smartrecruiters("acme") is True
+
+
+def test_a_refusal_on_the_careers_page_is_not_a_dead_mark(monkeypatch):
+    """"No jobs" plus "the second endpoint refused" is not evidence of absence.
+
+    Reading it as one would mark companies dead during an outage, which is the
+    false-closure shape the rest of this module already guards against.
+    """
+    for status in (403, 429, 503):
+        _sr_responses(monkeypatch, b'{"totalFound": 0}', careers=(status, None))
+        with pytest.raises(v.Unreachable):
+            v.live_smartrecruiters("acme")
+
+
+def test_a_404_on_the_careers_page_is_dead(monkeypatch):
+    _sr_responses(monkeypatch, b'{"totalFound": 0}', careers=(404, None))
+    assert v.live_smartrecruiters("acme") is False
+
+
+def test_an_unparseable_postings_body_is_still_unknown(monkeypatch):
+    """Unchanged: truncation must not read as "no postings" and fall through to
+    a verdict. It biases toward dead precisely where it matters, because a
+    company with postings returns the long response."""
+    monkeypatch.setattr(v, "_request",
+                        lambda url, **kw: (200, b'{"totalFound": ', url))
+    with pytest.raises(v.Unreachable):
+        v.live_smartrecruiters("acme")
+
+
+@pytest.mark.parametrize("slug, final", [
+    ("jobs", "https://jobs.smartrecruiters.com"),
+    ("careers", "https://careers.smartrecruiters.com"),
+    ("smartrecruiters", "https://jobs.smartrecruiters.com"),
+])
+def test_a_slug_matching_the_bounce_host_is_not_treated_as_existing(
+        monkeypatch, slug, final):
+    """The match needs the path separator, not just the substring.
+
+    The bounce target is jobs.smartrecruiters.com, so a company slugged "jobs"
+    or "careers" appears in the URL of the very redirect that means "no such
+    company" -- and a substring test would read its own failure as success.
+    A mutation dropping the leading slash survived every other test here.
+    """
+    _sr_responses(monkeypatch, b'{"totalFound": 0}', careers=(200, final))
+    assert v.live_smartrecruiters(slug) is False
+
+
+def test_a_200_with_no_final_url_is_not_treated_as_existing(monkeypatch):
+    """Silence is not evidence of existence.
+
+    _request can return a 200 with no final URL, and defaulting that to "the
+    company exists" would confirm slugs on the strength of a missing field --
+    the same silence-reads-as-health shape guarded against elsewhere here.
+    """
+    _sr_responses(monkeypatch, b'{"totalFound": 0}', careers=(200, None))
+    assert v.live_smartrecruiters("acme") is False

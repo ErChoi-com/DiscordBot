@@ -44,6 +44,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -415,11 +416,22 @@ def live_smartrecruiters(slug: str) -> bool:
     # would be the honest test but 404s without credentials, including for
     # companies that certainly exist.
     #
-    # This conflates "no such company" with "a real company advertising nothing
-    # today", and there is no unauthenticated way to tell them apart. The
-    # conflation is in the right direction for this bot -- a board with no
-    # postings yields no jobs either way -- and the 90-day recheck picks the
-    # company back up when it advertises again.
+    # A zero count used to end it, which conflated "no such company" with "a
+    # real company advertising nothing today". Measured: of six candidates
+    # returning totalFound=0, four had a real careers page. Those were being
+    # marked dead, and the bot skips dead slugs -- so the first job each of them
+    # posted would be missed until a recheck cleared the mark.
+    #
+    # The careers page settles it, because it answers about the *company*
+    # rather than its postings: a real slug stays at
+    # careers.smartrecruiters.com/<slug>, an unknown one is redirected to the
+    # bare jobs.smartrecruiters.com. Same redirect tell as the subdomain
+    # platforms. It is only consulted when the count is zero, so the ordinary
+    # case still costs one request.
+    #
+    # /v1/companies/<slug> would be the direct existence test, but it 404s
+    # without credentials for real companies too -- re-verified against five
+    # known-live slugs, all 404.
     # Read past the default cap. The verdict depends on parsing the body, and a
     # truncated JSON document raises, which this turns into "unknown". That
     # failure is not neutral: a company with postings returns the long response
@@ -434,9 +446,33 @@ def live_smartrecruiters(slug: str) -> bool:
     if status != 200:
         return _decide(status)
     try:
-        return int(json.loads(body or b"{}").get("totalFound", 0)) > 0
+        if int(json.loads(body or b"{}").get("totalFound", 0)) > 0:
+            return True
     except (ValueError, TypeError, AttributeError):
         raise Unreachable("unparseable postings response")
+    return _smartrecruiters_company_exists(slug)
+
+
+def _smartrecruiters_company_exists(slug: str) -> bool:
+    """Whether the careers page belongs to *slug* rather than being a bounce.
+
+    Answers about the company, not its postings, which is what separates a real
+    board advertising nothing from one that never existed.
+    """
+    status, _, final = _request(f"https://careers.smartrecruiters.com/{slug}")
+    if status != 200:
+        # A refusal here must not become a dead mark: the postings call already
+        # said "no jobs", which is not evidence of absence on its own.
+        return _decide(status)
+    if not final:
+        return False
+    # The *path*, not a substring of the URL. The bounce target is
+    # jobs.smartrecruiters.com, so for a company slugged "jobs" or "careers" the
+    # slug appears inside the host of the very redirect that means "no such
+    # company" -- and "/jobs" is even a substring of "https://jobs..." because
+    # of the two slashes in the scheme. Comparing the path is the only form that
+    # cannot read its own failure as success.
+    return urllib.parse.urlparse(final).path.strip("/").lower() == slug.lower()
 
 
 def live_rippling(slug: str) -> bool:
