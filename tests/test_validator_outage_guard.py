@@ -820,3 +820,81 @@ def test_the_revival_audit_flag_reaches_the_run(sandbox, capsys):
     # these twelve all read dead -- the point is that real numbers came back.
     assert summary["revival"]["dead_total"] == 12
     assert summary["revival"]["sampled"] == 12
+
+
+# ── giving up on a platform that is refusing everything ─────────────────────
+#
+# A 429 is Unreachable, not dead, so no mark is ever wrong because of one -- but
+# that is exactly why the live-rate collapse guard never fires for it: it
+# watches dead verdicts, and a refused probe produces none. So a quota-exhausted
+# platform spent its whole budget learning nothing. Workable is metered per
+# window rather than rate-limited, and was observed refusing 40 of 40 probes;
+# an earlier pass came back 91% refused and left the address throttled for
+# minutes, so continuing also makes the next run worse.
+
+def _storm_probe(refuse_all=True):
+    def probe(slug):
+        if refuse_all:
+            raise v.Unreachable("429")
+        return True
+    return probe
+
+
+def test_a_platform_refusing_everything_stops_early():
+    slugs = [f"s{i}" for i in range(200)]
+    lines: list[str] = []
+    res = v.validate_platform("workable", slugs, probe=_storm_probe(),
+                              workers=2, budget_seconds=None, log=lines.append)
+    assert res["probed"] < len(slugs), "the whole list was probed anyway"
+    assert res["deferred"] == len(slugs) - res["probed"]
+    assert any("refused -- stopping" in line for line in lines)
+
+
+def test_no_verdict_is_invented_when_it_stops():
+    """Stopping must not turn refusals into dead marks -- that is the failure
+    the refusal handling exists to prevent."""
+    res = v.validate_platform("workable", [f"s{i}" for i in range(100)],
+                              probe=_storm_probe(), workers=2, log=lambda m: None)
+    assert res["dead"] == 0 and res["live"] == 0
+    assert res["_dead"] == [] and res["_live"] == []
+
+
+def test_a_healthy_platform_is_never_stopped():
+    slugs = [f"s{i}" for i in range(120)]
+    lines: list[str] = []
+    res = v.validate_platform("greenhouse", slugs, probe=lambda s: True,
+                              workers=2, log=lines.append)
+    assert res["probed"] == len(slugs)
+    assert not any("refused -- stopping" in line for line in lines)
+
+
+def test_a_partly_flaky_platform_keeps_going():
+    """Half-refused runs still resolve half of what they touch, and those
+    verdicts are worth having. Only a near-total refusal is worthless."""
+    def flaky(slug):
+        if int(slug[1:]) % 2:
+            raise v.Unreachable("timeout")
+        return False
+
+    res = v.validate_platform("icims", [f"s{i}" for i in range(120)],
+                              probe=flaky, workers=2, log=lambda m: None)
+    assert res["probed"] == 120
+    assert res["dead"] == 60
+
+
+def test_a_short_run_cannot_trip_the_storm_guard():
+    """Below the minimum, a run of refusals means nothing -- three timeouts in
+    a row is an ordinary network hiccup, not an exhausted quota."""
+    slugs = [f"s{i}" for i in range(8)]
+    res = v.validate_platform("workable", slugs, probe=_storm_probe(),
+                              workers=2, log=lambda m: None)
+    assert res["probed"] == len(slugs), "stopped on too small a sample"
+
+
+def test_the_budget_message_and_the_storm_message_are_distinct():
+    """"Budget spent" and "the platform is refusing us" call for different
+    responses, and reading one as the other wastes a debugging cycle."""
+    lines: list[str] = []
+    v.validate_platform("workable", [f"s{i}" for i in range(60)],
+                        probe=_storm_probe(), workers=2, log=lines.append)
+    assert not any("budget spent" in line for line in lines)

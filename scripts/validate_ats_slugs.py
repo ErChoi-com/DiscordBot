@@ -908,6 +908,21 @@ def partition_unscrapeable(platform: str, slugs: Iterable[str]) -> tuple[list[st
 
 PROGRESS_SECONDS = 60.0
 
+#: Give up on a platform that is refusing nearly everything. A 429 is
+#: Unreachable, not dead, so no mark is ever wrong because of one -- but the
+#: live-rate collapse guard only watches dead verdicts, so a platform answering
+#: 429 to every request never trips it and spends its entire budget learning
+#: nothing. Workable is quota-metered per window rather than rate-limited, and
+#: was observed refusing 40 of 40 probes; an earlier eight-worker pass came back
+#: 91% refused and left the address throttled for minutes afterwards, so
+#: continuing also makes the next run worse.
+#:
+#: Deliberately high, and only after enough probes to mean it: a platform that
+#: is merely slow or partly flaky must keep going, because those runs still
+#: resolve most of what they touch.
+UNREACHABLE_STORM_RATE = 0.9
+UNREACHABLE_STORM_MIN_PROBES = 20
+
 
 def validate_platform(platform: str, slugs: Iterable[str], *,
                       probe: Callable[[str], bool] | None = None,
@@ -969,6 +984,7 @@ def validate_platform(platform: str, slugs: Iterable[str], *,
     chunk = max(workers * 4, 1)
     probed = 0
     stopped_early = False
+    storm = False
     last_beat = started
     if slugs:
         with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -990,11 +1006,21 @@ def validate_platform(platform: str, slugs: Iterable[str], *,
                 if budget_seconds is not None and start and                         now() - started > budget_seconds:
                     stopped_early = True
                     break
+                if (probed >= UNREACHABLE_STORM_MIN_PROBES
+                        and len(unknown) / probed >= UNREACHABLE_STORM_RATE):
+                    stopped_early = True
+                    storm = True
+                    break
                 batch = slugs[start:start + chunk]
                 list(pool.map(one, batch))
                 probed += len(batch)
 
-    if stopped_early:
+    if storm:
+        log(f"[validate] {platform}: {len(unknown)} of {probed} probes refused -- "
+            f"stopping, {len(slugs) - probed} slug(s) deferred. Nothing is marked "
+            f"from a refusal, so no verdict is lost; continuing would only "
+            f"deepen the throttling.")
+    elif stopped_early:
         log(f"[validate] {platform}: budget spent, {len(slugs) - probed} slug(s) "
             "deferred to the next run")
     log(f"[validate] {platform}: probed {probed} -> "
