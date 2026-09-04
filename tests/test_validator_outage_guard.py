@@ -964,3 +964,76 @@ def test_the_rippling_probe_and_scraper_share_an_endpoint():
     path = "/platform/api/ats/v1/board/"
     assert path in probe_src, "the probe stopped using the ATS API"
     assert path in scraper_src, "the scraper moved off the ATS API"
+
+
+# ── per-platform pacing ─────────────────────────────────────────────────────
+#
+# recruitee had been given workable's measured numbers -- four workers at a
+# quarter-second -- without a curve of its own, and refused 28% of a real run at
+# that pace. Its own measurements, 429s per 60 probes from cold: 17 at 8.6/s,
+# 14 at 5.3/s, 0 at 2.4/s. Two workers at half a second refused none of 100.
+#
+# It also holds a grudge: the same 3-worker/1.0s setting that refused nothing
+# from cold refused 9 of 60 straight after a fast burst, so one impatient run
+# spoils the next.
+
+def test_no_dict_in_the_module_has_a_duplicated_key():
+    """WORKERS listed "recruitee" twice, as 8 and then as 4.
+
+    Python keeps the last, so it worked -- but the first entry was dead and
+    misleading, and editing it would have changed nothing while looking like it
+    had. Static, so it catches the next one for free.
+    """
+    import ast
+    import inspect
+
+    src = inspect.getsource(v)
+    offenders = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Dict):
+            continue
+        keys = [k.value for k in node.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+        offenders += [(node.lineno, k) for k in set(keys) if keys.count(k) > 1]
+    assert not offenders, f"duplicated dict keys: {offenders}"
+
+
+def test_every_platform_has_a_worker_setting():
+    """A platform missing from WORKERS silently takes the generic default,
+    which is how recruitee ran at four times a safe pace."""
+    for platform in v.PLATFORMS:
+        assert platform in v.WORKERS, f"{platform} has no measured worker count"
+
+
+def test_recruitee_is_paced_below_its_measured_refusal_threshold():
+    """Rate is what matters, not worker count.
+
+    The delay is per worker, so the ceiling is workers/delay. recruitee refused
+    heavily at 5/s and above and refused nothing at 2.5/s, so the configured
+    ceiling has to stay well under the refusing range -- raising either value
+    alone silently undoes the other.
+    """
+    ceiling = v.WORKERS["recruitee"] / v.DELAYS["recruitee"]
+    assert ceiling <= 4.0, f"recruitee ceiling is {ceiling}/s, it refuses from ~5/s"
+
+
+def test_a_paced_platform_actually_sleeps(monkeypatch):
+    """The delay has to reach validate_platform, not merely be configured."""
+    slept: list[float] = []
+    monkeypatch.setattr(v.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setitem(v.PROBES, "recruitee", lambda slug: True)
+    v.validate_platform("recruitee", ["a", "b", "c"], workers=1,
+                        log=lambda m: None)
+    assert slept, "no pacing delay was applied"
+    assert all(s == v.DELAYS["recruitee"] for s in slept), slept
+
+
+def test_an_unpaced_platform_does_not_sleep(monkeypatch):
+    """Pacing costs throughput, so it must not spread to platforms that never
+    asked for it."""
+    slept: list[float] = []
+    monkeypatch.setattr(v.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setitem(v.PROBES, "greenhouse", lambda slug: True)
+    v.validate_platform("greenhouse", ["a", "b", "c"], workers=1,
+                        log=lambda m: None)
+    assert slept == []

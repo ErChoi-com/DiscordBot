@@ -126,8 +126,22 @@ WORKERS = {"greenhouse": 16, "lever": 16, "ashby": 8, "workday": 12,
            # No measured concurrency curve for these two yet, so they take the
            # conservative default rather than a guess that reads as evidence.
            "breezy": 8, "smartrecruiters": 8, "rippling": 8,
-           "teamtailor": 8, "jazzhr": 8, "recruitee": 8, "jobvite": 8,
-           "applicantpro": 8, "recruitee": 4,
+           "teamtailor": 8, "jazzhr": 8, "jobvite": 8,
+           "applicantpro": 8,
+           # Measured, not inherited. recruitee had been given workable's
+           # numbers -- four workers at a quarter-second -- without its own
+           # curve, and refused 28% of a run at that pace. From a cold start,
+           # 429s per 60 probes: 17 at 8.6/s, 14 at 5.3/s, 0 at 2.4/s. Two
+           # workers at half a second holds 2.5/s and refused none of 100.
+           #
+           # Rate is what matters, not worker count: the delay is per worker,
+           # so eight workers at 0.5s would be 16/s and refuse everything.
+           #
+           # It also holds a grudge. The same 3-worker/1.0s setting that
+           # refused nothing from cold refused 9 of 60 immediately after a fast
+           # burst, so one impatient run spoils the next -- the same behaviour
+           # the Workable note below describes.
+           "recruitee": 2,
            # Paced rather than throttled down. See DELAYS below.
            "workable": 4}
 
@@ -146,7 +160,7 @@ WORKERS = {"greenhouse": 16, "lever": 16, "ashby": 8, "workday": 12,
 # So four workers with a quarter-second pace, rather than the one worker a
 # guess had put here -- same safety, four times the throughput. Eight workers
 # with a delay is untested; the unpaced eight-worker run is the one that broke.
-DELAYS: dict[str, float] = {"workable": 0.25, "recruitee": 0.25}
+DELAYS: dict[str, float] = {"workable": 0.25, "recruitee": 0.5}
 
 # Most probes a single run may spend on a platform, for endpoints that meter a
 # quota rather than a rate. Workable is the case: pacing alone does not buy
