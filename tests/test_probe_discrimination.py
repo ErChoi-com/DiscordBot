@@ -188,3 +188,69 @@ def test_check_platform_reports_a_vendor_host_that_reads_live(monkeypatch):
     # is the one reported -- that ordering is deliberate.
     assert verdict == c.STUCK_TRUE
     assert vendor == [True]
+
+
+# ── an unevaluable platform is not a broken probe ───────────────────────────
+#
+# workable is quota-metered per window and refuses everything once it is spent,
+# so every answer comes back Unreachable and the platform says nothing either
+# way. Reporting that as a probe fault printed "do not run a validation pass"
+# at someone with nothing to fix -- and a check that cries wolf gets ignored,
+# which is worse than not having it. An outage is never a verdict anywhere else
+# in this pipeline; it is not one here either.
+
+def _stub(monkeypatch, probes, checked=("real1",)):
+    import validate_ats_slugs as v
+
+    for name, fn in probes.items():
+        monkeypatch.setitem(v.PROBES, name, fn)
+    monkeypatch.setattr(v, "load_checked", lambda p: {s: "2026-09-01" for s in checked})
+    monkeypatch.setattr(c, "VENDOR_HOSTS", {})
+
+
+def _refuse(slug):
+    import validate_ats_slugs as v
+
+    raise v.Unreachable("429")
+
+
+def test_a_refusing_platform_does_not_fail_the_run(monkeypatch, capsys):
+    _stub(monkeypatch, {"workable": _refuse, "greenhouse": lambda s: not s.startswith("zzz")})
+    rc = c.main(["--platform", "workable", "--platform", "greenhouse", "--sample", "2"])
+    out = capsys.readouterr().out
+    assert rc == 0, "a spent quota was reported as a broken probe"
+    assert "Could not evaluate: workable" in out
+
+
+def test_a_refusing_platform_is_still_reported(monkeypatch, capsys):
+    """Silent tolerance would be the opposite mistake -- it has to be visible,
+    just not fatal."""
+    _stub(monkeypatch, {"workable": _refuse})
+    c.main(["--platform", "workable", "--sample", "2"])
+    out = capsys.readouterr().out
+    assert "workable" in out and "NO-DATA" in out
+
+
+def test_strict_mode_gates_on_an_unevaluated_platform(monkeypatch, capsys):
+    _stub(monkeypatch, {"workable": _refuse})
+    assert c.main(["--platform", "workable", "--sample", "2",
+                   "--fail-on-unevaluated"]) == 1
+
+
+def test_a_real_fault_still_fails_even_alongside_a_refusal(monkeypatch, capsys):
+    """The tolerance must not swallow a genuine break that happens to share a
+    run with a refusing platform."""
+    _stub(monkeypatch, {"workable": _refuse, "greenhouse": lambda s: True})
+    rc = c.main(["--platform", "workable", "--platform", "greenhouse", "--sample", "2"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "greenhouse: stuck-true" in out
+
+
+def test_the_summary_counts_only_what_was_evaluated(monkeypatch, capsys):
+    """Saying "all 2 probes discriminate" when one was never asked overstates
+    what the run actually established."""
+    _stub(monkeypatch, {"workable": _refuse, "greenhouse": lambda s: not s.startswith("zzz")})
+    c.main(["--platform", "workable", "--platform", "greenhouse", "--sample", "2"])
+    out = capsys.readouterr().out
+    assert "all 1 evaluated probes" in out

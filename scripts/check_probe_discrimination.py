@@ -133,6 +133,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="known-live slugs to probe per platform (default 6)")
     parser.add_argument("--seed", type=int, default=None,
                         help="seed the sample choice, for a reproducible run")
+    parser.add_argument("--fail-on-unevaluated", action="store_true",
+                        help="also exit non-zero when a platform refused every "
+                             "probe, so a spent quota gates a release too")
     args = parser.parse_args(argv)
 
     rng = random.Random(args.seed)
@@ -143,6 +146,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     failures: list[str] = []
+    unevaluated: list[str] = []
     for name in names:
         verdict, bogus, live, vendor = check_platform(name, args.sample, rng)
         live_yes = sum(1 for r in live if r is True)
@@ -155,10 +159,26 @@ def main(argv: list[str] | None = None) -> int:
                 vendor_note += f" read-as-live={wrong}"
         print(f"{name:<16} bogus={['T' if b is True else 'F' if b is False else '?' for b in bogus]} "
               f"live={live_yes}/{len(live)}{vendor_note}{note}")
-        if verdict != OK:
+        if verdict == NO_DATA:
+            # Not a probe fault. Every answer came back Unreachable, which is
+            # what a quota-exhausted platform looks like: workable is metered
+            # per window and refuses everything once it is spent. Treating that
+            # as a broken probe prints "do not run a validation pass" at
+            # someone who has nothing to fix, and a check that cries wolf gets
+            # ignored -- the same reason an outage is never a verdict anywhere
+            # else here.
+            unevaluated.append(name)
+        elif verdict != OK:
             failures.append(f"{name}: {verdict}")
 
     print()
+    if unevaluated:
+        print("Could not evaluate: " + ", ".join(unevaluated))
+        print("Every probe was refused, so the platform said nothing either "
+              "way. Usually a spent quota rather than a broken probe -- "
+              "re-run later, or pass --fail-on-unevaluated to gate on it.")
+        print()
+
     if failures:
         print("FAILED: " + "; ".join(failures))
         print("A stuck-true probe marks nothing dead; a stuck-false one marks "
@@ -166,8 +186,11 @@ def main(argv: list[str] | None = None) -> int:
               "as live will confirm companies that do not exist. Do not run a "
               "validation pass until this is fixed.")
         return 1
-    print(f"all {len(names)} probes discriminate: no to invented slugs, yes to "
-          f"known-live ones, no to the vendor's own hosts")
+    if unevaluated and args.fail_on_unevaluated:
+        return 1
+    evaluated = len(names) - len(unevaluated)
+    print(f"all {evaluated} evaluated probes discriminate: no to invented "
+          f"slugs, yes to known-live ones, no to the vendor's own hosts")
     return 0
 
 
