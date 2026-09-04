@@ -1093,6 +1093,53 @@ def purge_expired(dead_map: dict[str, str], today: _dt.date, ttl_days: int) -> i
     return len(expired)
 
 
+#: A dead mark that comes back live is normal -- companies repost. A *platform*
+#: whose dead marks come back live in bulk is a broken probe, because the marks
+#: were never earned. Measured baseline across fifteen platforms: 0% for
+#: thirteen of them, 20% for icims (two of fourteen, and its two host forms make
+#: it the flakiest), 7% for rippling. smartrecruiters sat at 71% -- 150 of its
+#: 212 marks -- because its probe read "no postings today" as "no such company".
+REVIVAL_ALARM_RATE = 0.40
+
+
+def revival_rate(platform: str, sample: int, *,
+                 probe: Callable[[str], bool] | None = None,
+                 workers: int | None = None,
+                 seed: int = 0,
+                 budget_seconds: float | None = AUDIT_BUDGET_SECONDS,
+                 log: Callable[[str], None] = print) -> dict[str, Any]:
+    """What share of this platform's dead marks now answer live.
+
+    Read-only, for the same reason audit_live_rate is: an audit that recorded
+    its verdicts would repair the very evidence it exists to report, and the
+    working pass reaches these slugs on its own anyway.
+
+    This is the shape that catches a probe marking companies dead for a reason
+    other than not existing. The postings-count bug on smartrecruiters was
+    invisible in every other measure -- the live rate looked plausible, the
+    probe answered no to invented slugs and yes to known-live ones, and no
+    scraper contradicted a mark. Only re-asking the ones it had already
+    condemned showed 71% of them answering.
+    """
+    dead = sorted(load_dead(platform))
+    if not dead:
+        return {"sampled": 0, "revived": 0, "rate": 0.0, "dead_total": 0,
+                "alarm": False}
+    picks = (dead if len(dead) <= sample
+             else random.Random(seed).sample(dead, sample))
+    result = validate_platform(platform, picks, probe=probe, workers=workers,
+                               budget_seconds=budget_seconds, log=lambda _m: None)
+    decided = result["live"] + result["dead"]
+    rate = (result["live"] / decided) if decided else 0.0
+    alarm = decided >= 10 and rate >= REVIVAL_ALARM_RATE
+    log(f"[validate] {platform}: {result['live']} of {decided} re-probed dead "
+        f"marks answered live ({100 * rate:.0f}%)"
+        + ("  <-- the probe is condemning companies that exist" if alarm else ""))
+    return {"sampled": result["probed"], "revived": result["live"],
+            "rate": round(100 * rate, 1), "dead_total": len(dead),
+            "alarm": alarm}
+
+
 def audit_live_rate(platform: str, sample: int, *,
                      probe: Callable[[str], bool] | None = None,
                      workers: int | None = None,
@@ -1157,6 +1204,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="wall-clock ceiling for the whole run; shares the "
                              "remaining time between the platforms still to go, "
                              "so a fast one leaves its slack to a slow one")
+    parser.add_argument("--revival-audit", type=int, default=0,
+                        metavar="N",
+                        help="re-probe N random dead marks per platform, "
+                             "read-only, and report how many answer live. A high "
+                             "share means the probe is condemning companies that "
+                             "exist, which no other measure here reveals.")
     parser.add_argument("--audit-sample", type=int, default=0,
                         help="also probe N slugs drawn uniformly from the whole "
                              "population INCLUDING known-dead ones, read-only, "
@@ -1324,6 +1377,14 @@ def _run(args, log: Callable[[str], None], _lock) -> int:
         for platform in platforms:
             summary.setdefault(platform, {})["audit"] = audit_live_rate(
                 platform, args.audit_sample, workers=args.workers, log=log)
+
+    # Read-only, so it runs identically under --dry-run. Reported per platform
+    # rather than only when it trips: a rate that is climbing is worth seeing
+    # before it crosses the threshold.
+    if args.revival_audit > 0:
+        for platform in platforms:
+            summary.setdefault(platform, {})["revival"] = revival_rate(
+                platform, args.revival_audit, workers=args.workers, log=log)
 
     elapsed = time.monotonic() - t0
     log(f"[validate] done in {elapsed:.1f}s")

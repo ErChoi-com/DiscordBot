@@ -723,3 +723,100 @@ def test_a_200_with_no_final_url_is_not_treated_as_existing(monkeypatch):
     """
     _sr_responses(monkeypatch, b'{"totalFound": 0}', careers=(200, None))
     assert v.live_smartrecruiters("acme") is False
+
+
+# ── revival audit ───────────────────────────────────────────────────────────
+#
+# A dead mark coming back live is normal; companies repost. A platform whose
+# dead marks come back live in bulk is a broken probe, because those marks were
+# never earned. This is the only measure that would have caught the
+# smartrecruiters postings-count bug: its live rate looked plausible, it said no
+# to invented slugs and yes to known-live ones, and no scraper contradicted a
+# mark -- but 150 of its 212 dead marks answered live when re-asked.
+
+def test_a_platform_whose_dead_marks_answer_live_raises_the_alarm(sandbox):
+    (sandbox / "dead" / "lever.json").write_text(
+        json.dumps({f"s{i}": "2026-09-01" for i in range(20)}), encoding="utf-8")
+    out = v.revival_rate("lever", 20, probe=lambda slug: True, workers=1,
+                         log=lambda m: None)
+    assert out["revived"] == 20
+    assert out["rate"] == 100.0
+    assert out["alarm"] is True
+
+
+def test_dead_marks_that_stay_dead_do_not_alarm(sandbox):
+    (sandbox / "dead" / "lever.json").write_text(
+        json.dumps({f"s{i}": "2026-09-01" for i in range(20)}), encoding="utf-8")
+    out = v.revival_rate("lever", 20, probe=lambda slug: False, workers=1,
+                         log=lambda m: None)
+    assert out["revived"] == 0 and out["alarm"] is False
+
+
+def test_a_handful_of_revivals_is_not_an_alarm(sandbox):
+    """Real baseline is 0-20%; companies do repost. Alarming on any revival
+    would fire constantly and be ignored, which is worse than not having it."""
+    (sandbox / "dead" / "lever.json").write_text(
+        json.dumps({f"s{i}": "2026-09-01" for i in range(20)}), encoding="utf-8")
+    out = v.revival_rate("lever", 20, probe=lambda slug: slug in ("s1", "s2"),
+                         workers=1, log=lambda m: None)
+    assert out["rate"] == 10.0 and out["alarm"] is False
+
+
+def test_a_tiny_sample_cannot_alarm(sandbox):
+    """Two of three is 67% and means nothing. icims genuinely reads 33% on a
+    six-slug sample, and that must not be reported as a broken probe."""
+    (sandbox / "dead" / "lever.json").write_text(
+        json.dumps({f"s{i}": "2026-09-01" for i in range(3)}), encoding="utf-8")
+    out = v.revival_rate("lever", 3, probe=lambda slug: slug != "s0",
+                         workers=1, log=lambda m: None)
+    assert out["rate"] > 50 and out["alarm"] is False, "alarmed on 3 samples"
+
+
+def test_a_platform_with_no_dead_marks_is_not_an_error(sandbox):
+    out = v.revival_rate("lever", 10, probe=lambda slug: True, workers=1,
+                         log=lambda m: None)
+    assert out == {"sampled": 0, "revived": 0, "rate": 0.0, "dead_total": 0,
+                   "alarm": False}
+
+
+def test_the_revival_audit_writes_nothing(sandbox):
+    """Recording these verdicts would repair the evidence the audit exists to
+    report -- the same reason audit_live_rate is read-only."""
+    (sandbox / "dead" / "lever.json").write_text(
+        json.dumps({f"s{i}": "2026-09-01" for i in range(12)}), encoding="utf-8")
+    before = (sandbox / "dead" / "lever.json").read_text(encoding="utf-8")
+    v.revival_rate("lever", 12, probe=lambda slug: True, workers=1,
+                   log=lambda m: None)
+    assert (sandbox / "dead" / "lever.json").read_text(encoding="utf-8") == before
+    assert list((sandbox / "checked").iterdir()) == []
+
+
+def test_the_alarm_is_visible_in_the_log(sandbox):
+    (sandbox / "dead" / "lever.json").write_text(
+        json.dumps({f"s{i}": "2026-09-01" for i in range(20)}), encoding="utf-8")
+    lines: list[str] = []
+    v.revival_rate("lever", 20, probe=lambda slug: True, workers=1,
+                   log=lines.append)
+    assert any("condemning companies that exist" in line for line in lines)
+
+
+def test_the_revival_audit_flag_reaches_the_run(sandbox, capsys):
+    """Pins the wiring, not the measure.
+
+    revival_rate can be entirely correct while --revival-audit never calls it --
+    a mutation that stubbed the call site to an empty dict left every other test
+    in this section passing, because they all call revival_rate directly.
+    """
+    (sandbox / "dead" / "lever.json").write_text(
+        json.dumps({f"s{i}": "2026-09-01" for i in range(12)}), encoding="utf-8")
+
+    assert v.main(["--platform", "lever", "--revival-audit", "12", "--json",
+                   "--limit", "0", "--budget-seconds", "0"]) == 0
+    out = capsys.readouterr().out
+    summary = json.loads(out[out.index("{"):])["platforms"]["lever"]
+
+    assert "revival" in summary, "--revival-audit produced no revival section"
+    # The stub probe in `sandbox` calls anything starting with "alive" live, so
+    # these twelve all read dead -- the point is that real numbers came back.
+    assert summary["revival"]["dead_total"] == 12
+    assert summary["revival"]["sampled"] == 12
