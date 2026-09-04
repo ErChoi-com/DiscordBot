@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+
+from services import capacity
 
 if TYPE_CHECKING:
     import discord
@@ -76,6 +79,14 @@ class ATSPlatformHealth:
     total_errors: int = 0
     last_error: str | None = None
     last_was_error: bool = False
+    # A scrape that raises is an error. A scrape that returns nothing is not --
+    # it is either a platform with no openings or one that refused every
+    # request, and those are indistinguishable from the return value alone
+    # (workable answers 429 in 0.1s and the scraper reports []). Counting the
+    # runs since anything was returned is what separates them: a platform with
+    # real coverage does not stay empty run after run.
+    consecutive_silent: int = 0
+    last_nonempty_at: float = 0.0
 
 
 @dataclass
@@ -207,6 +218,32 @@ class WatcherHealthTracker:
             ph.total_jobs += job_count
             ph.total_new_jobs += new_count
             ph.last_was_error = False
+            # Deliberately not an error: a refused platform has not crashed,
+            # and marking it one would make every genuinely quiet platform look
+            # broken. It is tracked as its own state instead.
+            if job_count > 0:
+                ph.consecutive_silent = 0
+                ph.last_nonempty_at = ph.last_scrape_at
+            else:
+                ph.consecutive_silent += 1
+
+    def silent_ats_platforms(self, threshold: int = 3) -> list[tuple[str, int]]:
+        """Platforms that have returned nothing for `threshold` runs running.
+
+        The signal this exists to surface is the one the archive cannot give:
+        a platform validated weekly against thousands of live companies that
+        still contributes no jobs. One empty run is ordinary; several in a row
+        against real coverage is a scraper or an endpoint that has stopped
+        answering, and nothing else in the pipeline says so.
+
+        Sorted longest-silent first so the worst offender reads first.
+        """
+        silent = [
+            (name, ph.consecutive_silent)
+            for name, ph in self._ats.per_platform.items()
+            if ph.consecutive_silent >= threshold
+        ]
+        return sorted(silent, key=lambda pair: pair[1], reverse=True)
 
     def record_ats_scrape_complete(
         self, total_jobs: int, scrapes_today: int, daily_cap: int
@@ -286,6 +323,10 @@ def _format_queue_field(scheduler_stats: dict[str, Any]) -> str:
     lines = [
         f"{icon} Queued: **{queued}** ({queued_interactive} interactive / {queued_background} background)",
         f"Active: **{active}**/{workers} workers · Completed: **{completed}** · Aged-up: **{promoted}**",
+        # Detected hardware and the resulting pool scale: the fastest way to
+        # confirm a new host (especially a container, where cpu_count lies)
+        # sized its pools the way you expected.
+        f"Hardware: {capacity.describe()}",
     ]
     return "\n".join(lines)
 
@@ -495,7 +536,17 @@ def build_all_health_embed(
         browser_icon = "🟢"
     else:
         browser_icon = "🔴"
-    profile_name = browser.active_profile_path.rsplit("\\", 1)[-1] or "n/a"
+    # Split on either separator rather than using Path().name.
+    #
+    # rsplit("\\") was wrong on Linux (POSIX paths have no backslash, so it
+    # returned the whole path). Path().name fixed that but is equally
+    # platform-dependent in the other direction: on Linux, PosixPath treats
+    # "C:\\Users\\...\\chrome_profile_runtime" as a single component and returns
+    # the entire string. The bot runs on both, and this value is only ever
+    # displayed, so parse it independently of the host's flavour.
+    _raw_profile = str(browser.active_profile_path or "").rstrip("/\\")
+    profile_name = re.split(r"[\\/]", _raw_profile)[-1] if _raw_profile else ""
+    profile_name = profile_name or "n/a"
     embed.add_field(
         name="Browser (Playwright)",
         value=(
