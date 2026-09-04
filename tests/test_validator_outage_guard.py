@@ -252,3 +252,90 @@ def test_apply_checked_expires_entries_past_twice_the_recheck_window():
     out = v.apply_checked({"old": old, "recent": recent},
                           {"_live": [], "_dead": []}, today)
     assert "old" not in out and "recent" in out
+
+
+# ── --sample records; --audit-sample measures ───────────────────────────────
+#
+# Two sampling flags with overlapping names and opposite purposes. --sample
+# narrows this run's targets and its verdicts are written; --audit-sample draws
+# uniformly from the whole population and writes nothing. The help text for
+# --sample used to read "for measuring live rates", which pointed anyone
+# wanting a measurement at the one that both mutates and measures the wrong
+# population -- targets exclude slugs already marked dead, so its rate is of
+# survivors. Measured on real data that difference was 97.5% against 38.8%.
+
+def test_sample_cannot_reach_slugs_already_marked_dead():
+    """The bias, stated as a test: 80% of this population is dead and the
+    sample draws none of it."""
+    today = dt.date(2026, 9, 4)
+    candidates = [f"s{i}" for i in range(100)]
+    dead = {f"s{i}": today.isoformat() for i in range(80)}
+
+    with_dead = v.select_targets("lever", dead, recheck_dead=False, limit=None,
+                                 sample=20, today=today)
+    assert len(with_dead) == 20
+    assert not [s for s in with_dead if s in dead], (
+        "a survivor-only sample was treated as a population sample")
+
+
+def test_audit_sample_draws_slugs_that_are_already_marked_dead(sandbox):
+    """Including known-dead slugs is the entire point of the audit.
+
+    Excluding them is exactly what makes the working pass's rate an
+    overestimate, so an audit that inherited the same exclusion would measure
+    the same wrong thing while looking authoritative.
+
+    The dead map has to be real here rather than stubbed: an earlier version of
+    this test replaced load_candidates, which left the dead map empty, so a
+    mutant that filtered known-dead slugs out of the audit changed nothing and
+    survived.
+    """
+    population = [f"s{i}" for i in range(60)]
+    (sandbox / "harvest" / "lever.json").write_text(
+        json.dumps(population), encoding="utf-8")
+    stamp = dt.date.today().isoformat()
+    (sandbox / "dead" / "lever.json").write_text(
+        json.dumps({f"s{i}": stamp for i in range(50)}), encoding="utf-8")
+
+    seen: list[str] = []
+
+    def probe(slug):
+        seen.append(slug)
+        return False
+
+    v.audit_live_rate("lever", 40, probe=probe, workers=1, log=lambda m: None)
+    assert len(seen) == 40
+    dead_sampled = [s for s in seen if int(s[1:]) < 50]
+    assert dead_sampled, "the audit skipped every known-dead slug"
+
+
+def test_audit_sample_is_a_random_draw_not_a_prefix(monkeypatch):
+    """A prefix would sample whatever order the files happen to be in.
+
+    "not confined to a prefix" has to be asserted as inequality against the
+    actual prefix -- checking that the highest index is large passes for a
+    prefix too, which is how that mutant survived once.
+    """
+    population = [f"s{i}" for i in range(50)]
+    monkeypatch.setattr(v, "load_candidates", lambda p: list(population))
+    seen: list[str] = []
+    v.audit_live_rate("lever", 30, probe=lambda s: seen.append(s) or False,
+                      workers=1, log=lambda m: None)
+    assert sorted(seen) != sorted(population[:30]), "the audit took a prefix"
+
+
+def test_audit_writes_nothing(sandbox, capsys):
+    """"Deliberately read-only": an audit that recorded verdicts would reshape
+    the population it is measuring."""
+    v.audit_live_rate("lever", 3, probe=lambda s: False, workers=1,
+                      log=lambda m: None)
+    assert list((sandbox / "dead").iterdir()) == []
+    assert list((sandbox / "checked").iterdir()) == []
+
+
+def test_sample_verdicts_are_recorded(sandbox, capsys):
+    """The counterpart: --sample is working, not measuring, so it must write."""
+    assert v.main(["--platform", "lever", "--sample", "3", "--json",
+                   "--budget-seconds", "0"]) == 0
+    assert (sandbox / "dead" / "lever.json").exists(), (
+        "--sample stopped recording; it is a working pass, not an audit")

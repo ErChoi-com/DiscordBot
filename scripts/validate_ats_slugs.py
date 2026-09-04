@@ -667,6 +667,13 @@ def select_targets(platform: str, dead: dict[str, str], *, recheck_dead: bool,
     Unchecked slugs first, then dead marks old enough to deserve another look.
     Ordering matters when --limit bounds the run: spending the budget on slugs
     nobody has ever probed beats re-confirming what we already believe.
+
+    Note what this means for --sample, which draws from the result: a slug
+    marked dead too recently to be stale is not a target, so it cannot be
+    sampled. The sample is therefore of survivors, and its live rate is not an
+    estimate of the population's -- measured on the same data the working pass
+    reported 97.5% against a uniform sample's 38.8%. audit_live_rate is the one
+    that samples the population.
     """
     candidates = load_candidates(platform)
     # Uncorroborated slugs first among the unchecked ones. What predicts a live
@@ -978,7 +985,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=None,
                         help="max slugs to probe per platform")
     parser.add_argument("--sample", type=int, default=None,
-                        help="probe a random sample (for measuring live rates)")
+                        help="probe a random sample of this run's targets and "
+                             "RECORD the verdicts. Not a measurement tool: "
+                             "targets exclude slugs already marked dead, so the "
+                             "live rate it reports is of survivors, not of the "
+                             "population. Use --audit-sample for that.")
     parser.add_argument("--recheck-dead", action="store_true",
                         help="re-probe every dead mark, ignoring the recheck window")
     parser.add_argument("--ttl-days", type=int, default=90,
@@ -991,7 +1002,8 @@ def main(argv: list[str] | None = None) -> int:
                              "remaining time between the platforms still to go, "
                              "so a fast one leaves its slack to a slow one")
     parser.add_argument("--audit-sample", type=int, default=0,
-                        help="also probe N random slugs per platform, read-only, "
+                        help="also probe N slugs drawn uniformly from the whole "
+                             "population INCLUDING known-dead ones, read-only, "
                              "to estimate the true population live rate")
     parser.add_argument("--dry-run", action="store_true",
                         help="probe and report, write nothing")
