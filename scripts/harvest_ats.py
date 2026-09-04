@@ -1505,7 +1505,8 @@ def write_slugs(path: Path, slugs: Iterable[str]) -> None:
 
 
 def prune_existing(out_dir: Path, platforms: Iterable[Platform], *,
-                   log: Callable[[str], None] = print) -> dict[str, dict[str, int]]:
+                   log: Callable[[str], None] = print,
+                   dry_run: bool = False) -> dict[str, dict[str, int]]:
     """Re-apply the current extraction rules to already-harvested files.
 
     Harvest output is cumulative and published, so a slug written by an older
@@ -1518,6 +1519,11 @@ def prune_existing(out_dir: Path, platforms: Iterable[Platform], *,
     slug a fresh harvest would keep. It runs offline: no index, no probing.
     Liveness is not its business -- a dead company is still a company, and the
     dead-slug machinery owns that decision.
+
+    With *dry_run* the report is identical but nothing is written, so the one
+    operation here that removes published data can be reviewed before it
+    happens. --dry-run promises "write nothing" and this path ignored it
+    entirely, which meant auditing a prune performed it.
     """
     report: dict[str, dict[str, int]] = {}
     for platform in platforms:
@@ -1576,8 +1582,9 @@ def prune_existing(out_dir: Path, platforms: Iterable[Platform], *,
                 detail.append("rewrote " + str(len(rewritten)) + ": "
                               + ", ".join(f"{a}->{b}" for a, b in pairs))
             log(f"[prune] {platform.name}: {len(before)} -> {len(kept)} "
-                f"({'; '.join(detail)})")
-            write_slugs(path, kept)
+                f"({'; '.join(detail)}){' [dry-run, not written]' if dry_run else ''}")
+            if not dry_run:
+                write_slugs(path, kept)
         else:
             log(f"[prune] {platform.name}: {len(before)} clean")
     return report
@@ -1783,7 +1790,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prune", action="store_true",
                         help="re-apply current extraction rules to the existing "
                              "harvest files and exit; makes filter fixes "
-                             "retroactive. Offline, no probing.")
+                             "retroactive. Offline, no probing. Honours "
+                             "--dry-run, which reports without writing.")
     parser.add_argument("--index", action="append", dest="indexes",
                         choices=["commoncrawl", "ccbulk", "wayback"],
                         help="which archive(s) to sweep (repeatable; "
@@ -1825,7 +1833,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         if args.prune:
-            report = prune_existing(args.out, selected, log=log)
+            report = prune_existing(args.out, selected, log=log,
+                                    dry_run=args.dry_run)
             if args.json:
                 print(json.dumps({"pruned": report}, indent=2))
             return 0

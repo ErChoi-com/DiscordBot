@@ -2046,3 +2046,74 @@ def test_hex_ids_are_rejected_but_long_hex_like_names_are_not():
                  "crestwoodbehavioralhealthsystems"):    # 32 chars
         assert len(slug) >= 32, "shorter than this never reaches the rule"
         assert hc._looks_like_company(slug) is True, slug
+
+
+# --------------------------------------------------------------------------
+# --prune honours --dry-run
+# --------------------------------------------------------------------------
+
+def _prune_fixture(tmp_path):
+    """One slug the current rules keep, one they drop."""
+    (tmp_path / "lever.json").write_text(
+        json.dumps(["acme", "jobs"], indent=1), encoding="utf-8")
+    return tmp_path / "lever.json"
+
+
+def test_prune_dry_run_reports_without_writing(tmp_path):
+    """--dry-run promises "write nothing", and prune ignored it completely.
+
+    That made auditing a prune perform one -- on the only operation here that
+    removes already-published data, where reviewing before acting matters most.
+    """
+    path = _prune_fixture(tmp_path)
+    before = path.read_text(encoding="utf-8")
+
+    report = hc.prune_existing(tmp_path, [hc.PLATFORM_BY_NAME["lever"]],
+                               log=lambda m: None, dry_run=True)
+
+    assert path.read_text(encoding="utf-8") == before, "dry run wrote the file"
+    # The report must still be complete, or a dry run cannot be reviewed.
+    assert report["lever"]["dropped"] == 1
+    assert report["lever"]["before"] == 2
+    assert report["lever"]["kept"] == 1
+
+
+def test_prune_without_dry_run_still_writes(tmp_path):
+    """The guard must not disable pruning outright."""
+    path = _prune_fixture(tmp_path)
+    hc.prune_existing(tmp_path, [hc.PLATFORM_BY_NAME["lever"]],
+                      log=lambda m: None)
+    assert json.loads(path.read_text(encoding="utf-8")) == ["acme"]
+
+
+def test_prune_dry_run_and_real_run_agree(tmp_path):
+    """A dry run that reports something other than what the real one does is
+    worse than no dry run at all."""
+    path = _prune_fixture(tmp_path)
+    dry = hc.prune_existing(tmp_path, [hc.PLATFORM_BY_NAME["lever"]],
+                            log=lambda m: None, dry_run=True)
+    real = hc.prune_existing(tmp_path, [hc.PLATFORM_BY_NAME["lever"]],
+                             log=lambda m: None)
+    assert dry == real
+    assert json.loads(path.read_text(encoding="utf-8")) == ["acme"]
+
+
+def test_prune_dry_run_says_so_in_the_log(tmp_path):
+    """Otherwise the log reads exactly like a prune that happened."""
+    _prune_fixture(tmp_path)
+    lines: list[str] = []
+    hc.prune_existing(tmp_path, [hc.PLATFORM_BY_NAME["lever"]],
+                      log=lines.append, dry_run=True)
+    assert any("dry-run" in line for line in lines), lines
+
+
+def test_prune_cli_passes_dry_run_through(tmp_path, monkeypatch):
+    """Pins the wiring: the flag existing is not the same as it being used."""
+    path = _prune_fixture(tmp_path)
+    before = path.read_text(encoding="utf-8")
+
+    rc = hc.main(["--platform", "lever", "--prune", "--dry-run",
+                  "--out", str(tmp_path)])
+
+    assert rc == 0
+    assert path.read_text(encoding="utf-8") == before, "CLI dry run wrote the file"
