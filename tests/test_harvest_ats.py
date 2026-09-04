@@ -1904,3 +1904,145 @@ def test_prune_drops_encoding_residue_that_duplicates_a_real_slug(tmp_path):
     assert "2frocketdoctor" not in kept and "rocketdoctor" in kept
     assert "2forphanonly" in kept, "dropped a slug with no evidence it is residue"
     assert "2fast" in kept, "ate a real company that starts with 2f"
+
+
+# --------------------------------------------------------------------------
+# Structural plausibility -- the rules added after real junk was harvested
+# --------------------------------------------------------------------------
+#
+# The harvest is additive and never removes, so a slug this filter lets through
+# stays in the file permanently and is probed on every validation run forever.
+# Each rule below exists because that already happened, and each is paired with
+# the real company it could plausibly eat -- a filter that only rejects is as
+# broken as one that only accepts, and the accept half is the half that fails
+# silently, because a missing company looks exactly like a company that never
+# had a board.
+
+@pytest.mark.parametrize("slug", [
+    "100", "104", "103644278",
+])
+def test_bare_numbers_are_job_ids_not_companies(slug):
+    """Greenhouse URLs also take /<board>/jobs/<numeric-id>, which put 325 bare
+    numbers into the company slot."""
+    assert hc._looks_like_company(slug) is False
+
+
+@pytest.mark.parametrize("slug", [
+    "10up-2", "0x", "1password", "3m",
+])
+def test_slugs_that_merely_start_with_digits_are_kept(slug):
+    """The rule is all-digits, not starts-with-a-digit."""
+    assert hc._looks_like_company(slug) is True
+
+
+@pytest.mark.parametrize("slug", [
+    "logo.png", "sprite.svg", "styles.css", "app.js", "data.json",
+    "index.html", "font.woff2", "bundle.map",
+])
+def test_static_assets_are_rejected(slug):
+    assert hc._looks_like_company(slug) is False
+
+
+@pytest.mark.parametrize("slug", ["en-us", "de-de", "fr-ca", "pt-br", "zh-cn"])
+def test_locale_segments_are_rejected(slug):
+    """Localised board URLs put the locale where the company goes."""
+    assert hc._looks_like_company(slug) is False
+
+
+@pytest.mark.parametrize("slug", ["fr", "en", "de"])
+def test_bare_language_codes_are_kept_deliberately(slug):
+    """Only hyphenated pairs are treated as locales.
+
+    A bare two-letter segment is ambiguous -- it is as likely to be a short
+    company slug as a language code -- and the live probe is the arbiter of
+    which. Pinned so that widening the locale set to bare codes is a decision
+    someone makes on purpose, not a silent cull of short companies.
+    """
+    assert not any("-" not in entry for entry in hc._LOCALE_SLUGS)
+    assert hc._looks_like_company(slug) is True
+
+
+@pytest.mark.parametrize("slug", [
+    "2fwww", "2fcareers-aei", "252fwww", "252fcareers-aei",
+])
+def test_undecoded_percent_encoding_is_rejected(slug):
+    """A "%2f" that was never decoded leaves "2f" glued to the real label.
+
+    93 of these were harvested across bamboohr, icims and applicantpro, every
+    one a duplicate of a slug already held under its correct name.
+    """
+    assert hc._looks_like_company(slug) is False
+
+
+@pytest.mark.parametrize("slug", ["2fabric", "2forward", "2f", "252fresh"])
+def test_a_company_legitimately_starting_with_2f_survives(slug):
+    """The residue is stripped only when what remains is itself junk, so this
+    rule cannot eat a real name that happens to start with those characters."""
+    assert hc._looks_like_company(slug) is True
+
+
+@pytest.mark.parametrize("slug", [
+    "affinity.co", "akasa.com", "alignment.org", "adept.ai",
+])
+def test_companies_using_their_own_domain_are_kept(slug):
+    """Dots cannot simply be rejected -- these are all live boards."""
+    assert hc._looks_like_company(slug) is True
+
+
+@pytest.mark.parametrize("slug", ["2.5", "2021b-49.2", "2022ae-13.3", "u.s.a"])
+def test_version_strings_are_rejected(slug):
+    """What separates a domain from a version is the final segment: a TLD is
+    two or more letters, while these end in digits or a single letter.
+
+    Checking for a two-letter run anywhere is not enough -- the "ae" in
+    2022ae-13.3 is itself a valid TLD, which is why the rule anchors on the
+    part after the *final* dot.
+    """
+    assert hc._looks_like_company(slug) is False
+
+
+@pytest.mark.parametrize("slug", ["harrison&star", "a+b", "at&t"])
+def test_ampersand_and_plus_are_part_of_the_identifier(slug):
+    """harrison&star is a live Greenhouse board and harrisonstar is not.
+
+    Safe because the extractors take a single path segment ([^/?#]+), so
+    neither character can be query-string spill. Rare -- about one segment in
+    700 -- which is exactly why losing them would go unnoticed.
+    """
+    assert hc._looks_like_company(slug) is True
+
+
+def test_long_vowelless_strings_are_machine_generated():
+    """A presence test is not enough: the real capture below has vowels, just
+    7% of them, against 23-38% for genuine long slugs.
+
+    The accept cases have to be at least 20 characters or they never reach the
+    rule at all -- "advocateslawcareers" is 19, so using it here proved
+    nothing, and a mutation that raised the threshold to 40% survived. They
+    also have to sit *between* the real threshold and any plausible wrong one,
+    which is why 23% and 26% are included: a slug at 45% passes almost any
+    threshold and so tests almost nothing.
+    """
+    assert hc._looks_like_company("5364856uhdfnvbkldfnbhrpkdfgbdvtyhro") is False
+    for slug in ("northwestdentalpartnersgrp",      # 26 chars, 23% vowels
+                 "grandstrandhealthcaresystem",     # 27 chars, 26% vowels
+                 "westchestermedicalcenterhealth"):  # 30 chars, 33% vowels
+        assert len(slug) >= 20, "shorter than this never reaches the rule"
+        assert hc._looks_like_company(slug) is True, slug
+
+
+def test_the_vowel_rule_only_applies_to_long_unseparated_slugs():
+    """Separators mean a human wrote it, so the ratio is not consulted."""
+    assert hc._looks_like_company("nyc-hr-tech-grp-bk-ny") is True
+    assert hc._looks_like_company("bcdfghjk") is True  # short, so not judged
+
+
+def test_hex_ids_are_rejected_but_long_hex_like_names_are_not():
+    assert hc._looks_like_company("1945bce8d3924ece9421ba8630f57b0c") is False
+    # At or over the 32-character threshold and not hex. The comparison slug
+    # has to actually reach the threshold: a 30-character one survives a
+    # mutation that drops the hex test entirely, which is how that mutant lived.
+    for slug in ("stjohnsriverstatecollegefoundation",   # 34 chars
+                 "crestwoodbehavioralhealthsystems"):    # 32 chars
+        assert len(slug) >= 32, "shorter than this never reaches the rule"
+        assert hc._looks_like_company(slug) is True, slug
