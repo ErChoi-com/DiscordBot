@@ -89,3 +89,102 @@ def test_bogus_slugs_are_plural():
     """
     assert len(c.BOGUS_SLUGS) >= 3
     assert len(set(c.BOGUS_SLUGS)) == len(c.BOGUS_SLUGS)
+
+
+# ── the third direction: the vendor's own hostnames ─────────────────────────
+#
+# Invented slugs 404 everywhere, so a probe that reads the vendor's own host as
+# a tenant passes both of the original checks. Every VENDOR_HOSTS entry was a
+# real false positive before the probes learned to check where the response
+# landed: api.breezy.hr serves Breezy's API docs, www4.icims.com redirects to
+# iCIMS's marketing site, and login.recruitee.com lands on a *different
+# tenant's* board -- which would file that company's jobs under "login".
+
+def test_a_vendor_host_read_as_live_is_caught():
+    assert c.assess([False, False], [True, True], [True]) == c.VENDOR_LIVE
+    assert c.assess([False, False], [True, True], [False, True]) == c.VENDOR_LIVE
+
+
+def test_vendor_hosts_reading_dead_is_the_healthy_case():
+    assert c.assess([False, False], [True, True], [False, False]) == c.OK
+
+
+def test_no_vendor_hosts_configured_is_not_a_failure():
+    """Only the subdomain platforms have a known vendor host; the rest pass
+    without one rather than being reported as unchecked."""
+    assert c.assess([False, False], [True, True], []) == c.OK
+    assert c.assess([False, False], [True, True]) == c.OK
+
+
+def test_an_unreachable_vendor_host_is_not_a_verdict():
+    """Same rule as the other two directions: an outage is not evidence."""
+    assert c.assess([False, False], [True, True], [None]) == c.OK
+    assert c.assess([False, False], [True, True],
+                    [RuntimeError("boom")]) == c.OK
+
+
+def test_the_more_fundamental_failures_are_reported_first():
+    """A stuck probe is broken in a way that makes the vendor result noise."""
+    assert c.assess([True, True], [True], [True]) == c.STUCK_TRUE
+    assert c.assess([False, False], [False, False], [True]) == c.STUCK_FALSE
+
+
+@pytest.mark.parametrize("platform, hosts", sorted(c.VENDOR_HOSTS.items()))
+def test_every_configured_vendor_host_belongs_to_a_real_platform(platform, hosts):
+    import validate_ats_slugs as v
+
+    assert platform in v.PROBES
+    assert hosts, "an empty tuple silently disables the check for this platform"
+
+
+def test_vendor_hosts_cover_the_platforms_that_needed_the_fix():
+    """These five are the host-based probes that check where a 200 landed.
+
+    A platform dropping out of this map would lose the only live check for the
+    regression it was added for.
+    """
+    assert {"icims", "breezy", "recruitee", "bamboohr", "jazzhr"} <= set(c.VENDOR_HOSTS)
+
+
+def test_check_platform_actually_probes_the_vendor_hosts(monkeypatch):
+    """Pins the wiring, not the judgement.
+
+    assess() can be entirely correct while check_platform never gathers the
+    vendor answers -- a mutation that passed an empty list left every other test
+    in this file passing, because they all call assess() directly.
+    """
+    import random
+
+    import validate_ats_slugs as v
+
+    asked: list[str] = []
+
+    def probe(slug):
+        asked.append(slug)
+        return slug.startswith("real")
+
+    monkeypatch.setitem(v.PROBES, "breezy", probe)
+    monkeypatch.setattr(v, "load_checked", lambda p: {"real1": "2026-09-01"})
+    monkeypatch.setitem(c.VENDOR_HOSTS, "breezy", ("api",))
+
+    verdict, bogus, live, vendor = c.check_platform("breezy", 1, random.Random(0))
+    assert "api" in asked, "the vendor host was never probed"
+    assert vendor == [False]
+    assert verdict == c.OK
+
+
+def test_check_platform_reports_a_vendor_host_that_reads_live(monkeypatch):
+    """And the verdict has to come back out, not just be gathered."""
+    import random
+
+    import validate_ats_slugs as v
+
+    monkeypatch.setitem(v.PROBES, "breezy", lambda slug: True)
+    monkeypatch.setattr(v, "load_checked", lambda p: {"real1": "2026-09-01"})
+    monkeypatch.setitem(c.VENDOR_HOSTS, "breezy", ("api",))
+
+    verdict, _bogus, _live, vendor = c.check_platform("breezy", 1, random.Random(0))
+    # Invented slugs also come back True here, so the more fundamental failure
+    # is the one reported -- that ordering is deliberate.
+    assert verdict == c.STUCK_TRUE
+    assert vendor == [True]

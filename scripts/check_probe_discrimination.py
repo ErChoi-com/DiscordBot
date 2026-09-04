@@ -14,8 +14,16 @@ silent, and both are destructive:
     the full TTL. The historical check only tested the "no" direction, so this
     half was never covered at all.
 
-So both directions are checked here: invented slugs must all come back False,
-and known-live slugs must not come back all False.
+  * A probe that reads the **vendor's own hostname** as a tenant confirms
+    companies that do not exist. Invented slugs cannot test this -- they 404
+    everywhere -- so a probe in this state passes the other two checks
+    perfectly. api.breezy.hr serves Breezy's API docs, www4.icims.com redirects
+    to iCIMS's marketing site, and login.recruitee.com lands on a *different
+    tenant's* board, which would file that company's jobs under "login".
+
+So three directions are checked: invented slugs must all come back False,
+known-live slugs must not come back all False, and the vendor hosts in
+VENDOR_HOSTS must all come back False.
 
 This talks to every platform, so it cannot live in the test suite (those must
 stay hermetic). `assess` is pure and is tested there instead.
@@ -48,13 +56,31 @@ BOGUS_SLUGS: tuple[str, ...] = (
     "xkcd404nothinghere",
 )
 
+#: Real hostnames belonging to the vendor rather than to any customer, each one
+#: verified to answer 200 and redirect away from the host that was asked for.
+#: This is the third direction, and it is the one invented slugs cannot test:
+#: `zzznotarealcompany7788` 404s everywhere, so a probe that reads the vendor's
+#: own marketing site, API docs or -- in recruitee's case -- a *different
+#: tenant's* board as a live company still passes the other two checks
+#: perfectly. Every entry here was a live false positive before the probes
+#: learned to check where the response landed.
+VENDOR_HOSTS: dict[str, tuple[str, ...]] = {
+    "icims": ("www4",),            # -> www.icims.com
+    "breezy": ("api",),            # -> developer.breezy.hr (API docs)
+    "recruitee": ("blog", "login"),  # -> recruitee.com/blog; loginsoftware.recruitee.com
+    "bamboohr": ("api2", "cdn3"),  # -> www.bamboohr.com
+    "jazzhr": ("www",),            # -> www.jazzhr.com/job-seekers
+}
+
 OK = "ok"
 STUCK_TRUE = "stuck-true"
 STUCK_FALSE = "stuck-false"
 NO_DATA = "no-data"
+VENDOR_LIVE = "vendor-host-read-as-live"
 
 
-def assess(bogus: Iterable[Any], live: Iterable[Any]) -> str:
+def assess(bogus: Iterable[Any], live: Iterable[Any],
+           vendor: Iterable[Any] = ()) -> str:
     """Verdict for one probe from its answers on invented and known-live slugs.
 
     `Unreachable` and exceptions are neither a yes nor a no -- an outage must
@@ -71,6 +97,12 @@ def assess(bogus: Iterable[Any], live: Iterable[Any]) -> str:
         return STUCK_TRUE
     if not any(live_answers):
         return STUCK_FALSE
+    # Checked last: a probe that is broken in the first two ways is broken more
+    # fundamentally, and reporting the vendor result for it would be noise.
+    # Unreachable answers are dropped here for the same reason as elsewhere --
+    # an outage is not a verdict.
+    if any(v is True for v in vendor if isinstance(v, bool)):
+        return VENDOR_LIVE
     return OK
 
 
@@ -89,7 +121,8 @@ def check_platform(name: str, sample: int, rng: random.Random) -> tuple[str, lis
     known = sorted(v.load_checked(name))
     rng.shuffle(known)
     live = [_probe(fn, s) for s in known[:sample]]
-    return assess(bogus, live), bogus, live
+    vendor = [_probe(fn, s) for s in VENDOR_HOSTS.get(name, ())]
+    return assess(bogus, live, vendor), bogus, live, vendor
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -111,11 +144,17 @@ def main(argv: list[str] | None = None) -> int:
 
     failures: list[str] = []
     for name in names:
-        verdict, bogus, live = check_platform(name, args.sample, rng)
+        verdict, bogus, live, vendor = check_platform(name, args.sample, rng)
         live_yes = sum(1 for r in live if r is True)
         note = "" if verdict == OK else f"  <-- {verdict.upper()}"
+        vendor_note = ""
+        if vendor:
+            wrong = [h for h, r in zip(VENDOR_HOSTS[name], vendor) if r is True]
+            vendor_note = f" vendor-ok={len(vendor) - len(wrong)}/{len(vendor)}"
+            if wrong:
+                vendor_note += f" read-as-live={wrong}"
         print(f"{name:<16} bogus={['T' if b is True else 'F' if b is False else '?' for b in bogus]} "
-              f"live={live_yes}/{len(live)}{note}")
+              f"live={live_yes}/{len(live)}{vendor_note}{note}")
         if verdict != OK:
             failures.append(f"{name}: {verdict}")
 
@@ -123,10 +162,12 @@ def main(argv: list[str] | None = None) -> int:
     if failures:
         print("FAILED: " + "; ".join(failures))
         print("A stuck-true probe marks nothing dead; a stuck-false one marks "
-              "every company on the platform dead. Do not run a validation "
-              "pass until this is fixed.")
+              "every company on the platform dead; one that reads a vendor host "
+              "as live will confirm companies that do not exist. Do not run a "
+              "validation pass until this is fixed.")
         return 1
-    print(f"all {len(names)} probes discriminate in both directions")
+    print(f"all {len(names)} probes discriminate: no to invented slugs, yes to "
+          f"known-live ones, no to the vendor's own hosts")
     return 0
 
 
