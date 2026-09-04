@@ -398,7 +398,13 @@ def live_breezy(slug: str) -> bool:
     # Breezy gives each company a subdomain and 404s an unknown one outright,
     # so the status is the whole answer. Verified against 25 harvested slugs,
     # 24 live.
-    status, _, _ = _request(f"https://{slug}.breezy.hr/")
+    # ...except when it redirects instead. api.breezy.hr answers 200 and lands
+    # on developer.breezy.hr, Breezy's API documentation, which the status alone
+    # reads as a live board. Same tell as bamboohr and jazzhr: a real tenant's
+    # response stays on the tenant's own host.
+    status, _, final = _request(f"https://{slug}.breezy.hr/")
+    if status == 200 and final and f"{slug}.breezy.hr" not in final:
+        return False
     return _decide(status)
 
 
@@ -439,7 +445,14 @@ def live_rippling(slug: str) -> bool:
 
 
 def live_teamtailor(slug: str) -> bool:
-    status, _, _ = _request(f"https://{slug}.teamtailor.com/jobs")
+    # Teamtailor 404s its own non-tenant hosts (www, api, support, blog all
+    # verified), so nothing is redirecting today. The host check is here anyway
+    # because the other four subdomain platforms all needed it eventually, and
+    # a vendor that starts redirecting would otherwise turn every colliding
+    # slug live without anything failing.
+    status, _, final = _request(f"https://{slug}.teamtailor.com/jobs")
+    if status == 200 and final and f"{slug}.teamtailor.com" not in final:
+        return False
     return _decide(status)
 
 
@@ -463,7 +476,15 @@ def live_recruitee(slug: str) -> bool:
     # The offers API 404s an unknown company outright, so the status is the
     # whole answer. It is also the endpoint _scrape_recruitee reads, so a
     # company this calls live is one the scraper can actually pull jobs from.
-    status, _, _ = _request(f"https://{slug}.recruitee.com/api/offers/")
+    #
+    # The offers endpoint redirects too, in two ways that both read as live:
+    # blog.recruitee.com lands on recruitee.com/blog, and login.recruitee.com
+    # lands on loginsoftware.recruitee.com -- a *different company's* board,
+    # which would credit one tenant's jobs to another slug. So the response has
+    # to have stayed on the host that was asked for.
+    status, _, final = _request(f"https://{slug}.recruitee.com/api/offers/")
+    if status == 200 and final and f"{slug}.recruitee.com" not in final:
+        return False
     return _decide(status)
 
 

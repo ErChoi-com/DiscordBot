@@ -533,3 +533,87 @@ def test_the_workday_impossibility_is_still_retired():
     wd1.wd1.myworkdayjobs.com, which cannot exist. Not a guess."""
     retired, _ = v.partition_unscrapeable("workday", ["wd1|wd1|careers"])
     assert retired == ["wd1|wd1|careers"]
+
+
+# ── every host-based probe must reject an off-host redirect ─────────────────
+#
+# Five of the seven subdomain platforms needed this rule, each found separately:
+# bamboohr and jazzhr had it, live_icims was fixed last, and breezy and
+# recruitee were found by auditing the rest. The measured false positives:
+# api.breezy.hr answers 200 and lands on developer.breezy.hr (Breezy's API
+# docs), blog.recruitee.com lands on recruitee.com/blog, and
+# login.recruitee.com lands on loginsoftware.recruitee.com -- a *different
+# company's* board, which would credit that tenant's jobs to the slug "login".
+#
+# Invented slugs 404 properly on all of them, so check_probe_discrimination.py
+# passes either way. The blind spot is real hostnames that are not tenants.
+
+_HOST_PROBES = [
+    ("bamboohr", "live_bamboohr", "{slug}.bamboohr.com", "https://www.bamboohr.com/"),
+    ("jazzhr", "live_jazzhr", "{slug}.applytojob.com", "https://www.jazzhr.com/job-seekers"),
+    ("breezy", "live_breezy", "{slug}.breezy.hr", "https://developer.breezy.hr/reference/overview"),
+    ("recruitee", "live_recruitee", "{slug}.recruitee.com", "https://recruitee.com/blog"),
+    ("teamtailor", "live_teamtailor", "{slug}.teamtailor.com", "https://www.teamtailor.com/"),
+]
+
+
+@pytest.mark.parametrize("platform, fn_name, host_tpl, elsewhere", _HOST_PROBES)
+def test_a_200_that_lands_off_the_tenant_host_is_not_live(
+        monkeypatch, platform, fn_name, host_tpl, elsewhere):
+    monkeypatch.setattr(v, "_request", lambda url, **kw: (200, b'{"x":1}', elsewhere))
+    assert getattr(v, fn_name)("acme") is False
+
+
+@pytest.mark.parametrize("platform, fn_name, host_tpl, elsewhere", _HOST_PROBES)
+def test_a_200_that_stays_on_the_tenant_host_is_live(
+        monkeypatch, platform, fn_name, host_tpl, elsewhere):
+    """The other half: the guard must not condemn real tenants."""
+    host = host_tpl.format(slug="acme")
+    body = b'{"meta":{"totalCount":1},"result":[{"id":1}]}'
+    monkeypatch.setattr(v, "_request",
+                        lambda url, **kw: (200, body, f"https://{host}/careers/list"))
+    assert getattr(v, fn_name)("acme") is True
+
+
+def test_recruitee_does_not_credit_another_tenants_board_to_this_slug(monkeypatch):
+    """login.recruitee.com really does land on loginsoftware.recruitee.com.
+
+    Substring matching the vendor domain rather than the full host would accept
+    it, since both end in .recruitee.com -- and the jobs of a real company would
+    be filed under the slug "login".
+    """
+    monkeypatch.setattr(v, "_request", lambda url, **kw: (
+        200, b"[]", "https://loginsoftware.recruitee.com/api/offers/"))
+    assert v.live_recruitee("login") is False
+
+
+@pytest.mark.parametrize("platform, fn_name, host_tpl, elsewhere", _HOST_PROBES)
+def test_a_non_200_is_still_decided_normally(monkeypatch, platform, fn_name,
+                                             host_tpl, elsewhere):
+    """The host check only applies to a 200. A 404 is still dead and a refusal
+    is still Unreachable -- reading either as "off host" would turn an outage
+    into a wave of dead marks."""
+    monkeypatch.setattr(v, "_request", lambda url, **kw: (404, b"", elsewhere))
+    assert getattr(v, fn_name)("acme") is False
+
+    monkeypatch.setattr(v, "_request", lambda url, **kw: (None, b"", None))
+    with pytest.raises(v.Unreachable):
+        getattr(v, fn_name)("acme")
+
+
+@pytest.mark.parametrize("platform, fn_name, host_tpl, elsewhere", _HOST_PROBES)
+@pytest.mark.parametrize("status", [403, 429, 503])
+def test_a_refusal_is_unreachable_even_when_the_final_url_is_elsewhere(
+        monkeypatch, platform, fn_name, host_tpl, elsewhere, status):
+    """The host check must apply only to a 200.
+
+    A 403/429/503 is a refusal, and refusals carry whatever final URL the
+    vendor's error page happens to have. Letting the host check answer for them
+    turns every refusal into a dead mark -- the false-closure shape that once
+    had lever and iCIMS marking companies dead when one host merely refused.
+    A 404 hides this, since dead is the right answer there either way, which is
+    why these three statuses get their own case.
+    """
+    monkeypatch.setattr(v, "_request", lambda url, **kw: (status, b"", elsewhere))
+    with pytest.raises(v.Unreachable):
+        getattr(v, fn_name)("acme")
