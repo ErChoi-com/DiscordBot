@@ -43,6 +43,16 @@ OK = "ok"
 SILENT = "silent"
 NO_COVERAGE = "no-coverage"
 
+#: job_service matches semantically against "description", so a platform that
+#: supplies none is invisible to matching rather than merely sparse. Measured
+#: over one week: teamtailor, recruitee, rippling, jazzhr, workable and jobvite
+#: sit at 100%, while workday, greenhouse, ashby, icims, lever and
+#: smartrecruiters -- 74% of all archived ATS jobs -- sit between 1% and 6%.
+#: Advisory rather than fatal: a thin description is a quality problem, while a
+#: silent platform is a broken one, and collapsing the two would make the exit
+#: status useless for gating.
+MIN_DESCRIPTION_PCT = 20.0
+
 
 def confirmed_live(platform: str, checked_dir: Path | None = None) -> int:
     """How many companies this platform has that were confirmed live.
@@ -80,6 +90,32 @@ def count_by_platform(records: Iterable[dict[str, Any]],
     return counts
 
 
+def describe_coverage(records: Iterable[dict[str, Any]],
+                      platforms: Iterable[str]) -> dict[str, tuple[int, int]]:
+    """(jobs, jobs carrying a description) per platform.
+
+    Counted together with the totals rather than separately so the two can never
+    disagree about which records belong to a platform.
+    """
+    names = {p.lower() for p in platforms}
+    out = {p: [0, 0] for p in names}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        site = str(record.get("_source_site") or "").strip().lower()
+        if site not in out:
+            continue
+        out[site][0] += 1
+        if str(record.get("description") or "").strip():
+            out[site][1] += 1
+    return {p: (n, d) for p, (n, d) in out.items()}
+
+
+def description_pct(jobs: int, described: int) -> float:
+    """Share of a platform's jobs carrying a description, 0.0 when it has none."""
+    return (100.0 * described / jobs) if jobs else 0.0
+
+
 def assess(live: int, jobs: int, min_live: int) -> str:
     """Verdict for one platform.
 
@@ -99,6 +135,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-live", type=int, default=100,
                         help="confirmed-live companies below which silence "
                              "proves nothing (default 100)")
+    parser.add_argument("--min-description-pct", type=float,
+                        default=MIN_DESCRIPTION_PCT, metavar="PCT",
+                        help="advisory floor for description coverage "
+                             f"(default {MIN_DESCRIPTION_PCT:.0f}); reported, "
+                             "never fatal")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
@@ -113,26 +154,40 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:  # a corrupt zip must not hide the rest
             print(f"[yield] could not read {date_key}: {exc}", file=sys.stderr)
 
-    counts = count_by_platform(records, ats_service.ATS_PLATFORMS)
+    coverage = describe_coverage(records, ats_service.ATS_PLATFORMS)
+    counts = {p: n for p, (n, _d) in coverage.items()}
     rows = []
     silent = []
+    thin = []
     for platform in sorted(ats_service.ATS_PLATFORMS):
         live = confirmed_live(platform)
-        jobs = counts.get(platform, 0)
+        jobs, described = coverage.get(platform, (0, 0))
         verdict = assess(live, jobs, args.min_live)
+        pct = description_pct(jobs, described)
         rows.append({"platform": platform, "confirmed_live": live,
-                     "archived_jobs": jobs, "verdict": verdict})
+                     "archived_jobs": jobs, "with_description": described,
+                     "description_pct": round(pct, 1), "verdict": verdict})
         if verdict == SILENT:
             silent.append(platform)
+        elif verdict == OK and pct < args.min_description_pct:
+            thin.append(f"{platform} ({pct:.0f}%)")
 
     if args.json:
         print(json.dumps({"days": args.days, "platforms": rows}, indent=2))
     else:
-        print(f"{'platform':<16}{'live':>8}{'jobs':>8}  verdict")
+        print(f"{'platform':<16}{'live':>8}{'jobs':>8}{'desc':>7}  verdict")
         for row in rows:
             note = "" if row["verdict"] == OK else f"  <-- {row['verdict'].upper()}"
             print(f"{row['platform']:<16}{row['confirmed_live']:>8}"
-                  f"{row['archived_jobs']:>8}{note}")
+                  f"{row['archived_jobs']:>8}{row['description_pct']:>6.0f}%{note}")
+
+    if thin:
+        print()
+        print("Thin descriptions: " + ", ".join(thin))
+        print("job_service matches semantically against the description field, "
+              "so these platforms are invisible to matching rather than merely "
+              "sparse. Not fatal -- unlike a silent platform, they are still "
+              "delivering jobs.")
 
     if silent:
         print()
