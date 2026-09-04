@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CHECKED_DIR = REPO_ROOT / "data" / "ats_checked"
+DEAD_DIR = REPO_ROOT / "data" / "dead_slugs"
 
 OK = "ok"
 SILENT = "silent"
@@ -63,6 +64,40 @@ FIELD_CONSEQUENCE: dict[str, str] = {
     "date_posted": "EXEMPT from the 'newer than N hours' filter, so an old "
                    "posting is shown as though it were fresh.",
 }
+
+
+def _load_keys(path: Path) -> set[str]:
+    """Slug keys from a store file, empty when it is missing or unreadable."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if isinstance(data, dict):
+        return {str(k) for k in data}
+    if isinstance(data, list):
+        return {str(k) for k in data}
+    return set()
+
+
+def unvalidated(platform: str, candidates: Iterable[str],
+                checked_dir: Path | None = None,
+                dead_dir: Path | None = None) -> int:
+    """Companies never resolved either way.
+
+    The bot skips dead slugs but scrapes everything else, so an unvalidated slug
+    costs a request on every scrape cycle until a run reaches it -- which is the
+    whole reason the validator exists. Measured across the fleet it was 19%,
+    concentrated in a few platforms that simply had not been run: recruitee at
+    73%, applicantpro 65%, jazzhr 45%.
+
+    Not an error on its own. It is a backlog, and the fix is a validation pass
+    rather than a code change, so it is reported and never fatal.
+    """
+    checked_dir = CHECKED_DIR if checked_dir is None else checked_dir
+    dead_dir = DEAD_DIR if dead_dir is None else dead_dir
+    known = _load_keys(checked_dir / f"{platform}.json")
+    known |= _load_keys(dead_dir / f"{platform}.json")
+    return sum(1 for slug in candidates if slug not in known)
 
 
 def confirmed_live(platform: str, checked_dir: Path | None = None) -> int:
@@ -166,6 +201,21 @@ def assess(live: int, jobs: int, min_live: int) -> str:
     return SILENT if jobs == 0 else OK
 
 
+def _candidate_loader():
+    """The validator owns the definition of "every slug the bot would scrape".
+
+    Imported through a helper rather than at module scope so this script still
+    runs (reporting no backlog) if the validator cannot be imported, which
+    keeps the yield half of the report working on its own.
+    """
+    try:
+        import validate_ats_slugs
+
+        return validate_ats_slugs.load_candidates
+    except Exception:
+        return lambda _platform: []
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--days", type=int, default=7,
@@ -185,6 +235,8 @@ def main(argv: list[str] | None = None) -> int:
     from services.jba.merge_data import load_daily_log
     from services.job_match import window_dates
 
+    load_candidates = _candidate_loader()
+
     records: list[dict[str, Any]] = []
     for date_key in window_dates(args.days):
         try:
@@ -201,8 +253,15 @@ def main(argv: list[str] | None = None) -> int:
         counts = coverage.get(platform, {})
         jobs = counts.get("jobs", 0)
         verdict = assess(live, jobs, args.min_live)
+        try:
+            from services.jba import merge_data  # noqa: F401  (import cost only)
+            candidates = load_candidates(platform)
+        except Exception:
+            candidates = []
+        pending = unvalidated(platform, candidates)
         row: dict[str, Any] = {"platform": platform, "confirmed_live": live,
-                               "archived_jobs": jobs, "verdict": verdict}
+                               "archived_jobs": jobs, "unvalidated": pending,
+                               "verdict": verdict}
         for field in TRACKED_FIELDS:
             pct = description_pct(jobs, counts.get(field, 0))
             row[f"{field}_pct"] = round(pct, 1)
@@ -215,11 +274,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps({"days": args.days, "platforms": rows}, indent=2))
     else:
-        print(f"{'platform':<16}{'live':>8}{'jobs':>7}{'desc':>7}{'loc':>7}"
-              f"{'date':>7}  verdict")
+        print(f"{'platform':<16}{'live':>8}{'todo':>7}{'jobs':>7}{'desc':>7}"
+              f"{'loc':>7}{'date':>7}  verdict")
         for row in rows:
             note = "" if row["verdict"] == OK else f"  <-- {row['verdict'].upper()}"
             print(f"{row['platform']:<16}{row['confirmed_live']:>8}"
+                  f"{row['unvalidated']:>7}"
                   f"{row['archived_jobs']:>7}"
                   f"{row['description_pct']:>6.0f}%"
                   f"{row['location_pct']:>6.0f}%"
@@ -234,6 +294,17 @@ def main(argv: list[str] | None = None) -> int:
         print()
         print("Not fatal -- unlike a silent platform, these are still "
               "delivering jobs.")
+
+    backlog = sum(r["unvalidated"] for r in rows)
+    if backlog:
+        worst = sorted(rows, key=lambda r: -r["unvalidated"])[:4]
+        print()
+        print(f"Unvalidated: {backlog:,} companies never resolved either way, "
+              "worst " + ", ".join(f"{r['platform']} ({r['unvalidated']:,})"
+                                   for r in worst if r["unvalidated"]))
+        print("  -> each costs a request on every scrape cycle until a "
+              "validation pass reaches it. A backlog, not a fault: the fix is "
+              "a run, not a change.")
 
     if silent:
         print()

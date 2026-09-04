@@ -307,3 +307,123 @@ def test_describe_coverage_still_agrees_with_the_general_counter():
                {"_source_site": "lever"}]
     assert y.describe_coverage(records, ["lever"]) == {"lever": (2, 1)}
     assert y.field_coverage(records, ["lever"])["lever"]["description"] == 1
+
+
+# ── the unvalidated backlog ─────────────────────────────────────────────────
+#
+# The bot skips dead slugs but scrapes everything else, so a company that has
+# never been resolved either way costs a request on every scrape cycle until a
+# validation pass reaches it. Measured across the fleet: 19%, concentrated in
+# platforms that simply had not been run -- workable 90% (its quota is spent),
+# recruitee 73%, applicantpro 65%, jazzhr 45%.
+#
+# A backlog, not a fault: the fix is a run, not a code change, so it is
+# reported and never fatal.
+
+def test_unvalidated_counts_candidates_in_neither_store(tmp_path):
+    (tmp_path / "checked").mkdir()
+    (tmp_path / "dead").mkdir()
+    (tmp_path / "checked" / "lever.json").write_text(
+        json.dumps({"known-live": "2026-09-01"}), encoding="utf-8")
+    (tmp_path / "dead" / "lever.json").write_text(
+        json.dumps({"known-dead": "2026-09-01"}), encoding="utf-8")
+
+    n = y.unvalidated("lever", ["known-live", "known-dead", "never-asked"],
+                      checked_dir=tmp_path / "checked", dead_dir=tmp_path / "dead")
+    assert n == 1
+
+
+def test_a_dead_slug_counts_as_validated(tmp_path):
+    """A dead mark is an answer. Counting it as outstanding would report the
+    backlog as permanently unclearable, since dead slugs are never re-probed
+    until their recheck window."""
+    (tmp_path / "checked").mkdir()
+    (tmp_path / "dead").mkdir()
+    (tmp_path / "dead" / "lever.json").write_text(
+        json.dumps({"gone": "2026-09-01"}), encoding="utf-8")
+    assert y.unvalidated("lever", ["gone"], checked_dir=tmp_path / "checked",
+                         dead_dir=tmp_path / "dead") == 0
+
+
+def test_missing_stores_mean_everything_is_outstanding(tmp_path):
+    """A platform that has never been validated has no files at all, and that
+    is exactly the case worth reporting -- it must not read as zero."""
+    (tmp_path / "checked").mkdir()
+    (tmp_path / "dead").mkdir()
+    assert y.unvalidated("nosuch", ["a", "b", "c"],
+                         checked_dir=tmp_path / "checked",
+                         dead_dir=tmp_path / "dead") == 3
+
+
+def test_a_corrupt_store_does_not_hide_the_backlog(tmp_path):
+    (tmp_path / "checked").mkdir()
+    (tmp_path / "dead").mkdir()
+    (tmp_path / "checked" / "lever.json").write_text("{bad", encoding="utf-8")
+    assert y.unvalidated("lever", ["a"], checked_dir=tmp_path / "checked",
+                         dead_dir=tmp_path / "dead") == 1
+
+
+def test_both_store_shapes_are_read(tmp_path):
+    """dead_slugs is a {slug: date} map; some stores are plain lists."""
+    (tmp_path / "checked").mkdir()
+    (tmp_path / "dead").mkdir()
+    (tmp_path / "checked" / "lever.json").write_text(
+        json.dumps(["a"]), encoding="utf-8")
+    (tmp_path / "dead" / "lever.json").write_text(
+        json.dumps({"b": "2026-09-01"}), encoding="utf-8")
+    assert y.unvalidated("lever", ["a", "b", "c"],
+                         checked_dir=tmp_path / "checked",
+                         dead_dir=tmp_path / "dead") == 1
+
+
+def test_the_backlog_is_reported_but_never_fatal(archive, monkeypatch, capsys):
+    import services.jba.merge_data as merge
+
+    monkeypatch.setattr(merge, "load_daily_log", lambda d: [
+        {"_source_site": "greenhouse", "description": "d", "location": "L",
+         "date_posted": "x"},
+        {"_source_site": "paylocity", "description": "d", "location": "L",
+         "date_posted": "x"}])
+    monkeypatch.setattr(y, "DEAD_DIR", archive)
+    monkeypatch.setattr(y, "_candidate_loader",
+                        lambda: (lambda p: [f"{p}-never-asked"]))
+    rc = y.main(["--days", "1", "--min-live", "100"])
+    out = capsys.readouterr().out
+    assert rc == 0, "a backlog failed the run"
+    assert "Unvalidated:" in out
+    assert "a run, not a change" in out
+
+
+def test_no_backlog_prints_nothing(archive, monkeypatch, capsys):
+    import services.jba.merge_data as merge
+
+    monkeypatch.setattr(merge, "load_daily_log", lambda d: [
+        {"_source_site": "greenhouse", "description": "d", "location": "L",
+         "date_posted": "x"},
+        {"_source_site": "paylocity", "description": "d", "location": "L",
+         "date_posted": "x"}])
+    monkeypatch.setattr(y, "_candidate_loader", lambda: (lambda p: []))
+    y.main(["--days", "1", "--min-live", "100"])
+    assert "Unvalidated:" not in capsys.readouterr().out
+
+
+def test_an_unreadable_store_yields_no_keys_at_all(tmp_path):
+    """Asserted on the loader, not through unvalidated().
+
+    Going through unvalidated() only proves a *particular* candidate is still
+    counted, so a mutant returning some other non-empty set survives. The
+    property that matters is that a store which cannot be read contributes
+    nothing, because anything it did contribute would be invented.
+    """
+    (tmp_path / "missing.json")  # never created
+    assert y._load_keys(tmp_path / "missing.json") == set()
+
+    (tmp_path / "corrupt.json").write_text("{not json", encoding="utf-8")
+    assert y._load_keys(tmp_path / "corrupt.json") == set()
+
+    (tmp_path / "wrong-shape.json").write_text("42", encoding="utf-8")
+    assert y._load_keys(tmp_path / "wrong-shape.json") == set()
+
+    (tmp_path / "good.json").write_text(
+        json.dumps({"a": "2026-09-01"}), encoding="utf-8")
+    assert y._load_keys(tmp_path / "good.json") == {"a"}
