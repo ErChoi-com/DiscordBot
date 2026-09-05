@@ -96,3 +96,73 @@ def test_a_yielding_platform_is_never_reported_as_silent():
         tracker.record_ats_platform_result("lever", 20, new_count=2)
 
     assert tracker.silent_ats_platforms(threshold=1) == []
+
+
+# ── fleet coverage: how much of each platform a cycle actually reached ───────
+
+def test_coverage_is_recorded_per_cycle():
+    """The fan-out's submitted/completed counts existed only in a print, so
+    "how many companies did we ask?" could not be answered from inside the bot.
+    Reasoning about it from the printed *cancelled* count instead is how
+    "43-100% reached" got misread as "2% reached".
+    """
+    tracker = WatcherHealthTracker()
+    tracker.record_ats_platform_result("workday", 95, submitted=14990, completed=14989)
+
+    ph = tracker.get_ats_health().per_platform["workday"]
+    assert ph.last_submitted == 14990
+    assert ph.last_completed == 14989
+
+
+def test_coverage_reports_the_reached_fraction_not_the_cancelled_one():
+    tracker = WatcherHealthTracker()
+    tracker.record_ats_platform_result("icims", 40, submitted=13343, completed=7214)
+
+    row = tracker.ats_fleet_coverage()[0]
+    assert row["platform"] == "icims"
+    assert row["reached_pct"] == 54.1     # 7214/13343, not the 45.9% cancelled
+    assert row["submitted"] == 13343
+
+
+def test_coverage_is_recorded_even_when_the_cycle_errored():
+    """A cycle that raised after reaching 9,000 of 10,000 companies is a
+    different failure from one that reached 12, and the counts are the only
+    thing that distinguishes them.
+    """
+    tracker = WatcherHealthTracker()
+    tracker.record_ats_platform_result(
+        "greenhouse", 0, error="timed out", submitted=10807, completed=9033
+    )
+
+    ph = tracker.get_ats_health().per_platform["greenhouse"]
+    assert ph.last_was_error is True
+    assert ph.last_completed == 9033
+
+
+def test_a_platform_with_no_recorded_cycle_is_omitted_not_reported_as_zero():
+    """0% reached and "never ran" are different, and reporting the second as
+    the first is the exact shape of mistake this instrumentation exists to
+    prevent.
+    """
+    tracker = WatcherHealthTracker()
+    tracker.record_ats_platform_result("lever", 12)          # no counts supplied
+    assert tracker.ats_fleet_coverage() == []
+
+
+def test_lifetime_coverage_accumulates_across_cycles():
+    tracker = WatcherHealthTracker()
+    tracker.record_ats_platform_result("ashby", 5, submitted=1000, completed=500)
+    tracker.record_ats_platform_result("ashby", 5, submitted=1000, completed=900)
+
+    row = tracker.ats_fleet_coverage()[0]
+    assert row["reached_pct"] == 90.0            # last cycle only
+    assert row["lifetime_reached_pct"] == 70.0   # 1400/2000 across both
+
+
+def test_the_worst_covered_platform_is_reported_first():
+    tracker = WatcherHealthTracker()
+    tracker.record_ats_platform_result("workday", 1, submitted=100, completed=99)
+    tracker.record_ats_platform_result("icims", 1, submitted=100, completed=43)
+    tracker.record_ats_platform_result("lever", 1, submitted=100, completed=70)
+
+    assert [r["platform"] for r in tracker.ats_fleet_coverage()] == ["icims", "lever", "workday"]

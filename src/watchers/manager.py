@@ -617,6 +617,26 @@ class WatcherManager:
         else:
             await asyncio.gather(*[poll_one(sub) for sub in subreddits])
 
+    @staticmethod
+    def _ats_last_fanout(platform: str) -> dict[str, int]:
+        """Submitted/completed company counts from that platform's last fan-out.
+
+        Zeroes when the scraper never got as far as fanning out (an unknown
+        platform, or an empty company list). Zero submitted reads as "no cycle
+        recorded" downstream rather than "reached nothing", which are different
+        and were previously indistinguishable.
+        """
+        try:
+            from services import ats_service
+
+            fan = ats_service.LAST_FANOUT.get(platform) or {}
+            return {
+                "submitted": int(fan.get("submitted", 0)),
+                "completed": int(fan.get("completed", 0)),
+            }
+        except Exception:
+            return {"submitted": 0, "completed": 0}
+
     async def _run_ats_scrape_loop(self) -> None:
         ATS_PLATFORMS, BAMBOOHR, scrape_ats_platform = _ATS_PLATFORMS, _BAMBOOHR, _scrape_ats_platform
         from services.jba.merge_data import commit_archives_daily, log_jobs
@@ -667,13 +687,28 @@ class WatcherManager:
                         results_wanted=0,
                     )
                     new_count = log_jobs(result) if result else 0
+                    fan = self._ats_last_fanout(platform)
                     if result:
-                        print(f"[ats-scrape] {platform}: {len(result):,} scraped, {new_count:,} new to DB")
-                    health_tracker.record_ats_platform_result(platform, len(result), new_count=new_count)
+                        print(
+                            f"[ats-scrape] {platform}: {len(result):,} scraped, "
+                            f"{new_count:,} new to DB, "
+                            f"{fan['completed']:,}/{fan['submitted']:,} companies reached"
+                        )
+                    health_tracker.record_ats_platform_result(
+                        platform, len(result), new_count=new_count,
+                        submitted=fan["submitted"], completed=fan["completed"],
+                    )
                     return result
                 except Exception as exc:
+                    # Coverage is recorded on the error path too: a cycle that
+                    # raised after reaching 9,000 of 10,000 companies is a
+                    # different failure from one that reached 12.
+                    fan = self._ats_last_fanout(platform)
                     print(f"[ats-scrape] {platform} error: {exc}")
-                    health_tracker.record_ats_platform_result(platform, 0, error=str(exc))
+                    health_tracker.record_ats_platform_result(
+                        platform, 0, error=str(exc),
+                        submitted=fan["submitted"], completed=fan["completed"],
+                    )
                     return []
 
             try:
@@ -686,8 +721,18 @@ class WatcherManager:
                             timeout=600,
                         )
                     except Exception as exc:
-                        print(f"[ats-scrape] {platform} timed out or errored: {exc}")
-                        health_tracker.record_ats_platform_result(platform, 0, error=str(exc))
+                        # A platform cut off at the 600s bound is exactly when
+                        # coverage matters most -- without it the log says the
+                        # cycle failed but not how far it got.
+                        fan = self._ats_last_fanout(platform)
+                        print(
+                            f"[ats-scrape] {platform} timed out or errored: {exc} "
+                            f"({fan['completed']:,}/{fan['submitted']:,} companies reached)"
+                        )
+                        health_tracker.record_ats_platform_result(
+                            platform, 0, error=str(exc),
+                            submitted=fan["submitted"], completed=fan["completed"],
+                        )
                         return []
 
                 # Each platform is its own scheduler submission (BACKGROUND tier,

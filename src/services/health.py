@@ -87,6 +87,15 @@ class ATSPlatformHealth:
     # real coverage does not stay empty run after run.
     consecutive_silent: int = 0
     last_nonempty_at: float = 0.0
+    # How much of the fleet a cycle actually reached. The fan-out submits every
+    # company and cancels whatever has not finished when the budget runs out,
+    # and until this was recorded the only trace was a print -- so "how many
+    # companies did we ask?" could not be answered, and a wrong answer to it
+    # (2%, when the real figure is 43-100%) went uncorrected for hours.
+    last_submitted: int = 0
+    last_completed: int = 0
+    total_submitted: int = 0
+    total_completed: int = 0
 
 
 @dataclass
@@ -204,10 +213,24 @@ class WatcherHealthTracker:
         self._ats.task_alive = alive
 
     def record_ats_platform_result(
-        self, platform: str, job_count: int, new_count: int = 0, error: str | None = None
+        self,
+        platform: str,
+        job_count: int,
+        new_count: int = 0,
+        error: str | None = None,
+        submitted: int = 0,
+        completed: int = 0,
     ) -> None:
         ph = self._ats.per_platform.setdefault(platform, ATSPlatformHealth(platform=platform))
         ph.last_scrape_at = time.time()
+        # Recorded even on an error: a cycle that raised after reaching 9,000 of
+        # 10,000 companies is a different problem from one that reached 12, and
+        # the counts are the only thing that tells them apart.
+        if submitted > 0:
+            ph.last_submitted = submitted
+            ph.last_completed = completed
+            ph.total_submitted += submitted
+            ph.total_completed += completed
         if error:
             ph.total_errors += 1
             ph.last_error = error[:120]
@@ -226,6 +249,34 @@ class WatcherHealthTracker:
                 ph.last_nonempty_at = ph.last_scrape_at
             else:
                 ph.consecutive_silent += 1
+
+    def ats_fleet_coverage(self) -> list[dict[str, object]]:
+        """What fraction of each platform's fleet the last cycle actually reached.
+
+        The question this answers could not previously be asked from inside the
+        bot: the fan-out's submitted/completed counts existed only in a print.
+        Reasoning about coverage from the printed *cancelled* count instead is
+        how "43-100% reached" got misread as "2% reached" -- the log reports
+        what was cancelled, and the interesting number is the complement.
+
+        Platforms with no recorded cycle are omitted rather than reported as 0%,
+        which would be indistinguishable from a platform that reached nothing.
+        """
+        out: list[dict[str, object]] = []
+        for name, ph in self._ats.per_platform.items():
+            if ph.last_submitted <= 0:
+                continue
+            out.append({
+                "platform": name,
+                "submitted": ph.last_submitted,
+                "completed": ph.last_completed,
+                "reached_pct": round(100.0 * ph.last_completed / ph.last_submitted, 1),
+                "lifetime_reached_pct": (
+                    round(100.0 * ph.total_completed / ph.total_submitted, 1)
+                    if ph.total_submitted else None
+                ),
+            })
+        return sorted(out, key=lambda row: row["reached_pct"])
 
     def silent_ats_platforms(self, threshold: int = 3) -> list[tuple[str, int]]:
         """Platforms that have returned nothing for `threshold` runs running.
