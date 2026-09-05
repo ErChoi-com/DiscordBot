@@ -782,6 +782,30 @@ class WatcherManager:
             return ats_traversal.rotate(tail, cursor)
 
     @staticmethod
+    def _ats_refusing() -> dict[str, int]:
+        """Platforms whose refusal breaker opened, and the streak that did it.
+
+        Read through a guarded lookup for the same reason `_ats_last_fanout`
+        wraps `LAST_FANOUT`: the breaker is instrumentation that a given
+        checkout of `ats_service` may not carry, and losing the report must
+        never cost the scrape that produced it.
+
+        Empty is the healthy answer and also the answer when the capability is
+        absent -- indistinguishable here, and harmless, because both mean "no
+        platform is being reported as refusing".
+        """
+        try:
+            from services import ats_service
+
+            # No getattr guard: the except below already covers a checkout
+            # whose ats_service has no breaker, and a second guard for the
+            # same case would be code no test could reach. Same shape as
+            # `_ats_last_fanout`, which reads LAST_FANOUT the same way.
+            return dict(ats_service.refusal_report())
+        except Exception:
+            return {}
+
+    @staticmethod
     def _ats_last_fanout(platform: str) -> dict[str, int]:
         """Submitted/completed company counts from that platform's last fan-out.
 
@@ -988,6 +1012,10 @@ class WatcherManager:
                         len(platforms), self.scheduler.stats().get("workers", 1)
                     ),
                 )
+                # After the gather, not before: each platform resets its own
+                # breaker as its fan-out starts, so only once every platform
+                # has finished does this describe the cycle that just ran.
+                health_tracker.set_ats_refusing(self._ats_refusing())
                 all_results = [item for chunk in per_platform_results for item in chunk]
 
                 if all_results:

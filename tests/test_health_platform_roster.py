@@ -211,3 +211,83 @@ def test_the_scrape_loop_registers_the_roster():
     )
     assert "set_ats_roster(" in compact
     assert "disabled=" in compact
+
+
+# ── a refused platform is not a quiet one ───────────────────────────────────
+
+def test_a_refused_platform_is_distinguished_from_a_silent_one():
+    """The breaker stops asking a platform that refuses everything, and that
+    was visible only in the log. A refused platform returns [] exactly like a
+    quiet one, which is how workable looked ordinary for 45 consecutive runs.
+    """
+    t = WatcherHealthTracker()
+    t.set_ats_roster(["workable", "lever"])
+    t.record_ats_platform_result("workable", 0)
+    t.record_ats_platform_result("lever", 5)
+    t.set_ats_refusing({"workable": 25})
+
+    value = _field(_ats(t), "Platforms").value
+    assert "refused 25× and stopped" in value
+    assert "⛔" in value
+
+
+def test_a_platform_refused_before_it_ever_reported_is_still_named():
+    """A platform cut off on its first cycle has no per_platform entry at all,
+    so keying the note on a recorded result would hide the worst case.
+    """
+    t = WatcherHealthTracker()
+    t.set_ats_roster(["workable"])
+    t.set_ats_refusing({"workable": 25})
+
+    value = _field(_ats(t), "Platforms").value
+    assert "refused 25× and stopped" in value
+    assert "no cycle yet" not in value
+
+
+def test_recovery_clears_the_refusal_note():
+    t = WatcherHealthTracker()
+    t.set_ats_roster(["workable"])
+    t.record_ats_platform_result("workable", 0)
+    t.set_ats_refusing({"workable": 25})
+    assert "refused" in _field(_ats(t), "Platforms").value
+
+    t.set_ats_refusing({})
+    assert "refused" not in _field(_ats(t), "Platforms").value
+
+
+def test_a_platform_that_is_not_refusing_reads_normally():
+    t = WatcherHealthTracker()
+    t.set_ats_roster(["lever"])
+    t.record_ats_platform_result("lever", 5, new_count=2)
+    t.set_ats_refusing({"workable": 25})
+    assert "⛔" not in _field(_ats(t), "Platforms").value
+
+
+def test_the_loop_snapshots_the_breaker_after_the_cycle():
+    """Each platform resets its own breaker as its fan-out starts, so reading
+    the report before the gather would describe the previous cycle.
+    """
+    import inspect
+    from watchers import manager
+
+    src = inspect.getsource(manager.WatcherManager._run_ats_scrape_loop)
+    compact = " ".join(src.split())
+    assert "set_ats_refusing(self._ats_refusing())" in compact
+    assert compact.index("asyncio.gather") < compact.index("set_ats_refusing")
+
+
+def test_a_checkout_without_the_breaker_reports_nothing_rather_than_raising():
+    """The breaker is instrumentation a given checkout of ats_service may not
+    carry. Losing the report must never cost the scrape that produced it.
+    """
+    from watchers.manager import WatcherManager
+    from services import ats_service
+
+    saved = getattr(ats_service, "refusal_report", None)
+    try:
+        if saved is not None:
+            delattr(ats_service, "refusal_report")
+        assert WatcherManager._ats_refusing() == {}
+    finally:
+        if saved is not None:
+            ats_service.refusal_report = saved

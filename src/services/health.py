@@ -117,6 +117,13 @@ class ATSScrapeHealth:
     roster: tuple[str, ...] = ()
     disabled: frozenset[str] = frozenset()
 
+    # Platforms whose refusal breaker opened during the last cycle, mapped to
+    # the streak that opened it. A cut-off platform returns [] exactly like a
+    # quiet one, so without this the single most actionable ATS state -- "the
+    # host is refusing us and we stopped asking" -- reached the log and nothing
+    # else.
+    refusing: dict[str, int] = field(default_factory=dict)
+
 
 @dataclass
 class BrowserServiceHealth:
@@ -258,6 +265,12 @@ class WatcherHealthTracker:
                 ph.last_nonempty_at = ph.last_scrape_at
             else:
                 ph.consecutive_silent += 1
+
+    def set_ats_refusing(self, refusing) -> None:
+        """Record which platforms stopped being asked, and after how many
+        refusals. Empty clears it, so a recovered platform stops being flagged.
+        """
+        self._ats.refusing = {str(k): int(v) for k, v in dict(refusing or {}).items()}
 
     def set_ats_roster(self, platforms, disabled=()) -> None:
         """Declare every ATS platform that exists, and which are switched off.
@@ -469,14 +482,24 @@ def _ats_platform_lines(ats: ATSScrapeHealth) -> list[str]:
         if platform in ats.disabled:
             lines.append(f"⚪ **{platform}**: disabled in config")
             continue
+        refused = ats.refusing.get(platform)
         ph = ats.per_platform.get(platform)
         if ph is None:
-            lines.append(f"⚪ **{platform}**: no cycle yet")
+            note = (f": refused {refused}× and stopped" if refused
+                    else ": no cycle yet")
+            lines.append(f"⛔ **{platform}**{note}" if refused
+                         else f"⚪ **{platform}**{note}")
             continue
         icon = "❌" if ph.last_was_error else ("✅" if ph.last_job_count else "🔇")
         errs = f" · {ph.total_errors} err" if ph.total_errors > 0 else ""
         silent = (f" · silent {ph.consecutive_silent}×"
                   if ph.consecutive_silent >= SILENT_RUN_THRESHOLD else "")
+        if refused:
+            # Distinct from silence: this platform was not quiet, it refused
+            # every request and the cycle stopped asking. Reporting it as
+            # merely silent is what let workable look ordinary for 45 runs.
+            icon = "⛔"
+            silent += f" · refused {refused}× and stopped"
         lines.append(
             f"{icon} **{platform}**: {ph.last_job_count:,} scraped / {ph.last_new_count:,} new · "
             f"{ph.total_new_jobs:,} new total{errs}{silent} · {_fmt_ago(ph.last_scrape_at)}"
