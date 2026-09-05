@@ -273,14 +273,13 @@ jobs:
                     "smartrecruiters": 200, "rippling": 350,
                     "teamtailor": 350, "jazzhr": 200, "recruitee": 200,
                     "jobvite": 240, "applicantpro": 160,
-                    # Placeholders, and labelled as such. Every other number
-                    # here is a measured baseline; these two have never been
-                    # harvested, so there is nothing to measure yet. A floor of
-                    # 1 still guards the collapse that actually happens -- an
-                    # extractor or query that breaks and yields nothing at all
-                    # -- without inventing a baseline. Raise them from the
-                    # first real run's counts.
-                    "oracle": 1, "personio": 1}
+                    # Measured 2026-09-05 from a single-crawl bulk-index
+                    # harvest: oracle 1,418 tenants, personio 736. Set at
+                    # roughly 10% of that, matching the range the floors above
+                    # sit in (5.6%-23.7% of their own harvests) -- a collapse
+                    # guard, not a tight bound, since a single-crawl run is the
+                    # smallest sweep the workflow ever does.
+                    "oracle": 140, "personio": 70}
 
           platforms = json.load(open("harvest.json"))["platforms"]
           failed = []

@@ -19,6 +19,19 @@ query with a URL list directly, over plain HTTP, with no key and no S3 egress.
 Harvesting one crawl across every platform is ~15 requests.  Reading the WAT
 files for the same information would be terabytes.
 
+If the query service is unreachable, use the bulk index instead. Measured
+2026-09-05 from this machine: ``index.commoncrawl.org`` timed out on every CDX
+request (TCP 443 never connected) while ``data.commoncrawl.org`` answered
+normally, and GitHub Actions reached both. That looks exactly like harvesting
+being broken, and is not -- ``--index ccbulk`` reads the same index from static
+files on the data host and is the faster path anyway:
+
+    python scripts/harvest_ats.py --platform personio --index ccbulk --crawls 1
+
+That run collected 736 Personio tenants in 5.9s, and the same for Oracle
+collected 1,418 in 9.8s, so the bulk path is a first choice rather than a
+fallback.
+
 Usage:
     python scripts/harvest_ats.py                  # latest crawl
     python scripts/harvest_ats.py --crawl CC-MAIN-2026-30
