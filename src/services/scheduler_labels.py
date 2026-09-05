@@ -17,6 +17,10 @@ never become a source of circular imports between them.
 JOB_SCRAPE = "job_scrape"
 SEMANTIC_FILTER = "semantic_filter"
 ATS_SCRAPE = "ats_scrape"
+# Its own bucket rather than sharing ATS_SCRAPE: this is a git fetch of a
+# few megabytes, and blending it into the scrape's learned cost would skew
+# the estimate the scheduler arbitrates on.
+ATS_COMPANY_SYNC = "ats_company_sync"
 GEONAMES_SYNC = "geonames_sync"
 REDDIT_SCRAPE = "reddit_scrape"
 

@@ -763,6 +763,66 @@ class WatcherManager:
         except Exception:
             return {"submitted": 0, "completed": 0}
 
+    @staticmethod
+    def _is_new_utc_day(today: str, current_date: str | None) -> bool:
+        """True when the UTC day rolled over on a loop that was already running.
+
+        Split out of the loop so it can be tested at all: the branch it guards
+        sits inside a `while True` that no test can drive, and asserting on the
+        loop's source text cannot tell `if rolled_over` from `if False`.
+
+        `current_date is None` is the loop's first pass, and `run.py` has just
+        synced -- refreshing there would repeat that fetch seconds later for
+        nothing.
+        """
+        return current_date is not None and today != current_date
+
+    async def _refresh_company_lists(self) -> None:
+        """Re-pull the published harvest and drop the cached fleet.
+
+        Three things had to line up for a company discovered upstream to reach
+        a scrape, and the last two were missing. The workflow republishes the
+        harvest weekly; `run.py` runs the sync once, at boot; and
+        `load_company_lists` caches for the life of the process. So a bot up
+        for a fortnight scraped the fleet it started with and could not see a
+        company found since, however many times the harvest was republished.
+        `reload_company_lists` existed for this and nothing had ever called it.
+
+        Daily rather than per-cycle: the harvest changes weekly at most, and a
+        depth=1 fetch of an unchanged branch is nearly free, so this is cheap
+        enough to be unconditional and rare enough not to matter if it is not.
+
+        Failure is not an outage. The sync is additive over what is already on
+        disk, so a refresh that cannot reach GitHub leaves the fleet exactly as
+        it was -- which is the behaviour there was before this existed.
+        """
+        script = Path(self.config.base_dir) / "sync_ats_companies.py"
+        if not script.exists():
+            return
+        try:
+            def _sync() -> int:
+                return subprocess.run(
+                    [sys.executable, str(script)],
+                    cwd=str(self.config.base_dir),
+                    capture_output=True, text=True,
+                ).returncode
+
+            rc = await self._tracked_to_thread(
+                _sync, label=scheduler_labels.ATS_COMPANY_SYNC
+            )
+            if rc != 0:
+                print(f"[ats-scrape] company list refresh exited {rc}; "
+                      "keeping the lists already on disk")
+            from services import ats_service
+            before = sum(len(v) for v in ats_service.load_company_lists().values())
+            ats_service.reload_company_lists()
+            after = sum(len(v) for v in ats_service.load_company_lists().values())
+            print(f"[ats-scrape] company lists refreshed: {before:,} -> {after:,} slugs")
+        except Exception as exc:
+            # An optimisation, like the ordering: losing it must not stop the
+            # scrape that was about to run.
+            print(f"[ats-scrape] could not refresh company lists ({exc})")
+
     async def _run_ats_scrape_loop(self) -> None:
         ATS_PLATFORMS, BAMBOOHR, scrape_ats_platform = _ATS_PLATFORMS, _BAMBOOHR, _scrape_ats_platform
         from services.jba.merge_data import commit_archives_daily, log_jobs
@@ -777,8 +837,11 @@ class WatcherManager:
         while True:
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             if today != current_date:
+                rolled_over = self._is_new_utc_day(today, current_date)
                 current_date = today
                 scrapes_today = 0
+                if rolled_over:
+                    await self._refresh_company_lists()
 
             now_ts = datetime.now(timezone.utc).timestamp()
             wait = ATS_SCRAPE_INTERVAL - (now_ts - last_scrape_ts)
