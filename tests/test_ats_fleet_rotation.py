@@ -135,13 +135,21 @@ def _manager(tmp_path, channels=None):
 
 
 @pytest.fixture(autouse=True)
-def _clean_fanout():
-    from services import ats_service
-    saved = dict(getattr(ats_service, "LAST_FANOUT", {}))
-    ats_service.LAST_FANOUT.clear()
-    yield ats_service.LAST_FANOUT
-    ats_service.LAST_FANOUT.clear()
-    ats_service.LAST_FANOUT.update(saved)
+def _clean_fanout(monkeypatch):
+    """What the last cycle reached, per platform, without going through the
+    scraper's module-level record of it.
+
+    The rotation only ever asks `_ats_last_fanout`, so that is the seam to
+    stand in for. Reading the scraper's own dict here would tie these tests to
+    where those counts happen to be kept today.
+    """
+    counts: dict[str, dict[str, int]] = {}
+    monkeypatch.setattr(
+        WatcherManager,
+        "_ats_last_fanout",
+        lambda self, platform: dict(counts.get(platform) or {"submitted": 0, "completed": 0}),
+    )
+    return counts
 
 
 def _fleet(monkeypatch, platform, slugs):
