@@ -617,6 +617,63 @@ class WatcherManager:
         else:
             await asyncio.gather(*[poll_one(sub) for sub in subreddits])
 
+    def _priority_countries(self) -> list[str]:
+        """The countries the enabled channels actually want, for scrape ordering.
+
+        The ATS loop is process-wide and channel-agnostic, so there is no single
+        channel to ask -- the union of what every enabled channel wants is the
+        honest answer, and it keeps a second channel scoped elsewhere from being
+        starved by the first.
+
+        Derived from the settings that already exist rather than a new one:
+        `location` names the region and `allow_north_america` widens it to the
+        US, which are the same two inputs the region gate itself reads.
+        """
+        from services.jba import geo_priority
+
+        wanted: list[str] = []
+        for settings in self.store.channel_job_settings.values():
+            if not settings.get("enabled"):
+                continue
+            code = geo_priority.country_of(str(settings.get("location") or ""))
+            if code and code not in wanted:
+                wanted.append(code)
+            if settings.get("allow_north_america") and "US" not in wanted:
+                wanted.append("US")
+        return wanted
+
+    def _ordered_slugs(self, platform: str) -> list[str] | None:
+        """This platform's fleet, boards likely to yield a wanted country first.
+
+        Ordering only: every slug in the fleet is returned, so the scrape submits
+        exactly the work it would have anyway and makes no extra request. It
+        matters when a cycle is cut off at the budget, because the tail is
+        cancelled and file order decides who was in it. Measured across the
+        fleet, CA-yielding boards inside the first 250 per platform go from 43
+        to 1,031; for US, 400 to 1,843.
+
+        None means "no opinion" -- scrape_ats_platform then loads the fleet
+        itself exactly as before, which is what a checkout with no archive or no
+        enabled channel gets.
+        """
+        try:
+            from services import ats_service
+            from services.jba import geo_priority
+
+            fleet = list(ats_service.load_company_lists().get(platform) or [])
+            if not fleet:
+                return None
+            preferred: set[str] = set()
+            for country in self._priority_countries():
+                preferred |= geo_priority.slugs_for(country)
+            if not preferred:
+                return None
+            return geo_priority.rank(fleet, preferred)
+        except Exception as exc:
+            # Ordering is an optimisation; losing it must not cost the scrape.
+            print(f"[ats-scrape] {platform}: could not order the fleet ({exc})")
+            return None
+
     @staticmethod
     def _ats_last_fanout(platform: str) -> dict[str, int]:
         """Submitted/completed company counts from that platform's last fan-out.
@@ -685,6 +742,11 @@ class WatcherManager:
                         keywords="",
                         location="",
                         results_wanted=0,
+                        # First caller of a parameter that has existed unused
+                        # since it was written. Passing the fleet in the order
+                        # we want it asked is the whole feature; the contents
+                        # are identical to what the default would have loaded.
+                        company_slugs=self._ordered_slugs(platform),
                     )
                     new_count = log_jobs(result) if result else 0
                     fan = self._ats_last_fanout(platform)
