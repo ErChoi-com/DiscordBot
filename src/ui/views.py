@@ -16,8 +16,10 @@ from state.store import MODE_DESCRIPTIONS, RuntimeStore
 from watchers.manager import WatcherManager
 
 
-RESUME_PROFILE_EDITABLE_FILES = ("baseinfo.txt", "instructions.txt")
 DISCORD_MODAL_TEXT_LIMIT = 4000
+# Discord allows 5 text inputs per modal; 3 parts x 4000 chars is the same
+# budget the template editor uses, and leaves room to grow.
+RESUME_FILE_MODAL_PARTS = 3
 DISCORD_TEXT_INPUT_LABEL_LIMIT = 45
 
 
@@ -75,7 +77,6 @@ def format_job_settings_summary(store: RuntimeStore, channel_id: int) -> str:
     sites = ", ".join(job_service.JOBSPY_SITE_LABELS.get(site, site.replace("_", " ").title()) for site in raw_sites)
     role_filters = ", ".join(settings["role_filters"]) if settings["role_filters"] else "Any"
     exclusion_terms = ", ".join(settings["exclusion_terms"]) if settings["exclusion_terms"] else "None"
-    jobbank_native_query = str(settings.get("jobbank_native_query") or "").strip() or "(none)"
     region_mode = "North America (Canada + US)" if settings.get("allow_north_america") else "Canada only"
     summary = (
         "Job watcher for this channel:\n"
@@ -85,7 +86,6 @@ def format_job_settings_summary(store: RuntimeStore, channel_id: int) -> str:
         f"- Location: `{settings['location']}`\n"
         f"- Region filter: `{region_mode}`\n"
         f"- Radius: `{settings['radius_miles']}` miles\n"
-        f"- Job Bank native filters: `{jobbank_native_query}`\n"
         f"- Role filter: `{role_filters}`\n"
         f"- Exclusion terms: `{exclusion_terms}`\n"
         f"- Date window: last `{settings['hours_old']}` hours\n"
@@ -188,9 +188,16 @@ async def _send_view_error(
         await interaction.followup.send(message, ephemeral=True)
 
 
+# Module-level so tests can redirect it. Resolved inside the function this had
+# no seam at all, and the modal tests appended straight into the file the live
+# bot writes: 7,442 of 8,016 lines were synthetic channel_id=123 records before
+# tests/conftest.py started isolating it.
+INTERACTION_EVENTS_PATH = Path(__file__).resolve().parents[2] / ".interaction_events.log"
+
+
 def log_interaction_event(context: str, **fields: Any) -> None:
     try:
-        log_path = Path(__file__).resolve().parents[2] / ".interaction_events.log"
+        log_path = INTERACTION_EVENTS_PATH
         log_path.parent.mkdir(parents=True, exist_ok=True)
         parts = [f"ts={datetime.now(timezone.utc).isoformat()}", f"context={context}"]
         for key, value in fields.items():
@@ -404,11 +411,14 @@ class JobRefreshDropdown(discord.ui.Select):
         self.channel_id = channel_id
         self.owner_id = owner_id
         options = [
-            discord.SelectOption(label="1 minute", value="60"),
-            discord.SelectOption(label="2 minutes", value="120"),
-            discord.SelectOption(label="5 minutes", value="300", description="Recommended"),
-            discord.SelectOption(label="10 minutes", value="600"),
-            discord.SelectOption(label="15 minutes", value="900"),
+            discord.SelectOption(label="15 minutes", value="900", description="Recommended"),
+            discord.SelectOption(label="30 minutes", value="1800"),
+            discord.SelectOption(label="45 minutes", value="2700"),
+            discord.SelectOption(label="60 minutes", value="3600"),
+            discord.SelectOption(label="75 minutes", value="4500"),
+            discord.SelectOption(label="90 minutes", value="5400"),
+            discord.SelectOption(label="105 minutes", value="6300"),
+            discord.SelectOption(label="120 minutes", value="7200"),
         ]
         super().__init__(placeholder="Refresh rate", min_values=1, max_values=1, options=options, row=2)
 
@@ -633,48 +643,54 @@ class JobThresholdModal(discord.ui.Modal, title="Edit Match Threshold"):
         await _send_view_error(interaction, error, "job_threshold_modal.on_error")
 
 
-class TemplateEditModal(discord.ui.Modal, title="Edit template.tex"):
+class ResumeFileEditModal(discord.ui.Modal):
+    """Edit one resume-cache text file, split across several modal fields.
+
+    One 4000-char text input cannot hold a real baseinfo.txt or template.tex,
+    so each file is chunked across ``RESUME_FILE_MODAL_PARTS`` fields on load
+    and rejoined on submit. Every resume-cache editor -- base info,
+    instructions, template -- is this class, so the three panel buttons behave
+    identically; TemplateEditModal only adds a compile preview after saving.
+    """
+
+    # Overridden by subclasses that do slow work after saving and therefore
+    # need Discord's "thinking" placeholder.
+    defer_kwargs: dict[str, Any] = {"ephemeral": True}
+    error_source = "resume_file_modal.on_error"
+
     def __init__(
         self,
         profile_dir: Path,
+        file_name: str,
         panel_message: discord.Message | None = None,
         parent_view: discord.ui.View | None = None,
-        scheduler: PriorityWorkScheduler | None = None,
     ):
-        super().__init__()
+        super().__init__(title=f"Edit {file_name}")
         self.profile_dir = profile_dir
+        self.file_name = file_name
         self.panel_message = panel_message
-        self.scheduler = scheduler
         self.parent_view = parent_view
 
-        self.template_part1 = discord.ui.TextInput(
-            label="template.tex (Part 1 of 3)",
-            required=False,
-            max_length=DISCORD_MODAL_TEXT_LIMIT,
-            style=discord.TextStyle.paragraph,
-        )
-        self.template_part2 = discord.ui.TextInput(
-            label="template.tex (Part 2 of 3)",
-            required=False,
-            max_length=DISCORD_MODAL_TEXT_LIMIT,
-            style=discord.TextStyle.paragraph,
-        )
-        self.template_part3 = discord.ui.TextInput(
-            label="template.tex (Part 3 of 3)",
-            required=False,
-            max_length=DISCORD_MODAL_TEXT_LIMIT,
-            style=discord.TextStyle.paragraph,
-        )
-        self.add_item(self.template_part1)
-        self.add_item(self.template_part2)
-        self.add_item(self.template_part3)
+        self.parts: list[discord.ui.TextInput] = []
+        for index in range(RESUME_FILE_MODAL_PARTS):
+            field = discord.ui.TextInput(
+                label=f"{file_name} (Part {index + 1} of {RESUME_FILE_MODAL_PARTS})",
+                required=False,
+                max_length=DISCORD_MODAL_TEXT_LIMIT,
+                style=discord.TextStyle.paragraph,
+            )
+            self.add_item(field)
+            self.parts.append(field)
 
         self._truncated = False
-        # Load and split template
-        self._load_template()
+        self._load_file()
 
-    def _load_template(self) -> None:
-        path = self.profile_dir / "template.tex"
+    @property
+    def file_path(self) -> Path:
+        return self.profile_dir / self.file_name
+
+    def _load_file(self) -> None:
+        path = self.file_path
         if not path.exists():
             return
         try:
@@ -682,43 +698,75 @@ class TemplateEditModal(discord.ui.Modal, title="Edit template.tex"):
         except OSError:
             return
 
-        # Fill each part sequentially up to the limit
-        fields = [self.template_part1, self.template_part2, self.template_part3]
         remaining = text
-        for field in fields:
-            chunk = remaining[:DISCORD_MODAL_TEXT_LIMIT]
+        for field in self.parts:
+            field.default = remaining[:DISCORD_MODAL_TEXT_LIMIT]
             remaining = remaining[DISCORD_MODAL_TEXT_LIMIT:]
-            field.default = chunk
 
         if remaining:
             self._truncated = True
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         # Modal submit interactions need a deferred channel message response.
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer(**self.defer_kwargs)
 
         if self._truncated:
             await interaction.followup.send(
-                "Template was truncated before editing. Cannot save to avoid data loss.",
+                (
+                    f"`{self.file_name}` is longer than "
+                    f"{DISCORD_MODAL_TEXT_LIMIT * RESUME_FILE_MODAL_PARTS} chars and was "
+                    "truncated before editing. Not saving, to avoid losing the tail."
+                ),
                 ephemeral=True,
             )
             return
 
-        # Combine parts and save
-        combined = (
-            str(self.template_part1.value)
-            + str(self.template_part2.value)
-            + str(self.template_part3.value)
-        )
-        
+        combined = "".join(str(field.value) for field in self.parts)
         try:
-            target = self.profile_dir / "template.tex"
-            target.write_text(combined, encoding="utf-8")
+            self.profile_dir.mkdir(parents=True, exist_ok=True)
+            self.file_path.write_text(combined, encoding="utf-8")
         except OSError as exc:
-            await interaction.followup.send(f"Failed to save template: {exc}", ephemeral=True)
+            await interaction.followup.send(
+                f"Failed to save `{self.file_name}`: {exc}", ephemeral=True
+            )
             return
 
-        preview_result = await self._build_preview_message(target)
+        await self._after_save(interaction, combined)
+
+    async def _after_save(self, interaction: discord.Interaction, text: str) -> None:
+        """What to report once the file is on disk. Subclasses may do more."""
+        await interaction.followup.send(
+            f"Saved `{self.file_name}` ({len(text):,} chars) in `{self.profile_dir.name}`.",
+            ephemeral=True,
+        )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        await _send_view_error(interaction, error, self.error_source)
+
+
+class TemplateEditModal(ResumeFileEditModal):
+    """The template.tex editor: the shared editor plus a compiled PDF preview."""
+
+    defer_kwargs = {"thinking": True, "ephemeral": True}
+    error_source = "template_edit_modal.on_error"
+
+    def __init__(
+        self,
+        profile_dir: Path,
+        panel_message: discord.Message | None = None,
+        parent_view: discord.ui.View | None = None,
+        scheduler: PriorityWorkScheduler | None = None,
+    ):
+        self.scheduler = scheduler
+        super().__init__(
+            profile_dir=profile_dir,
+            file_name="template.tex",
+            panel_message=panel_message,
+            parent_view=parent_view,
+        )
+
+    async def _after_save(self, interaction: discord.Interaction, text: str) -> None:
+        preview_result = await self._build_preview_message(self.file_path)
         if isinstance(preview_result, tuple):
             preview_message, preview_file = preview_result
         else:
@@ -766,95 +814,11 @@ class TemplateEditModal(discord.ui.Modal, title="Edit template.tex"):
         preview_file = discord.File(io.BytesIO(compile_result.pdf_bytes), filename=preview_name)
         return ("Template updated successfully. Preview PDF attached.", preview_file)
 
-    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
-        await _send_view_error(interaction, error, "template_edit_modal.on_error")
-
-
-class ResumeInfoModal(discord.ui.Modal, title="Edit resume info"):
-    def __init__(
-        self,
-        profile_dir: Path,
-        panel_message: discord.Message | None = None,
-        parent_view: discord.ui.View | None = None,
-    ):
-        super().__init__()
-        self.profile_dir = profile_dir
-        self.panel_message = panel_message
-        self.parent_view = parent_view
-
-        self.baseinfo = discord.ui.TextInput(
-            label="baseinfo.txt",
-            required=False,
-            max_length=DISCORD_MODAL_TEXT_LIMIT,
-            style=discord.TextStyle.paragraph,
-        )
-        self.instructions = discord.ui.TextInput(
-            label="instructions.txt",
-            required=False,
-            max_length=DISCORD_MODAL_TEXT_LIMIT,
-            style=discord.TextStyle.paragraph,
-        )
-        self.add_item(self.baseinfo)
-        self.add_item(self.instructions)
-
-        self._truncated_files: list[str] = []
-        self.baseinfo.default = self._load_default("baseinfo.txt")
-        self.instructions.default = self._load_default("instructions.txt")
-
-    def _load_default(self, file_name: str) -> str:
-        path = self.profile_dir / file_name
-        if not path.exists():
-            return ""
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            return ""
-        if len(text) > DISCORD_MODAL_TEXT_LIMIT:
-            self._truncated_files.append(file_name)
-            return text[:DISCORD_MODAL_TEXT_LIMIT]
-        return text
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
-
-        if self._truncated_files:
-            truncated = ", ".join(self._truncated_files)
-            await interaction.followup.send(
-                (
-                    "Resume cache edit aborted to avoid truncating file content. "
-                    f"These files exceed {DISCORD_MODAL_TEXT_LIMIT} chars: {truncated}."
-                ),
-                ephemeral=True,
-            )
-            return
-
-        self.profile_dir.mkdir(parents=True, exist_ok=True)
-        updates = {
-            "baseinfo.txt": str(self.baseinfo.value),
-            "instructions.txt": str(self.instructions.value),
-        }
-        try:
-            for file_name in RESUME_PROFILE_EDITABLE_FILES:
-                target = self.profile_dir / file_name
-                target.write_text(updates[file_name], encoding="utf-8")
-        except OSError as exc:
-            await interaction.followup.send(f"Failed to save resume cache files: {exc}", ephemeral=True)
-            return
-
-        lines = [f"Saved resume cache files in `{self.profile_dir.name}`."]
-        if self._truncated_files:
-            truncated = ", ".join(self._truncated_files)
-            lines.append(
-                f"Warning: {truncated} exceeded {DISCORD_MODAL_TEXT_LIMIT} chars and was truncated before editing."
-            )
-        await interaction.followup.send("\n".join(lines), ephemeral=True)
-
-    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
-        await _send_view_error(interaction, error, "resume_info_modal.on_error")
-
 
 class JobSettingsView(discord.ui.View):
-    RESUME_INFO_BUTTON_ID = "job_settings:resume_info"
+    WATCHER_TOGGLE_BUTTON_ID = "job_settings:watcher_toggle"
+    RESUME_BASEINFO_BUTTON_ID = "job_settings:resume_baseinfo"
+    RESUME_INSTRUCTIONS_BUTTON_ID = "job_settings:resume_instructions"
     TEMPLATE_BUTTON_ID = "job_settings:template"
 
     def __init__(
@@ -881,6 +845,14 @@ class JobSettingsView(discord.ui.View):
         self.add_item(JobSourceDropdown(store=store, channel_id=channel_id, owner_id=owner_id))
         self.add_item(JobDateDropdown(store=store, channel_id=channel_id, owner_id=owner_id))
         self.add_item(JobRefreshDropdown(store=store, channel_id=channel_id, owner_id=owner_id))
+        # Both of these were built and then never attached to anything.
+        # JobRoleFilterDropdown has had options, a callback and its own row
+        # since it was written; role_filters could only be reached through the
+        # free-text modal, where "internship" had to be typed exactly.
+        # JobRegionDropdown is new here only in the sense that the setting it
+        # writes had no control at all -- see its docstring.
+        self.sync_watcher_toggle()
+        self.sync_region_toggle()
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[Any]) -> None:
         await _send_view_error(interaction, error, "job_settings_view.on_error", ".job")
@@ -928,7 +900,7 @@ class JobSettingsView(discord.ui.View):
         _sanitize_modal_text_input_labels(modal)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Edit text/results", style=discord.ButtonStyle.primary, row=4)
+    @discord.ui.button(label="Edit text/results", style=discord.ButtonStyle.primary, row=3)
     async def edit_text(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         log_interaction_event(
             "job_settings_view.edit_text",
@@ -946,35 +918,44 @@ class JobSettingsView(discord.ui.View):
         )
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(
-        label="Edit resume info",
-        style=discord.ButtonStyle.secondary,
-        row=4,
-        custom_id=RESUME_INFO_BUTTON_ID,
-    )
-    async def edit_resume_info(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def _open_resume_file_modal(self, interaction: discord.Interaction, file_name: str) -> None:
         profile_dir = self._resolve_profile_dir_for_clicker(interaction)
-        modal = ResumeInfoModal(
-            profile_dir=profile_dir,
-            panel_message=interaction.message,
-            parent_view=self,
-        )
+        if file_name == "template.tex":
+            modal: ResumeFileEditModal = TemplateEditModal(
+                profile_dir=profile_dir,
+                panel_message=interaction.message,
+                parent_view=self,
+                scheduler=self.manager.scheduler,
+            )
+        else:
+            modal = ResumeFileEditModal(
+                profile_dir=profile_dir,
+                file_name=file_name,
+                panel_message=interaction.message,
+                parent_view=self,
+            )
         _sanitize_modal_text_input_labels(modal)
-        await interaction.response.send_modal(
-            modal
-        )
+        await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Start watcher", style=discord.ButtonStyle.success, row=4)
-    async def start(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not self.manager.start_job_watcher(self.channel_id):
-            await interaction.response.send_message("Another scraper process is running in this channel.", ephemeral=True)
-            return
-        await interaction.response.edit_message(content=format_job_settings_summary(self.store, self.channel_id), view=self)
+    # The three resume-cache editors sit together on row 4, same style, same
+    # modal shape -- they are the same editor pointed at different files.
+    @discord.ui.button(
+        label="Edit base info",
+        style=discord.ButtonStyle.green,
+        row=4,
+        custom_id=RESUME_BASEINFO_BUTTON_ID,
+    )
+    async def edit_resume_baseinfo(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._open_resume_file_modal(interaction, "baseinfo.txt")
 
-    @discord.ui.button(label="Stop watcher", style=discord.ButtonStyle.danger, row=4)
-    async def stop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        self.manager.stop_job_watcher(self.channel_id)
-        await interaction.response.edit_message(content=format_job_settings_summary(self.store, self.channel_id), view=self)
+    @discord.ui.button(
+        label="Edit instructions",
+        style=discord.ButtonStyle.green,
+        row=4,
+        custom_id=RESUME_INSTRUCTIONS_BUTTON_ID,
+    )
+    async def edit_resume_instructions(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._open_resume_file_modal(interaction, "instructions.txt")
 
     @discord.ui.button(
         label="Edit template",
@@ -983,17 +964,129 @@ class JobSettingsView(discord.ui.View):
         custom_id=TEMPLATE_BUTTON_ID,
     )
     async def edit_template(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        profile_dir = self._resolve_profile_dir_for_clicker(interaction)
-        modal = TemplateEditModal(
-            profile_dir=profile_dir,
-            panel_message=interaction.message,
-            parent_view=self,
-            scheduler=self.manager.scheduler,
+        await self._open_resume_file_modal(interaction, "template.tex")
+
+    def _watcher_is_enabled(self) -> bool:
+        try:
+            return bool(self.store.get_job_settings(self.channel_id).get("enabled"))
+        except Exception:
+            return False
+
+    def _watcher_toggle_button(self) -> discord.ui.Button | None:
+        for child in self.children:
+            if getattr(child, "custom_id", None) == self.WATCHER_TOGGLE_BUTTON_ID:
+                return child  # type: ignore[return-value]
+        return None
+
+    REGION_TOGGLE_BUTTON_ID = "job_settings:region_toggle"
+
+    def _region_toggle_button(self) -> discord.ui.Button | None:
+        for child in self.children:
+            if getattr(child, "custom_id", None) == self.REGION_TOGGLE_BUTTON_ID:
+                return child  # type: ignore[return-value]
+        return None
+
+    def _region_allows_us(self) -> bool:
+        try:
+            return bool(self.store.get_job_settings(self.channel_id).get("allow_north_america", False))
+        except Exception:
+            return False
+
+    def sync_region_toggle(self) -> None:
+        """Label the region button with the state it is in, not the action.
+
+        The watcher button opposite it is labelled with its action ("Stop
+        watcher"), because starting and stopping are verbs. A region is a state,
+        and "Switch to Canada only" next to a summary line reading "Region
+        filter: Canada only" reads as a contradiction, so this names the mode.
+        """
+        button = self._region_toggle_button()
+        if button is None:
+            return
+        if self._region_allows_us():
+            button.label = "Region: Canada + US"
+            button.style = discord.ButtonStyle.primary
+        else:
+            button.label = "Region: Canada only"
+            button.style = discord.ButtonStyle.secondary
+
+    @discord.ui.button(
+        label="Region: Canada only",
+        style=discord.ButtonStyle.secondary,
+        row=3,
+        custom_id=REGION_TOGGLE_BUTTON_ID,
+    )
+    async def toggle_region(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        """Widen or narrow the region gate.
+
+        allow_north_america gates the archive (job_match._matches_channel_region),
+        the live scrape (job_service.filter_rows_by_region) and the watcher, and
+        until now had no control anywhere -- format_job_settings_summary printed
+        which mode was active while offering no way to change it. It is not
+        cosmetic: the ATS fleet is global, and over a measured 3-day window 1.9%
+        of archived ATS rows were Canadian against roughly 29% US, so a channel
+        left on the default discards the largest single block of what the bot
+        has already collected.
+
+        A button rather than a dropdown because the panel's five action rows are
+        full: rows 0-2 are selects, and a select needs a whole row. This is also
+        why JobRoleFilterDropdown has never been attached -- role_filters stays
+        reachable through the text modal.
+
+        Canada is kept under both settings, matching filter_rows_by_region, so
+        this only ever widens what reaches the channel.
+        """
+        if not self._is_allowed(interaction):
+            await interaction.response.send_message(
+                "Only the channel owner can change this.", ephemeral=True
+            )
+            return
+        self.store.update_job_setting(
+            self.channel_id, "allow_north_america", not self._region_allows_us()
         )
-        _sanitize_modal_text_input_labels(modal)
-        await interaction.response.send_modal(
-            modal
+        self.sync_region_toggle()
+        await interaction.response.edit_message(
+            content=format_job_settings_summary(self.store, self.channel_id), view=self
         )
+
+    def sync_watcher_toggle(self) -> None:
+        """Point the single watcher button at whichever action is available now.
+
+        Called on construction and after every toggle, so the label always
+        describes what clicking it will do rather than what state it is in.
+        """
+        button = self._watcher_toggle_button()
+        if button is None:
+            return
+        if self._watcher_is_enabled():
+            button.label = "Stop watcher"
+            button.style = discord.ButtonStyle.danger
+        else:
+            button.label = "Start watcher"
+            button.style = discord.ButtonStyle.success
+
+    @discord.ui.button(
+        label="Start watcher",
+        style=discord.ButtonStyle.success,
+        row=4,
+        custom_id=WATCHER_TOGGLE_BUTTON_ID,
+    )
+    async def toggle_watcher(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if self._watcher_is_enabled():
+            self.manager.stop_job_watcher(self.channel_id)
+        elif not self.manager.start_job_watcher(self.channel_id):
+            # Leave the button alone: nothing changed, so re-rendering the panel
+            # would only redraw the same state.
+            await interaction.response.send_message(
+                "Another scraper process is running in this channel.", ephemeral=True
+            )
+            return
+
+        self.sync_watcher_toggle()
+        await interaction.response.edit_message(
+            content=format_job_settings_summary(self.store, self.channel_id), view=self
+        )
+
 
 
 class RedditSortDropdown(discord.ui.Select):
