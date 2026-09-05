@@ -207,12 +207,17 @@ def test_cost_derived_from_measured_duration_uses_median_not_mean():
         for fut in futures:
             fut.result(timeout=5)
 
-        mean = sum(durations) / len(durations)
+        # Compare against what was actually measured, not the nominal sleeps.
+        # Every sample inflates together on a loaded machine, so a median held
+        # to a fixed wall-clock band fails while the scheduler is still right --
+        # which is exactly how this test failed during a full-suite run.
+        measured = sorted(d for _, d in sched._history_for("flaky_task")._samples)
         median_cost = sched.estimated_cost("flaky_task")
 
         assert sched.sample_count("flaky_task") == len(durations)
-        assert median_cost < mean
-        assert median_cost == pytest.approx(0.01, abs=0.005)
+        assert median_cost < sum(measured) / len(measured), "the outlier dragged the cost up"
+        # The median must be one of the four small samples, never the outlier.
+        assert median_cost < measured[-1] / 2
     finally:
         sched.shutdown()
 
@@ -412,3 +417,71 @@ def test_many_rapid_cancellations_never_shrink_the_worker_pool():
         assert sched.stats()["workers"] == 2
     finally:
         sched.shutdown()
+
+
+# --------------------------------------------------------------------------
+# Shutdown has to be prompt, because the test suite's teardown depends on it
+# --------------------------------------------------------------------------
+
+def test_shutdown_does_not_wait_out_the_aging_sweep():
+    """The aging thread used to `time.sleep` through its sweep interval and
+    only check for shutdown on waking, so joining it cost a full interval --
+    measured at ~1005 ms per scheduler.
+
+    That is not merely slow. It is why conftest's teardown fixture had to use
+    `shutdown(wait=False)`, which leaves worker threads from one test draining
+    while the next test runs; three separate files were failing intermittently
+    under random ordering on exactly the assertions a stray worker disturbs.
+
+    Waiting on a stop event instead makes the join immediate. The bound here is
+    a fraction of the sweep interval, so a regression to sleeping cannot pass.
+    """
+    import time as _time
+    from services.priority_scheduler import (
+        PriorityWorkScheduler, _AGING_SWEEP_INTERVAL_SECONDS,
+    )
+
+    scheduler = PriorityWorkScheduler()
+    start = _time.monotonic()
+    scheduler.shutdown(wait=True)
+    elapsed = _time.monotonic() - start
+
+    assert elapsed < _AGING_SWEEP_INTERVAL_SECONDS / 2, (
+        f"shutdown took {elapsed:.3f}s against a {_AGING_SWEEP_INTERVAL_SECONDS}s "
+        "sweep interval -- the aging thread is sleeping through shutdown again"
+    )
+
+
+def test_shutdown_actually_stops_the_aging_thread():
+    """Fast is not enough; it has to be stopped. A join that times out returns
+    silently, so speed alone could mean the thread was simply abandoned.
+    """
+    from services.priority_scheduler import PriorityWorkScheduler
+
+    scheduler = PriorityWorkScheduler()
+    scheduler.shutdown(wait=True)
+    assert not scheduler._aging_thread.is_alive()
+
+
+def test_shutdown_stops_the_worker_threads_too():
+    from services.priority_scheduler import PriorityWorkScheduler
+
+    scheduler = PriorityWorkScheduler()
+    scheduler.shutdown(wait=True)
+    assert not any(w.is_alive() for w in scheduler._workers)
+
+
+def test_submitting_work_does_not_wake_the_aging_thread():
+    """The stop signal is deliberately separate from the task condition
+    variable. Sharing it would wake the aging thread on every submit, turning a
+    once-a-second sweep into a per-task one on a busy queue.
+    """
+    from services.priority_scheduler import PriorityWorkScheduler, BACKGROUND
+
+    scheduler = PriorityWorkScheduler()
+    try:
+        for _ in range(50):
+            scheduler.submit(lambda: None, tier=BACKGROUND, label="noop").result(timeout=5)
+        assert not scheduler._stopping.is_set()
+    finally:
+        scheduler.shutdown(wait=True)

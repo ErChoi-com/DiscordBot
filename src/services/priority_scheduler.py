@@ -12,6 +12,8 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any, Callable, TypeVar
 
+from services import capacity
+
 _T = TypeVar("_T")
 
 # Two priority tiers: interactive (user-triggered Discord commands like
@@ -111,11 +113,21 @@ class PriorityWorkScheduler:
     """
 
     def __init__(self, max_workers: int | None = None) -> None:
-        self._max_workers = max_workers or max(4, os.cpu_count() or 4)
+        # cpu_count() reports the HOST's cores inside a cgroup-limited container,
+        # so capacity.cpu_limit() is what actually reflects available CPU there.
+        # Capped: these are Python threads, so past a couple of dozen the GIL
+        # means extra workers buy queue depth rather than throughput.
+        self._max_workers = max_workers or max(2, min(32, round(capacity.cpu_limit())))
         self._cv = threading.Condition()
         self._heap: list[_QueuedTask] = []
         self._seq_counter = itertools.count()
         self._shutdown = False
+        # Woken by shutdown so the aging thread stops immediately instead of
+        # sleeping out its sweep interval. Deliberately NOT the shared
+        # condition variable: workers notify that on every submit, which would
+        # wake the aging thread on each one and turn a once-a-second sweep into
+        # a per-task one on a busy queue.
+        self._stopping = threading.Event()
         self._active_count = 0
         self._completed_count = 0
         self._promoted_count = 0
@@ -178,7 +190,14 @@ class PriorityWorkScheduler:
 
     def _aging_loop(self) -> None:
         while True:
-            time.sleep(_AGING_SWEEP_INTERVAL_SECONDS)
+            # A bare sleep here made shutdown(wait=True) take a full sweep
+            # interval -- about a second -- because the thread could not be
+            # woken. That is why the test suite's teardown fixture had to use
+            # wait=False, which leaves worker threads from one test still
+            # running during the next: three separate test files were flaking
+            # intermittently on scheduler assertions because of it.
+            if self._stopping.wait(timeout=_AGING_SWEEP_INTERVAL_SECONDS):
+                return
             with self._cv:
                 if self._shutdown:
                     return
@@ -280,6 +299,7 @@ class PriorityWorkScheduler:
         with self._cv:
             self._shutdown = True
             self._cv.notify_all()
+        self._stopping.set()
         if wait:
             for worker in self._workers:
                 worker.join(timeout=5)
