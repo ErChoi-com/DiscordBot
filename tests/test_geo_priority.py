@@ -62,21 +62,34 @@ def test_a_bare_ca_tail_needs_a_province_beside_it():
 
 # ── building the set ─────────────────────────────────────────────────────────
 
-def test_a_company_with_one_canadian_posting_qualifies():
+def test_a_company_is_indexed_under_every_country_it_posts_in():
+    """Keyed by country, not by a Canada flag: a board that posts in both is
+    a first-choice for either channel, and collapsing that to one boolean is
+    what would tie this to a single region.
+    """
     rows = [("acme", "Austin, TX, us"), ("acme", "Toronto, ON, CA")]
-    assert G.build(rows) == {"acme"}
+    got = G.build(rows)
+    assert got["CA"] == {"acme"}
+    assert got["US"] == {"acme"}
 
 
-def test_a_company_with_no_canadian_posting_does_not():
-    assert G.build([("acme", "Austin, TX, us"), ("acme", "Berlin, DE")]) == set()
+def test_a_country_with_no_postings_is_simply_absent():
+    assert "CA" not in G.build([("acme", "Austin, TX, us")])
 
 
 def test_slugs_are_matched_case_insensitively():
-    assert G.build([("ACME", "Toronto, ON, CA")]) == {"acme"}
+    assert G.build([("ACME", "Toronto, ON, CA")])["CA"] == {"acme"}
 
 
 def test_rows_without_a_company_are_skipped():
-    assert G.build([("", "Toronto, ON, CA"), ("  ", "Ottawa, Ontario")]) == set()
+    assert G.build([("", "Toronto, ON, CA"), ("  ", "Ottawa, Ontario")]) == {}
+
+
+def test_an_undecidable_location_is_indexed_nowhere():
+    """"San Francisco, CA" could be either country. Indexing it under a guess
+    would spend priority slots on the wrong region.
+    """
+    assert G.build([("acme", "San Francisco, CA")]) == {}
 
 
 # ── workday's slug shape ─────────────────────────────────────────────────────
@@ -140,26 +153,47 @@ def test_ranking_an_empty_fleet_is_not_an_error():
 # ── cache ────────────────────────────────────────────────────────────────────
 
 def test_a_missing_cache_reads_as_empty(tmp_path):
-    assert G.load_cache(tmp_path / "nope.json")["canada_slugs"] == []
+    assert G.load_cache(tmp_path / "nope.json")["by_country"] == {}
 
 
 def test_a_corrupt_cache_reads_as_empty_rather_than_raising(tmp_path):
     p = tmp_path / "geo.json"
     p.write_text("{ not json", encoding="utf-8")
-    assert G.load_cache(p)["canada_slugs"] == []
+    assert G.load_cache(p)["by_country"] == {}
 
 
 def test_a_cache_of_the_wrong_shape_reads_as_empty(tmp_path):
     p = tmp_path / "geo.json"
     p.write_text(json.dumps(["a", "b"]), encoding="utf-8")
-    assert G.load_cache(p)["canada_slugs"] == []
+    assert G.load_cache(p)["by_country"] == {}
 
 
 def test_the_cache_round_trips_and_is_written_atomically(tmp_path):
     p = tmp_path / "geo.json"
-    G.save_cache({"canada_slugs": ["acme"], "sources": {"x.zip": [1, 2.0]}}, p)
+    G.save_cache({"by_country": {"CA": ["acme"]}, "sources": {"x.zip": [1, 2.0]}}, p)
     assert list(tmp_path.glob("*.tmp")) == []
-    assert G.load_cache(p)["canada_slugs"] == ["acme"]
+    assert G.slugs_for("CA", p) == frozenset({"acme"})
+
+
+def test_slugs_for_an_unseen_country_is_empty_not_an_error(tmp_path):
+    p = tmp_path / "geo.json"
+    G.save_cache({"by_country": {"CA": ["acme"]}, "sources": {}}, p)
+    assert G.slugs_for("JP", p) == frozenset()
+
+
+def test_a_country_code_is_looked_up_case_insensitively(tmp_path):
+    p = tmp_path / "geo.json"
+    G.save_cache({"by_country": {"CA": ["acme"]}, "sources": {}}, p)
+    assert G.slugs_for("ca", p) == frozenset({"acme"})
+
+
+def test_countries_reports_what_the_archive_has_seen(tmp_path):
+    """So a channel scoped somewhere unusual can be told whether prioritising
+    its region would do anything at all before it is wired in.
+    """
+    p = tmp_path / "geo.json"
+    G.save_cache({"by_country": {"CA": ["a"], "US": ["a", "b", "c"]}, "sources": {}}, p)
+    assert G.countries(p) == {"US": 3, "CA": 1}
 
 
 def test_an_empty_cache_leaves_the_order_untouched(tmp_path):
@@ -167,4 +201,54 @@ def test_an_empty_cache_leaves_the_order_untouched(tmp_path):
     treating "nothing known" as "nothing preferred" and silently shuffling.
     """
     fleet = ["a", "b", "c"]
-    assert G.rank(fleet, G.canada_slugs(tmp_path / "nope.json")) == fleet
+    assert G.rank(fleet, G.slugs_for("CA", tmp_path / "nope.json")) == fleet
+
+
+# ── country generality: the module must not be Canada-shaped ────────────────
+
+@pytest.mark.parametrize("location,expected", [
+    ("Berlin, Germany", "DE"),
+    ("Stockholm, Sweden", "SE"),
+    ("Amsterdam, NL", "NL"),
+    ("Sydney, AU", "AU"),
+    ("Dubai, AE", "AE"),
+    ("London, GB", "GB"),
+    ("Austin, TX", "US"),
+    ("Austin, TX, us", "US"),
+])
+def test_countries_other_than_canada_resolve(location, expected):
+    assert G.country_of(location) == expected
+
+
+@pytest.mark.parametrize("location", [
+    "San Francisco, CA",   # California or Canada
+    "Berlin, DE",          # Germany or Delaware
+    "Dover, DE",           # Delaware or Germany
+    "Something, IN",       # Indiana or India
+    "Somewhere, GA",       # Georgia the state or the country
+])
+def test_a_code_that_is_both_a_us_state_and_a_country_stays_undecided(location):
+    """Reading DE as Delaware labelled every German posting American in a first
+    cut. Neither reading can be had from the code alone, and guessing spends the
+    priority slots on the wrong country -- worse than not prioritising.
+    """
+    assert G.country_of(location) == ""
+
+
+@pytest.mark.parametrize("location,expected", [
+    ("Dover, DE, US", "US"),
+    ("Toronto, ON, CA", "CA"),
+    ("Berlin, Germany", "DE"),
+])
+def test_an_ambiguous_code_resolves_when_something_beside_it_decides(location, expected):
+    assert G.country_of(location) == expected
+
+
+def test_ranking_works_for_a_country_that_is_not_the_default():
+    """The point of keying by country: a channel scoped to Germany gets the
+    same treatment by passing a different code, not by editing this module.
+    """
+    rows = [("acme", "Berlin, Germany"), ("other", "Toronto, ON, CA")]
+    idx = G.build(rows)
+    assert G.rank(["other", "acme"], idx["DE"]) == ["acme", "other"]
+    assert G.rank(["acme", "other"], idx["CA"]) == ["other", "acme"]

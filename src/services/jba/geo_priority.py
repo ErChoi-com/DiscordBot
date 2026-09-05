@@ -1,4 +1,4 @@
-"""Which company boards have ever posted a Canadian job, learned from the archive.
+"""Which company boards have posted in a given country, learned from the archive.
 
 The ATS fleet is collected globally -- neither the harvester nor the scraper has
 any notion of country -- while a channel is usually scoped to one. Measured over
@@ -6,19 +6,23 @@ a 3-day window, 1.9% of archived ATS rows were Canadian against roughly 29% US.
 So the great majority of every cycle's request budget buys postings that cannot
 survive the channel's own region gate.
 
-The archive already knows which companies are worth asking first. Every ATS row
-it holds carries the platform slug in `company` and a free-text `location`, and
-months of them are sitting in data/jba/jobs/**. A company that has ever posted a
-Canadian job is a property of the company, not of whichever channel scraped it,
-so this signal is safe to share across an archive that many channels read.
+The archive already knows which boards are worth asking first. Every ATS row it
+holds carries the platform slug in `company` and a free-text `location`, and
+months of them sit in data/jba/jobs/**. Which countries a company posts in is a
+property of the company, not of whichever channel scraped it, so the signal is
+safe to share across an archive that many channels read.
 
-**This orders, it never filters.** `rank()` is a stable partition: Canada-yielding
-slugs move to the front, everything else keeps its relative order behind them,
-and nothing is dropped. On a cycle that completes -- the common case, 73-98% --
-the ordering changes nothing at all, because every slug is asked either way. It
-only bites on a cycle that is cut off, where the tail is cancelled: there, the
-companies most likely to yield a relevant job are now inside the part that ran.
-No filter is relaxed and no extra request is made.
+**Country-general on purpose.** The immediate need is Canada, but nothing here is
+Canada-shaped: the index is keyed by country, so a channel scoped to Germany or
+the US gets the same treatment by passing a different code. Hardcoding one
+country would have made the next region a rewrite rather than an argument.
+
+**This orders, it never filters.** `rank()` is a stable partition: preferred slugs
+move to the front, everything else keeps its relative order behind them, and
+nothing is dropped. On a cycle that completes -- the common case, 73-98% -- the
+ordering changes nothing at all, because every slug is asked either way. It only
+bites on a cycle cut off at the budget, where the tail is cancelled: there, the
+boards most likely to yield a relevant job are now inside the part that ran.
 
 Derived data, like archive_index: delete the cache and it rebuilds.
 """
@@ -37,22 +41,65 @@ _JOBS_DIR = _JBA_DIR / "jobs"
 _CACHE_PATH = _JOBS_DIR / "geo_priority.json"
 _DB_PATH = _JOBS_DIR / "jobs.db"
 
-# Full province and territory names, plus the two-letter codes boards publish.
-# Codes are matched only as whole segments and only alongside a Canadian
-# country tail, because two-letter codes collide with English words and with US
-# state codes -- see _is_canadian.
-_PROVINCE_NAMES: frozenset[str] = frozenset({
+DEFAULT_COUNTRY = "CA"
+
+# Full names and codes for the subdivisions of the two countries whose codes
+# actually collide. Everywhere else a country tail is unambiguous on its own.
+_CA_SUBDIVISION_NAMES: frozenset[str] = frozenset({
     "alberta", "british columbia", "manitoba", "new brunswick",
     "newfoundland and labrador", "newfoundland", "labrador", "nova scotia",
     "ontario", "prince edward island", "quebec", "québec", "saskatchewan",
     "northwest territories", "nunavut", "yukon",
 })
-_PROVINCE_CODES: frozenset[str] = frozenset({
+_CA_SUBDIVISION_CODES: frozenset[str] = frozenset({
     "ab", "bc", "mb", "nb", "nl", "ns", "nt", "nu", "on", "pe", "qc", "sk", "yt",
 })
-# "ca" is the tail on both "Toronto, ON, CA" and "San Francisco, CA". Only the
-# first is Canada, and the difference is whether a province sits beside it.
-_CANADA_TAILS: frozenset[str] = frozenset({"canada", "ca", "can"})
+_US_SUBDIVISION_CODES: frozenset[str] = frozenset({
+    "al", "ak", "az", "ar", "co", "ct", "de", "fl", "ga", "hi", "id", "il",
+    "in", "ia", "ks", "ky", "la", "me", "md", "ma", "mi", "mn", "ms", "mo",
+    "mt", "ne", "nv", "nh", "nj", "nm", "ny", "nc", "nd", "oh", "ok", "or",
+    "pa", "ri", "sc", "sd", "tn", "tx", "ut", "vt", "va", "wa", "wv", "wi",
+    "wy", "dc",
+})
+
+# Spelled-out country names worth recognising; anything else falls through to
+# its two-letter tail, which is what boards overwhelmingly publish.
+_COUNTRY_NAMES: dict[str, str] = {
+    "canada": "CA",
+    "united states": "US", "united states of america": "US", "usa": "US",
+    "united kingdom": "GB", "great britain": "GB",
+    "germany": "DE", "france": "FR", "netherlands": "NL", "sweden": "SE",
+    "australia": "AU", "india": "IN", "ireland": "IE", "spain": "ES",
+    "italy": "IT", "poland": "PL", "brazil": "BR", "mexico": "MX",
+    "japan": "JP", "singapore": "SG", "switzerland": "CH", "norway": "NO",
+    "denmark": "DK", "finland": "FI", "belgium": "BE", "portugal": "PT",
+}
+# Two-letter codes that are BOTH a US state and a country. "Toronto, ON, CA" is
+# Canada and "San Francisco, CA" is California; "Berlin, DE" is Germany and
+# "Dover, DE" is Delaware. Structurally identical, so neither can be decided
+# from the code alone -- only from what sits beside it. Reading DE as Delaware
+# is how a first cut mislabelled every German posting as American.
+_AMBIGUOUS_CODES: frozenset[str] = frozenset({
+    "ca",  # California / Canada
+    "de",  # Delaware / Germany
+    "in",  # Indiana / India
+    "la",  # Louisiana / Laos
+    "md",  # Maryland / Moldova
+    "mt",  # Montana / Malta
+    "ne",  # Nebraska / Niger
+    "pa",  # Pennsylvania / Panama
+    "ga",  # Georgia the state / Georgia the country
+    "id",  # Idaho / Indonesia
+    "al",  # Alabama / Albania
+    "ar",  # Arkansas / Argentina
+    "mo",  # Missouri / Macau
+    "ms",  # Mississippi / Montserrat
+    "sc",  # South Carolina / Seychelles
+    "va",  # Virginia / Vatican City
+})
+
+# Codes some boards use in place of the ISO two-letter form.
+_COUNTRY_ALIASES: dict[str, str] = {"can": "CA", "usa": "US", "uk": "GB", "gbr": "GB"}
 
 _WS = re.compile(r"\s+")
 
@@ -61,29 +108,60 @@ def _segments(location: str) -> list[str]:
     return [_WS.sub(" ", part.strip().casefold()) for part in str(location or "").split(",")]
 
 
-def _is_canadian(location: str) -> bool:
-    """Whether a free-text location names somewhere in Canada.
+def country_of(location: str) -> str:
+    """The ISO-ish country code a free-text location names, or "" if unclear.
 
     The whole difficulty is `CA`. "Toronto, ON, CA" is Canada and "San
     Francisco, CA" is California, and both end in the same two letters -- so a
-    bare tail is never enough on its own. It counts only when a province sits
-    beside it, or when the word Canada is spelled out.
+    bare two-letter tail can never decide on its own. It is resolved by what
+    sits beside it: a Canadian province means Canada, a US state means the US,
+    and neither means unknown.
 
-    Deliberately conservative: this decides which companies are asked *first*,
-    so a false negative costs a little priority and a false positive spends the
-    budget on the wrong boards.
+    Returning "" rather than guessing is deliberate. This decides which boards
+    are asked *first*, so an unknown costs a little ordering while a wrong
+    answer spends the priority slots on the wrong country -- worse than not
+    prioritising at all.
     """
     parts = [p for p in _segments(location) if p]
     if not parts:
-        return False
-    if any(p == "canada" for p in parts):
-        return True
-    if any(p in _PROVINCE_NAMES for p in parts):
-        return True
-    # A country-ish tail only counts with a province code beside it.
-    if parts[-1] in _CANADA_TAILS and any(p in _PROVINCE_CODES for p in parts[:-1]):
-        return True
-    return False
+        return ""
+
+    for part in parts:
+        if part in _COUNTRY_NAMES:
+            return _COUNTRY_NAMES[part]
+
+    tail = parts[-1]
+    if tail in _COUNTRY_ALIASES:
+        return _COUNTRY_ALIASES[tail]
+
+    if tail in _AMBIGUOUS_CODES:
+        # Decide from the subdivision beside it, never from the code alone.
+        others = parts[:-1]
+        if any(p in _CA_SUBDIVISION_CODES or p in _CA_SUBDIVISION_NAMES for p in others):
+            return "CA"
+        if any(p in _US_SUBDIVISION_CODES for p in others):
+            return "US"
+        # Undecidable without a gazetteer. "" costs a little ordering; guessing
+        # would spend the priority slots on the wrong country, which is worse
+        # than not prioritising at all.
+        return ""
+
+    if any(p in _CA_SUBDIVISION_NAMES for p in parts):
+        return "CA"
+
+    if len(tail) == 2 and tail.isalpha():
+        # An unambiguous US state code written without its country ("Austin, TX").
+        if tail in _US_SUBDIVISION_CODES:
+            return "US"
+        return tail.upper()
+
+    return ""
+
+
+def _is_canadian(location: str) -> bool:
+    """Kept as the country-specific reading of country_of, for readability at
+    call sites that genuinely only care about Canada."""
+    return country_of(location) == "CA"
 
 
 def _iter_rows(path: Path) -> Iterator[tuple[str, str]]:
@@ -151,16 +229,25 @@ def _source_stats() -> dict[str, list[float]]:
 
 
 def load_cache(path: Path | None = None) -> dict[str, Any]:
+    """The country index, or an empty one.
+
+    An unreadable or malformed cache reads as empty rather than raising. It is
+    derived data: losing it costs one rebuild, while refusing to start would
+    take the scrape down for an optimisation that is allowed to be absent.
+    """
+    empty: dict[str, Any] = {"by_country": {}, "sources": {}}
     try:
         data = json.loads(Path(path or _CACHE_PATH).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"canada_slugs": [], "sources": {}}
-    if not isinstance(data, dict) or not isinstance(data.get("canada_slugs"), list):
-        return {"canada_slugs": [], "sources": {}}
+        return empty
+    if not isinstance(data, dict) or not isinstance(data.get("by_country"), dict):
+        return empty
     return data
 
 
 def save_cache(cache: dict[str, Any], path: Path | None = None) -> None:
+    """Write atomically -- a rebuild killed mid-write must not leave a half
+    file that the next run discards and rebuilds from scratch again."""
     p = Path(path or _CACHE_PATH)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
@@ -168,28 +255,31 @@ def save_cache(cache: dict[str, Any], path: Path | None = None) -> None:
     os.replace(tmp, p)
 
 
-def build(rows: Iterable[tuple[str, str]]) -> set[str]:
-    """Company slugs with at least one Canadian posting. Pure, so it is testable
+def build(rows: Iterable[tuple[str, str]]) -> dict[str, set[str]]:
+    """{country: {company slugs seen posting there}}. Pure, so it is testable
     without an archive on disk."""
-    found: set[str] = set()
+    found: dict[str, set[str]] = {}
     for company, location in rows:
         slug = str(company or "").strip().casefold()
-        if slug and _is_canadian(location):
-            found.add(slug)
+        if not slug:
+            continue
+        code = country_of(location)
+        if code:
+            found.setdefault(code, set()).add(slug)
     return found
 
 
-def refresh(force: bool = False, cache_path: Path | None = None) -> int:
-    """Rebuild the cache if any archive changed. Returns the slug count.
+def refresh(force: bool = False, cache_path: Path | None = None) -> dict[str, int]:
+    """Rebuild the index if any archive changed. Returns {country: slug count}.
 
     Rebuilds on a source's size or mtime moving, the same staleness test
-    archive_index uses -- a full rescan of every zip on every scrape cycle would
-    cost far more than the ordering it buys.
+    archive_index uses -- rescanning every zip on every scrape cycle would cost
+    far more than the ordering it buys.
     """
     cache = load_cache(cache_path)
     stats = _source_stats()
-    if not force and cache.get("sources") == stats and cache.get("canada_slugs"):
-        return len(cache["canada_slugs"])
+    if not force and cache.get("sources") == stats and cache.get("by_country"):
+        return {k: len(v) for k, v in cache["by_country"].items()}
 
     rows: list[tuple[str, str]] = []
     if _JOBS_DIR.exists():
@@ -197,13 +287,26 @@ def refresh(force: bool = False, cache_path: Path | None = None) -> int:
             rows.extend(_iter_rows(zip_path))
     rows.extend(_iter_db_rows(_DB_PATH))
 
-    slugs = build(rows)
-    save_cache({"canada_slugs": sorted(slugs), "sources": stats}, cache_path)
-    return len(slugs)
+    by_country = build(rows)
+    save_cache(
+        {"by_country": {k: sorted(v) for k, v in sorted(by_country.items())}, "sources": stats},
+        cache_path,
+    )
+    return {k: len(v) for k, v in by_country.items()}
 
 
-def canada_slugs(cache_path: Path | None = None) -> frozenset[str]:
-    return frozenset(load_cache(cache_path).get("canada_slugs") or ())
+def slugs_for(country: str = DEFAULT_COUNTRY, cache_path: Path | None = None) -> frozenset[str]:
+    """Company slugs known to post in `country`."""
+    by_country = load_cache(cache_path).get("by_country") or {}
+    return frozenset(by_country.get(str(country or "").strip().upper()) or ())
+
+
+def countries(cache_path: Path | None = None) -> dict[str, int]:
+    """Every country the archive has seen, with how many boards post there.
+    Useful for deciding whether a channel's region is worth prioritising at
+    all before wiring it in."""
+    by_country = load_cache(cache_path).get("by_country") or {}
+    return {k: len(v) for k, v in sorted(by_country.items(), key=lambda kv: -len(kv[1]))}
 
 
 def match_keys(slug: str) -> tuple[str, ...]:
@@ -224,16 +327,23 @@ def match_keys(slug: str) -> tuple[str, ...]:
     return (text,)
 
 
-def rank(slugs: list[str], preferred: Iterable[str] | None = None) -> list[str]:
-    """Canada-yielding slugs first, everything else after, order preserved.
+def rank(
+    slugs: list[str],
+    preferred: Iterable[str] | None = None,
+    country: str = DEFAULT_COUNTRY,
+) -> list[str]:
+    """Boards that post in `country` first, everything else after, order kept.
 
     A stable partition and nothing more. Every input slug appears exactly once
     in the output, so a caller that submits the result submits the same work it
     would have anyway -- only the order it is queued in changes, which is what
     decides who survives a cycle that gets cut off.
+
+    `preferred` overrides the country lookup, which is what makes this testable
+    without an archive and lets a caller supply its own ordering rule.
     """
     if preferred is None:
-        preferred = canada_slugs()
+        preferred = slugs_for(country)
     wanted = {str(s).strip().casefold() for s in preferred}
     if not wanted:
         # A fast path, not a behavioural branch: with nothing preferred the
