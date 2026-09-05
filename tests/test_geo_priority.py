@@ -252,3 +252,44 @@ def test_ranking_works_for_a_country_that_is_not_the_default():
     idx = G.build(rows)
     assert G.rank(["other", "acme"], idx["DE"]) == ["acme", "other"]
     assert G.rank(["acme", "other"], idx["CA"]) == ["other", "acme"]
+
+
+# ── the partition boundary, which the rotation needs ────────────────────────
+
+def test_partition_returns_the_two_groups_rank_concatenates():
+    front, back = G.partition(["a", "b", "c", "d"], {"c", "a"})
+    assert front == ["a", "c"]
+    assert back == ["b", "d"]
+
+
+def test_partition_agrees_with_rank_on_every_input():
+    """One definition of "preferred", not two. `rank` is defined in terms of
+    this, and a caller that splits the result itself would drift from it.
+    """
+    fleet = [f"c{i}" for i in range(200)]
+    preferred = {f"c{i}" for i in range(0, 200, 3)}
+    front, back = G.partition(fleet, preferred)
+    assert front + back == G.rank(fleet, preferred)
+
+
+def test_partition_loses_nothing():
+    fleet = [f"c{i}" for i in range(100)]
+    front, back = G.partition(fleet, {"c7"})
+    assert sorted(front + back) == sorted(fleet)
+    assert len(front) + len(back) == len(fleet)
+
+
+def test_nothing_preferred_means_an_empty_front_not_an_empty_back():
+    """The caller rotates `back`. Collapsing "no opinion" into an empty back
+    would hand the whole fleet to the head and rotate nothing at all, which is
+    exactly the checkout that needs the rotation most.
+    """
+    front, back = G.partition(["a", "b", "c"], set())
+    assert front == []
+    assert back == ["a", "b", "c"]
+
+
+def test_a_workday_tenant_lands_in_the_front():
+    front, back = G.partition(["ahri|wd3|ahri1", "other|wd1|x"], {"ahri"})
+    assert front == ["ahri|wd3|ahri1"]
+    assert back == ["other|wd1|x"]
