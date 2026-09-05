@@ -37,12 +37,8 @@ class AppConfig:
     semantic_match_target: str = "description"
     semantic_description_char_limit: int = 2200
 
-    # ── Job Bank ──────────────────────────────────────────────────────────────
-    jobbank_max_search_pages: int = 5
-    jobbank_user_agent: str = "Mozilla/5.0 (compatible; RebuiltJobWatcher/1.0)"
-
     # ── Deduplication ─────────────────────────────────────────────────────────
-    dedup_months_threshold: int = 2
+    dedup_months_threshold: int = 1
     dedup_max_fifo_files: int = 6
     dedup_max_entries_per_file: int = 500
 
@@ -64,7 +60,25 @@ class AppConfig:
     scrape_use_ai_cleanup: bool = True
 
     # ── ATS scraper ───────────────────────────────────────────────────────────
-    ats_bamboohr_enabled: bool = False
+    # On since 2026-09-05, having been off because BambooHR "is
+    # Cloudflare-gated and needs a headless browser". Measured against 60
+    # random non-dead boards with plain requests: 58 answered 200, two 401,
+    # zero challenge pages, 43 boards carrying 347 live postings. Every
+    # response is served through Cloudflare's CDN, which is what the original
+    # claim saw -- but being behind the CDN is not being challenged by it.
+    #
+    # It is the largest fleet of the sixteen (21,291 boards, 14,169 not
+    # dead-marked), so this was the single biggest source of coverage left
+    # switched off. At 30 workers it reaches roughly half to three-quarters of
+    # its non-dead fleet inside the 600s per-platform budget -- comparable to
+    # icims at 43% -- and the tail rotation moves the unreached remainder each
+    # cycle rather than stranding the same boards.
+    #
+    # If sustained load does provoke gating, the per-platform refusal breaker
+    # now stops the platform after 25 consecutive refusals instead of spending
+    # the whole budget on them, so the downside is bounded in a way it was not
+    # when this was first switched off.
+    ats_bamboohr_enabled: bool = True
 
     # ── Job-watcher defaults ──────────────────────────────────────────────────
     job_default_keywords: str = "python developer"
@@ -72,7 +86,7 @@ class AppConfig:
     job_default_radius_miles: int = 25
     job_default_hours_old: int = 72
     job_default_results_wanted: int = 999
-    job_default_refresh_seconds: int = 300
+    job_default_refresh_seconds: int = 900
     job_default_country_indeed: str = "AUTO"
     job_default_allow_north_america: bool = False
 
@@ -161,7 +175,12 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
         os.getenv("mainUserProfile", env_values.get("MAIN_USER_PROFILE", env_values.get("mainUserProfile"))),
     )
     if main_user_profile_key:
-        main_user_profile_key = str(main_user_profile_key).strip() or None
+        # Lowercased to match discord_profile_key(), which lowercases every key
+        # it generates -- so every profile directory on disk is lowercase. On
+        # Windows a mixed-case .env value resolved anyway because the filesystem
+        # is case-insensitive; on Linux it would silently fail to find the
+        # profile.
+        main_user_profile_key = str(main_user_profile_key).strip().lower() or None
     if not main_user_profile_key:
         main_user_profile_key = EXAMPLE_PROFILE_KEY
     openrouter_key = os.getenv("openRouter", env_values.get("openRouter"))
@@ -199,7 +218,6 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
     # Behavioral settings — from settings.toml
     s = _load_settings(root / "settings.toml")
     sem = s.get("semantic", {})
-    jb = s.get("jobbank", {})
     dd = s.get("dedup", {})
     net = s.get("network", {})
     ats = s.get("ats", {})
@@ -233,11 +251,8 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
         semantic_threshold=float(sem.get("threshold", 0.30)),
         semantic_match_target=str(sem.get("match_target", "description")),
         semantic_description_char_limit=int(sem.get("description_char_limit", 2200)),
-        # jobbank
-        jobbank_max_search_pages=int(jb.get("max_search_pages", 5)),
-        jobbank_user_agent=str(jb.get("user_agent", "Mozilla/5.0 (compatible; RebuiltJobWatcher/1.0)")),
         # dedup
-        dedup_months_threshold=int(dd.get("months_threshold", 2)),
+        dedup_months_threshold=int(dd.get("months_threshold", 1)),
         dedup_max_fifo_files=int(dd.get("max_fifo_files", 6)),
         dedup_max_entries_per_file=int(dd.get("max_entries_per_file", 500)),
         # network
@@ -249,7 +264,7 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
         watcher_dedupe_seconds=int(wat.get("dedupe_seconds", 120)),
         discord_history_check_limit=int(wat.get("discord_history_check_limit", 5)),
         # ats
-        ats_bamboohr_enabled=bool(ats.get("bamboohr_enabled", False)),
+        ats_bamboohr_enabled=bool(ats.get("bamboohr_enabled", True)),
         # scrape defaults
         scrape_max_items=int(sc.get("max_items", 20)),
         scrape_timeout_seconds=int(sc.get("timeout_seconds", 20)),
@@ -260,7 +275,7 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
         job_default_radius_miles=int(jd.get("radius_miles", 25)),
         job_default_hours_old=int(jd.get("hours_old", 72)),
         job_default_results_wanted=int(jd.get("results_wanted", 10)),
-        job_default_refresh_seconds=int(jd.get("refresh_seconds", 300)),
+        job_default_refresh_seconds=int(jd.get("refresh_seconds", 900)),
         job_default_country_indeed=str(jd.get("country_indeed", "AUTO")),
         job_default_allow_north_america=bool(jd.get("allow_north_america", False)),
         # reddit defaults

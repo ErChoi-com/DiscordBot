@@ -471,7 +471,7 @@ dedupe_seconds = 120
 discord_history_check_limit = 5
 
 [ats]
-bamboohr_enabled = false
+bamboohr_enabled = true
 
 [scrape_defaults]
 max_items = 20
@@ -504,8 +504,15 @@ Notes on individual keys:
   produces false positives.
 - `network.site_concurrency_limit` is enforced per site with a semaphore, so one
   slow board cannot starve the others.
-- `ats.bamboohr_enabled` is off because BambooHR is Cloudflare-gated and needs a
-  headless browser to get through.
+- `ats.bamboohr_enabled` is **on**. It was off because BambooHR was believed to
+  be Cloudflare-gated and to need a headless browser. Re-measured 2026-09-05
+  against 60 random non-dead boards with plain `requests`: 58 answered 200, two
+  401, **zero** challenge pages, and 43 of them carried 347 live postings. Every
+  response is served through Cloudflare's CDN — which is what the original claim
+  saw — but sitting behind the CDN is not being challenged by it. BambooHR is
+  the largest fleet of the sixteen (21,291 boards, 14,169 not dead-marked), so
+  this was the biggest single source of coverage left switched off. Set it to
+  `false` in `settings.toml` to restore the old behaviour.
 
 Per-channel job settings additionally carry `sites`, `role_filters`,
 `exclusion_terms`, `semantic_threshold` (0.30) and `ats_semantic_threshold`
