@@ -866,6 +866,13 @@ class WatcherManager:
             )
 
             health_tracker = self.health
+            # Declare the full roster every cycle, so `.health` lists every
+            # platform that exists rather than only those that have reported --
+            # and names the ones switched off instead of omitting them.
+            health_tracker.set_ats_roster(
+                ATS_PLATFORMS,
+                disabled=[p for p in ATS_PLATFORMS if p not in platforms],
+            )
 
             def _scrape_one(platform: str) -> list[dict[str, Any]]:
                 try:

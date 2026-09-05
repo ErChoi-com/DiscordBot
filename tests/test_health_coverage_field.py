@@ -47,7 +47,10 @@ def _ats_embed(tracker: WatcherHealthTracker):
 
 
 def _field(embed, name: str):
-    return next((f for f in embed.fields if f.name == name), None)
+    """Match on the field-name prefix: the platform fields carry a count in
+    their title ("Platforms (16)") so a reader can see at a glance whether all
+    sixteen are accounted for."""
+    return next((f for f in embed.fields if f.name.startswith(name)), None)
 
 
 # ── the numbers reach Discord at all ─────────────────────────────────────────

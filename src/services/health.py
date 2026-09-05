@@ -108,6 +108,15 @@ class ATSScrapeHealth:
     per_platform: dict[str, ATSPlatformHealth] = field(default_factory=dict)
     task_alive: bool = False
 
+    # Every platform that exists, not only those that have reported. Without
+    # it `.health` is a log of what happened to run rather than a roll-call:
+    # before the first cycle the Platforms field was absent entirely, after one
+    # report it listed one of sixteen, and a platform disabled in config never
+    # appeared at all -- so bamboohr, the largest fleet at 21,291 boards, was
+    # invisible rather than shown as switched off.
+    roster: tuple[str, ...] = ()
+    disabled: frozenset[str] = frozenset()
+
 
 @dataclass
 class BrowserServiceHealth:
@@ -249,6 +258,20 @@ class WatcherHealthTracker:
                 ph.last_nonempty_at = ph.last_scrape_at
             else:
                 ph.consecutive_silent += 1
+
+    def set_ats_roster(self, platforms, disabled=()) -> None:
+        """Declare every ATS platform that exists, and which are switched off.
+
+        Registered by the scrape loop rather than imported here, so this module
+        keeps knowing nothing about `ats_service` -- the roster is data the
+        caller already has, and importing the scraper to render an embed would
+        tie the health surface to the scraping stack.
+        """
+        # Not deduped here: `_ats_platform_lines` has to dedupe anyway, since
+        # it unions the roster with whatever has reported. Doing it twice would
+        # leave one of the two impossible to exercise.
+        self._ats.roster = tuple(str(p) for p in platforms)
+        self._ats.disabled = frozenset(str(p) for p in disabled)
 
     def ats_fleet_coverage(self) -> list[dict[str, object]]:
         """What fraction of each platform's fleet the last cycle actually reached.
@@ -425,6 +448,42 @@ def _join_within_limit(lines: list[str], limit: int = _FIELD_VALUE_LIMIT) -> str
     return "\n".join(kept)
 
 
+def _ats_platform_lines(ats: ATSScrapeHealth) -> list[str]:
+    """One line per ATS platform that exists -- not per platform that reported.
+
+    `per_platform` is written only when a scrape reports a result, so it is a
+    log, not an inventory. Rendering straight from it meant the Platforms field
+    was missing entirely until the first cycle finished, listed one of sixteen
+    after one platform reported, and could never show a platform disabled in
+    config at all. bamboohr is disabled by default and carries the largest
+    fleet of the sixteen, so the one platform most worth knowing about was the
+    one guaranteed to be invisible.
+
+    Every roster entry appears, with an explicit state for the ones that have
+    not reported, because "nothing here" and "not asked yet" are the two things
+    this whole subsystem exists to tell apart.
+    """
+    names = list(dict.fromkeys(list(ats.roster) + sorted(ats.per_platform)))
+    lines: list[str] = []
+    for platform in names:
+        if platform in ats.disabled:
+            lines.append(f"⚪ **{platform}**: disabled in config")
+            continue
+        ph = ats.per_platform.get(platform)
+        if ph is None:
+            lines.append(f"⚪ **{platform}**: no cycle yet")
+            continue
+        icon = "❌" if ph.last_was_error else ("✅" if ph.last_job_count else "🔇")
+        errs = f" · {ph.total_errors} err" if ph.total_errors > 0 else ""
+        silent = (f" · silent {ph.consecutive_silent}×"
+                  if ph.consecutive_silent >= SILENT_RUN_THRESHOLD else "")
+        lines.append(
+            f"{icon} **{platform}**: {ph.last_job_count:,} scraped / {ph.last_new_count:,} new · "
+            f"{ph.total_new_jobs:,} new total{errs}{silent} · {_fmt_ago(ph.last_scrape_at)}"
+        )
+    return lines
+
+
 def _format_ats_coverage_field(tracker: WatcherHealthTracker) -> str | None:
     """How much of each platform's fleet the last cycle reached, worst first.
 
@@ -575,17 +634,12 @@ def build_channel_health_embed(
     ]
     ats_embed.add_field(name="Status", value="\n".join(ats_lines), inline=False)
 
-    if ats.per_platform:
-        plat_lines = []
-        for platform, ph in sorted(ats.per_platform.items()):
-            icon = "❌" if ph.last_was_error else "✅"
-            errs = f" · {ph.total_errors} err" if ph.total_errors > 0 else ""
-            plat_lines.append(
-                f"{icon} **{platform}**: {ph.last_job_count:,} scraped / {ph.last_new_count:,} new · "
-                f"{ph.total_new_jobs:,} new total{errs} · {_fmt_ago(ph.last_scrape_at)}"
-            )
+    plat_lines = _ats_platform_lines(ats)
+    if plat_lines:
         ats_embed.add_field(
-            name="Platforms", value=_join_within_limit(plat_lines), inline=False
+            name=f"Platforms ({len(plat_lines)})",
+            value=_join_within_limit(plat_lines),
+            inline=False,
         )
 
     coverage = _format_ats_coverage_field(tracker)
@@ -658,6 +712,14 @@ def build_all_health_embed(
         ),
         inline=False,
     )
+
+    plat_lines = _ats_platform_lines(ats)
+    if plat_lines:
+        embed.add_field(
+            name=f"ATS Platforms ({len(plat_lines)})",
+            value=_join_within_limit(plat_lines),
+            inline=False,
+        )
 
     coverage = _format_ats_coverage_field(tracker)
     if coverage:
