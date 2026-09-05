@@ -244,10 +244,53 @@ def _path_segment_extractor(host_suffix: str) -> Callable[[str], str | None]:
     return extract
 
 
+def _host_extractor(domain: str) -> Callable[[str], str | None]:
+    """Slug is the WHOLE host: ``https://<host>/...`` where host ends in `domain`.
+
+    Oracle Fusion needs this and the other two extractors cannot express it.
+    A tenant is identified by its entire host -- `eeho.fa.us2.oraclecloud.com`,
+    `fa-etjr-saasfaprod1.fa.ocs.oraclecloud.com` -- because the pod, region and
+    instance are all encoded in it and no single label identifies the customer.
+
+    Measured before choosing this shape: `siteNumber` in the requisition finder
+    turns out not to select anything. CX_1, CX_2, CX_3 and CX_45001 all return
+    the same TotalJobsCount for a host, so the host alone addresses the whole
+    tenant -- simpler than a compound key and strictly more coverage than one
+    site's slice.
+    """
+    pattern = re.compile(
+        r"^https?://([a-z0-9][a-z0-9.\-]*" + re.escape(domain) + r")(?:[:/]|$)",
+        re.IGNORECASE,
+    )
+
+    def extract(url: str) -> str | None:
+        m = pattern.match(url)
+        if not m:
+            return None
+        host = m.group(1).strip().lower().rstrip(".")
+        # A bare `oraclecloud.com` or `www.oraclecloud.com` is Oracle's own
+        # marketing site, not a customer tenant.
+        label = host[: -len(domain)].rstrip(".")
+        if not label or label in ("www",):
+            return None
+        return host if _looks_like_company(host) else None
+
+    return extract
+
+
 def _subdomain_extractor(
-    domain: str, strip_prefix: str | None = None
+    domain: str, strip_prefix: str | None = None, allow_numeric: bool = False
 ) -> Callable[[str], str | None]:
-    """Slug is the leftmost subdomain label: ``https://<slug>.<domain>/...``."""
+    """Slug is the leftmost subdomain label: ``https://<slug>.<domain>/...``.
+
+    `allow_numeric` lifts the all-digits rejection for this platform only. That
+    rule exists because path-segment platforms put job ids where the board name
+    goes -- Greenhouse harvested 325 numbers that way. A subdomain is not that
+    shape: a customer registered it, so an all-digit label is far more likely to
+    be a real tenant than debris. `4401.jobs.personio.de` is the company 44.01,
+    and rejecting it lost a live board. Off by default so no existing platform
+    changes behaviour without being measured first.
+    """
 
     pattern = re.compile(
         r"^https?://([a-z0-9][a-z0-9-]*)\." + re.escape(domain) + r"(?:[:/]|$)",
@@ -264,6 +307,8 @@ def _subdomain_extractor(
         # "www4".
         if _INFRA_SUBDOMAIN_RE.fullmatch(slug):
             return None
+        if allow_numeric and slug.isdigit():
+            return slug
         if strip_prefix and slug.startswith(strip_prefix):
             # ats_service builds the host as f"careers-{slug}.icims.com", so the
             # canonical stored form is the label *without* that prefix.  Upstream
@@ -537,6 +582,28 @@ PLATFORMS: tuple[Platform, ...] = (
         "applicantpro",
         (("applicantpro.com", "domain"),),
         _subdomain_extractor("applicantpro.com"),
+    ),
+    Platform(
+        # Oracle Cloud Recruiting, the successor to Taleo and the platform a
+        # large share of enterprises now post on. Candidate-experience pages
+        # live under /hcmUI/CandidateExperience/, which is what distinguishes a
+        # recruiting tenant from every other Fusion application on the same
+        # domain.
+        "oracle",
+        (("*.oraclecloud.com/hcmUI/CandidateExperience/*", "domain"),
+         # Some pods answer on the older OCS domain rather than the flat one.
+         ("*.fa.ocs.oraclecloud.com/hcmUI/*", "domain")),
+        _host_extractor("oraclecloud.com"),
+    ),
+    Platform(
+        # Personio publishes an unauthenticated XML feed per tenant. Measured
+        # 2026-09-05: every sampled tenant answered 200 with a <workzag-jobs>
+        # document of <position> entries.
+        "personio",
+        (("jobs.personio.de", "domain"),
+         # The .com host exists alongside the German one for newer tenants.
+         ("jobs.personio.com", "domain")),
+        _subdomain_extractor("jobs.personio.de", allow_numeric=True),
     ),
 )
 
@@ -1235,6 +1302,13 @@ def harvest_platform_bulk(
 WAYBACK_URL = "http://web.archive.org/cdx/search/cdx"
 
 WAYBACK_QUERIES: dict[str, tuple[str, ...]] = {
+    # Oracle and Personio sweep Common Crawl only. The measured case against
+    # Wayback applies to both: it is an order of magnitude slower and returns
+    # disproportionately dead boards, and neither platform has Lever's problem
+    # of being absent from Common Crawl in the first place. An empty tuple is
+    # the decision, recorded so it cannot be mistaken for an oversight.
+    "oracle": (),
+    "personio": (),
     "greenhouse": ("boards.greenhouse.io/*", "job-boards.greenhouse.io/*",
                    "job-boards.eu.greenhouse.io/*"),
     "lever": ("jobs.lever.co/*", "jobs.eu.lever.co/*"),
@@ -1621,6 +1695,12 @@ def _workday_probe_url(slug: str) -> str | None:
 
 
 _IDENTIFIER_PROBES: dict[str, Callable[[str], str | None]] = {
+    # The Oracle slug IS a host, so the probe URL is the slug itself with a
+    # candidate-experience path -- which is exactly what the host extractor
+    # matches, so a stored slug round-trips to itself and a malformed one
+    # (a bare label, a path fragment) does not.
+    "oracle": lambda s: f"https://{s}/hcmUI/CandidateExperience/en/sites/CX_1/requisitions",
+    "personio": lambda s: f"https://{s}.jobs.personio.de/",
     "greenhouse": lambda s: f"https://job-boards.greenhouse.io/{s}/jobs/1",
     "lever": lambda s: f"https://jobs.lever.co/{s}/abc",
     "ashby": lambda s: f"https://jobs.ashbyhq.com/{s}/abc",

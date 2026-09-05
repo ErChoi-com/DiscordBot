@@ -65,7 +65,7 @@ CHECKED_DIR = DATA_DIR / "ats_checked"
 PLATFORMS = ("greenhouse", "lever", "ashby", "workday", "icims", "bamboohr",
              "paylocity", "workable", "breezy", "smartrecruiters",
              "rippling", "teamtailor", "jazzhr", "recruitee", "jobvite",
-             "applicantpro")
+             "applicantpro", "oracle", "personio")
 
 COMPANY_FILES = {p: f"{p}_companies.json" for p in PLATFORMS}
 # Upstream ships this one under a different name, and as {guid, name, jobs}
@@ -106,7 +106,12 @@ AUDIT_BUDGET_SECONDS = 240.0
 
 # Per-platform concurrency. These hit real ATS endpoints, so they stay at or
 # below what ats_service already uses for the same host.
-WORKERS = {"greenhouse": 16, "lever": 16, "ashby": 8, "workday": 12,
+WORKERS = {
+           # New platforms, starting low. Oracle tenants are enterprise Fusion
+           # instances shared with payroll and finance, so the validator has
+           # less licence there than on a dedicated job-board host.
+           "oracle": 4, "personio": 8,
+           "greenhouse": 16, "lever": 16, "ashby": 8, "workday": 12,
            "icims": 12, "bamboohr": 12,
            # Paylocity sheds load by refusing connections rather than slowing
            # down, and it does so steeply. Measured over 60-slug batches:
@@ -577,6 +582,42 @@ def live_applicantpro(slug: str) -> bool:
     return body.lstrip()[:9].lower() == b"<!doctype"
 
 
+def live_oracle(slug: str) -> bool:
+    # The slug is the whole Fusion host, so the probe is the same requisition
+    # finder the scraper uses -- a limit of 1 is enough to separate a live
+    # recruiting tenant from a host that answers but runs no recruiting module.
+    #
+    # `siteNumber` is in the finder because the parameter is required, not
+    # because it selects anything: CX_1, CX_2, CX_3 and CX_45001 all returned
+    # the same TotalJobsCount when measured, so the host addresses the whole
+    # tenant.
+    status, body, _ = _request(
+        f"https://{slug}/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+        "?onlyData=true&finder=findReqs;siteNumber=CX_1,limit=1")
+    if status != 200:
+        return _decide(status)
+    # Marker chosen for where it sits, not for what reads best: `_request` caps
+    # the body it reads, and this response opens with a long block of search
+    # metadata, so `requisitionList` falls outside the cap and matching on it
+    # rejected every live tenant. `"items"` is the envelope's first key.
+    #
+    # Generic on its own, sufficient here: a Fusion host without the recruiting
+    # module does not serve `recruitingCEJobRequisitions` at all, so a 200 on
+    # this path with this envelope is the tenant answering.
+    return b'"items"' in (body or b"")
+
+
+def live_personio(slug: str) -> bool:
+    # Personio serves an unauthenticated XML feed per tenant and 404s an
+    # unknown one. A live tenant with no open roles still returns the
+    # <workzag-jobs> envelope, so the envelope -- not the position count -- is
+    # what proves the board exists.
+    status, body, _ = _request(f"https://{slug}.jobs.personio.de/xml?language=en")
+    if status != 200:
+        return _decide(status)
+    return b"<workzag-jobs" in (body or b"")
+
+
 PROBES: dict[str, Callable[[str], bool]] = {
     "greenhouse": live_greenhouse, "lever": live_lever, "ashby": live_ashby,
     "workday": live_workday, "icims": live_icims, "bamboohr": live_bamboohr,
@@ -585,6 +626,7 @@ PROBES: dict[str, Callable[[str], bool]] = {
     "rippling": live_rippling, "teamtailor": live_teamtailor,
     "jazzhr": live_jazzhr, "recruitee": live_recruitee,
     "jobvite": live_jobvite, "applicantpro": live_applicantpro,
+    "oracle": live_oracle, "personio": live_personio,
 }
 
 

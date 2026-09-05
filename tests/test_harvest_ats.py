@@ -779,6 +779,12 @@ def test_every_wayback_query_host_has_a_matching_extractor():
     for name, queries in hc.WAYBACK_QUERIES.items():
         if name == "workday":
             continue          # covered by test_myworkdaysite_extraction
+        if not queries:
+            # An empty tuple is a recorded decision not to sweep Wayback, not
+            # an omission -- oracle and personio both take it. There is no
+            # query host to round-trip, so requiring a probe here would demand
+            # a fixture for a code path that cannot run.
+            continue
         assert name in probes, f"{name} has queries but no round-trip probe"
         template, expected = probes[name]
         extract = hc.PLATFORM_BY_NAME[name].extract
