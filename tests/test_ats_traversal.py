@@ -246,3 +246,97 @@ def test_a_full_pass_covers_the_fleet_for_any_slice_size(size, count):
         picked, last, _w = T.next_slice(order, last, count)
         seen.update(picked)
     assert seen == set(fleet), f"missed {len(set(fleet) - seen)} of {size}"
+
+
+# ── dead boards must not eat slice positions ─────────────────────────────────
+
+def test_skipped_boards_do_not_consume_slice_positions():
+    """26% of the fleet carries a live dead mark and for lever it is 70%, so a
+    slice of 250 raw slugs asks only 75 companies and the cycle ends early with
+    its budget unspent. The slice must be 250 *askable* boards.
+    """
+    fleet = _fleet(2000)
+    dead = {s for i, s in enumerate(sorted(fleet)) if i % 4}      # 75% dead
+    picked, _last, _w = T.next_slice(
+        T.stable_order(fleet), None, 100, is_skipped=lambda s: s in dead
+    )
+    assert len(picked) == 100
+    assert not (set(picked) & dead), "a dead board was asked"
+
+
+def test_the_cursor_advances_past_skipped_boards():
+    """If the cursor only moved over boards that were asked, the walk would
+    re-scan the same run of dead marks every cycle and never get past it.
+    """
+    fleet = _fleet(600)
+    order = T.stable_order(fleet)
+    dead = {s for _d, s in order[:200]}          # a solid run of dead at the front
+
+    first, last, _ = T.next_slice(order, None, 50, is_skipped=lambda s: s in dead)
+    second, _l2, _ = T.next_slice(order, last, 50, is_skipped=lambda s: s in dead)
+
+    assert not (set(first) & set(second)), "the walk re-asked boards after skipping"
+
+
+def test_a_slice_landing_entirely_in_dead_boards_still_moves_the_walk_on():
+    """Nothing is asked, but the cursor must still advance -- otherwise this
+    cycle is retried forever and the fleet past it is never reached.
+    """
+    fleet = _fleet(500)
+    order = T.stable_order(fleet)
+    all_dead = {s for _d, s in order}
+    state = {"platforms": {}}
+
+    picked = T.plan_cycle(state, "lever", fleet, 50, now=1.0,
+                          is_skipped=lambda s: s in all_dead, max_scan=50)
+    assert picked == []
+    moved = state["platforms"]["lever"]["last_digest"]
+    assert moved is not None, "the cursor did not move over an all-dead slice"
+
+    picked2 = T.plan_cycle(state, "lever", fleet, 50, now=2.0,
+                           is_skipped=lambda s: s in all_dead, max_scan=50)
+    assert state["platforms"]["lever"]["last_digest"] != moved, "the walk stalled"
+    assert picked2 == []
+
+
+def test_max_scan_bounds_the_work_when_dead_boards_are_dense():
+    """A pathological run of dead marks must cost a bounded scan, not a walk of
+    the whole fleet. Falling short of the requested count is correct here.
+    """
+    fleet = _fleet(10_000)
+    order = T.stable_order(fleet)
+    seen: list[str] = []
+    picked, _l, _w = T.next_slice(
+        order, None, 100,
+        is_skipped=lambda s: seen.append(s) or True,   # everything dead, count the probes
+        max_scan=300,
+    )
+    assert picked == []
+    assert len(seen) == 300, f"scanned {len(seen)}, expected the 300 cap"
+
+
+def test_every_live_board_is_still_covered_across_a_full_walk():
+    """Skipping must not cost coverage: the live half of the fleet must all be
+    reached, not just the part near the front.
+    """
+    fleet = _fleet(1000)
+    order = T.stable_order(fleet)
+    dead = {s for i, s in enumerate(sorted(fleet)) if i % 2}
+    live = set(fleet) - dead
+
+    seen: set[str] = set()
+    last = None
+    for _ in range(20):
+        picked, last, _w = T.next_slice(order, last, 50, is_skipped=lambda s: s in dead)
+        seen.update(picked)
+
+    assert seen == live, f"missed {len(live - seen)} live boards"
+
+
+def test_no_predicate_behaves_exactly_as_before():
+    """Backward compatibility: the wiring is not live yet, so the default path
+    must be untouched.
+    """
+    fleet = _fleet(300)
+    order = T.stable_order(fleet)
+    assert T.next_slice(order, None, 50) == T.next_slice(order, None, 50, is_skipped=None)

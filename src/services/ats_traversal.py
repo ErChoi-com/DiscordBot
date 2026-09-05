@@ -65,9 +65,13 @@ def stable_order(slugs: Iterable[str]) -> list[tuple[str, str]]:
 
 
 def next_slice(
-    order: Sequence[tuple[str, str]], last_digest: str | None, count: int
+    order: Sequence[tuple[str, str]],
+    last_digest: str | None,
+    count: int,
+    is_skipped: Any = None,
+    max_scan: int | None = None,
 ) -> tuple[list[str], str | None, bool]:
-    """The next `count` slugs after `last_digest`, wrapping at the end.
+    """The next `count` askable slugs after `last_digest`, wrapping at the end.
 
     Returns (slugs, new_last_digest, wrapped). `wrapped` reports that the walk
     ran off the end and resumed at the front, which is how a caller counts
@@ -76,6 +80,19 @@ def next_slice(
     A `last_digest` that no longer exists is not an error -- bisect still places
     it among the current entries, so a fleet that shrank under the cursor
     resumes at the right neighbourhood rather than restarting.
+
+    `is_skipped(slug)` marks a slug the scraper would refuse before making any
+    request -- in practice `ats_service._is_dead`. Skipped slugs must not
+    consume slice positions: 26% of the fleet carries a live dead mark, and for
+    lever it is 70%, so a slice of 250 raw slugs asks only 75 companies and the
+    cycle then ends early with its budget unspent. They still advance the
+    cursor, or the walk would re-scan the same dead run on every cycle and
+    never reach past it.
+
+    `max_scan` bounds the work when skipped slugs are dense, so a pathological
+    run of dead marks costs a bounded scan rather than a walk of the whole
+    fleet. Falling short of `count` is the correct outcome there -- the next
+    cycle resumes from where the scan stopped.
     """
     if count <= 0 or not order:
         return [], last_digest, False
@@ -91,14 +108,22 @@ def next_slice(
     # Cap at the fleet size: asking for more than exists should hand back the
     # whole fleet once, not loop it repeatedly in a single cycle.
     want = min(count, n)
+    scan_cap = min(n, max_scan if max_scan is not None else (want * 10 if is_skipped else want))
+
+    cursor = last_digest
     idx = start
-    for _ in range(want):
+    scanned = 0
+    while len(picked) < want and scanned < scan_cap:
         if idx >= n:
             idx, wrapped = 0, True
-        picked.append(order[idx])
+        entry = order[idx]
+        cursor = entry[0]
+        if is_skipped is None or not is_skipped(entry[1]):
+            picked.append(entry)
         idx += 1
+        scanned += 1
 
-    return [slug for _, slug in picked], picked[-1][0], wrapped
+    return [slug for _, slug in picked], cursor, wrapped
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -146,18 +171,31 @@ def record_progress(
 
 
 def plan_cycle(
-    state: dict[str, Any], platform: str, slugs: Iterable[str], count: int, now: float
+    state: dict[str, Any],
+    platform: str,
+    slugs: Iterable[str],
+    count: int,
+    now: float,
+    is_skipped: Any = None,
+    max_scan: int | None = None,
 ) -> list[str]:
     """The slugs this cycle should ask for, advancing the cursor as a side effect.
 
     The one call a scrape loop needs. `state` is mutated but not persisted --
     the caller saves it after the cycle, so a crashed cycle re-asks its slice
     rather than skipping it.
+
+    Pass `is_skipped=ats_service._is_dead`-style predicate so dead-marked boards
+    do not eat slice positions. Note the cursor advances even when nothing was
+    picked, so a slice landing entirely inside a run of dead marks still moves
+    the walk forward instead of retrying that run forever.
     """
     order = stable_order(slugs)
     entry = state.get("platforms", {}).get(platform) or {}
-    picked, new_digest, wrapped = next_slice(order, entry.get("last_digest"), count)
-    if picked:
+    picked, new_digest, wrapped = next_slice(
+        order, entry.get("last_digest"), count, is_skipped=is_skipped, max_scan=max_scan
+    )
+    if new_digest is not None:
         record_progress(state, platform, new_digest, wrapped, now)
     return picked
 
