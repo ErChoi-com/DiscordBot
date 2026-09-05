@@ -53,9 +53,10 @@ semantic), dedupes against a rolling history, and posts each surviving listing
 as a message. Sources are JobSpy (Indeed, LinkedIn, Glassdoor, ZipRecruiter,
 Google, Bayt, Naukri, and whatever else the installed version supports) plus
 first-party scrapers for Glassdoor and ZipRecruiter and direct ATS scrapers for
-sixteen job-board platforms: Greenhouse, Lever, Ashby, Workday, iCIMS, Workable,
-Breezy, SmartRecruiters, Recruitee, TeamTailor, Rippling, JazzHR, Jobvite,
-ApplicantPro, Paylocity, and (optionally) BambooHR.
+eighteen job-board platforms: Greenhouse, Lever, Ashby, Workday, iCIMS,
+Workable, Breezy, SmartRecruiters, Recruitee, TeamTailor, Rippling, JazzHR,
+Jobvite, ApplicantPro, Paylocity, BambooHR, Oracle Cloud Recruiting and
+Personio.
 
 **Reddit watching.** Per channel, mirror one or more subreddits with sort,
 time-filter, flair, NSFW/spoiler, and media-mode controls. Galleries are
@@ -743,11 +744,33 @@ A single scrape pass does roughly this:
 
 ### ATS scraping
 
-[`services/ats_service.py`](src/services/ats_service.py) scrapes sixteen ATS
+[`services/ats_service.py`](src/services/ats_service.py) scrapes eighteen ATS
 platforms directly rather than through an aggregator, which gets fresher results
 and full descriptions. In registration order: Greenhouse, Lever, Ashby, Workday,
 iCIMS, BambooHR, Workable, Breezy, SmartRecruiters, Recruitee, TeamTailor,
-Rippling, JazzHR, Jobvite, ApplicantPro and Paylocity. Every one of them is
+Rippling, JazzHR, Jobvite, ApplicantPro, Paylocity, Oracle Cloud Recruiting and
+Personio.
+
+Two of those are keyed by something other than a company label, and both were
+measured before being modelled that way:
+
+- **Oracle Cloud Recruiting** (Taleo's successor) is keyed by the whole Fusion
+  host — `eeho.fa.us2.oraclecloud.com` — because the pod, region and instance
+  are all encoded in it. `siteNumber` in its requisition finder selects nothing
+  (CX_1, CX_2, CX_3 and CX_45001 all returned the same `TotalJobsCount`), so the
+  host addresses the tenant's whole job set. The feed sorts newest-first, and
+  the scraper stops paging as soon as a page opens older than the archive's
+  seven-day write window: on the measured tenant that is 400 rows in 2 requests
+  instead of 12, which is what makes thousands of requisitions per tenant
+  affordable. Its `PrimaryLocationCountry` is an ISO code, so geo priority reads
+  the country instead of parsing it out of a display string.
+- **Personio** is keyed by subdomain and serves a `<workzag-jobs>` XML feed.
+  Because the feed is XML it does not go through the shared JSON fetcher, so its
+  dead-marking and refusal-breaker accounting are implemented directly rather
+  than inherited — otherwise it would be the one platform whose 404s never
+  suppressed a slug.
+
+Every one of them is
 harvested by `scripts/harvest_ats.py`; nine (Workable, Breezy, JazzHR,
 Recruitee, TeamTailor, ApplicantPro, Rippling, SmartRecruiters, Jobvite) exist
 only in the local harvest and have no upstream company list.
