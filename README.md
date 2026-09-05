@@ -1124,7 +1124,6 @@ src/
   app.py                    Discord client, slash-command registration, PID/lock,
                             graceful drain, startup wiring
   config.py                 .env + settings.toml -> AppConfig
-  models.py                 shared dataclasses
   commands/handlers.py      command routing, aliases, cheatsheets, permissions,
                             resume/cover/check handlers, pagination
   ui/views.py               Discord modals and buttons for every settings panel
