@@ -53,7 +53,9 @@ semantic), dedupes against a rolling history, and posts each surviving listing
 as a message. Sources are JobSpy (Indeed, LinkedIn, Glassdoor, ZipRecruiter,
 Google, Bayt, Naukri, and whatever else the installed version supports) plus
 first-party scrapers for Glassdoor and ZipRecruiter and direct ATS scrapers for
-Greenhouse, Lever, Ashby, Workday, iCIMS, and (optionally) BambooHR.
+sixteen job-board platforms: Greenhouse, Lever, Ashby, Workday, iCIMS, Workable,
+Breezy, SmartRecruiters, Recruitee, TeamTailor, Rippling, JazzHR, Jobvite,
+ApplicantPro, Paylocity, and (optionally) BambooHR.
 
 **Reddit watching.** Per channel, mirror one or more subreddits with sort,
 time-filter, flair, NSFW/spoiler, and media-mode controls. Galleries are
@@ -734,9 +736,14 @@ A single scrape pass does roughly this:
 
 ### ATS scraping
 
-[`services/ats_service.py`](src/services/ats_service.py) scrapes Greenhouse,
-Lever, Ashby, Workday, iCIMS, and optionally BambooHR directly rather than
-through an aggregator, which gets fresher results and full descriptions.
+[`services/ats_service.py`](src/services/ats_service.py) scrapes sixteen ATS
+platforms directly rather than through an aggregator, which gets fresher results
+and full descriptions. In registration order: Greenhouse, Lever, Ashby, Workday,
+iCIMS, BambooHR, Workable, Breezy, SmartRecruiters, Recruitee, TeamTailor,
+Rippling, JazzHR, Jobvite, ApplicantPro and Paylocity. Every one of them is
+harvested by `scripts/harvest_ats.py`; nine (Workable, Breezy, JazzHR,
+Recruitee, TeamTailor, ApplicantPro, Rippling, SmartRecruiters, Jobvite) exist
+only in the local harvest and have no upstream company list.
 
 - **Company slug lists** live in `data/ats_companies/*.json`, one file per
   platform, synced by `sync_ats_companies.py` from a separate git repo using a
@@ -745,10 +752,22 @@ through an aggregator, which gets fresher results and full descriptions.
   `data/dead_slugs/<platform>.json` with a timestamp and skipped on future runs;
   entries expire so a company that comes back is eventually retried.
   `clear_dead_slugs()` forces a full re-probe.
-- **Per-platform strategies.** Greenhouse and Lever have clean JSON boards.
-  Ashby is queried through its GraphQL endpoint. Workday needs its slug parsed
-  into tenant/host/path parts and a per-job detail fetch to recover a posting
-  date. iCIMS is walked via sitemap XML with metadata extracted per job.
+- **Per-platform strategies.** Greenhouse, Lever, Workable, Breezy, Recruitee,
+  TeamTailor and Rippling have clean JSON boards. Ashby uses its public posting
+  API (the GraphQL endpoint was a dead end -- asking for fields errors the whole
+  query, and it does not 404 properly, which is what dead-marking needs).
+  Workday needs its slug parsed into tenant/host/path parts and a per-job detail
+  fetch to recover a posting date. iCIMS is walked via sitemap XML, fetched with
+  `in_iframe=1` because the plain job URL stopped serving JSON-LD. JazzHR,
+  Jobvite, ApplicantPro and Paylocity have no API and are read from the rendered
+  page.
+- **Rate limiting is per platform and measured, not guessed.** `PLATFORM_WORKERS`
+  is a politeness ceiling rather than a resource limit, so it never scales up on
+  bigger hardware. Workable and Recruitee sit at 4 workers because they meter by
+  quota: a workable validation pass once came back 91% HTTP 429. A 403 or 429 is
+  never treated as a dead board -- the host declining to answer says nothing
+  about whether the company exists -- so a metered platform returns nothing
+  rather than condemning its own fleet.
 - **Location matching.** `_matches_location` sits on top of a geo lookup
   (`data/geo_lookup.json.gz`, lazily loaded) that resolves cities, subdivision
   codes and names, and countries, with remote-work detection via several regex
