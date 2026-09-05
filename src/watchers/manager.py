@@ -66,6 +66,44 @@ def _sync_geonames() -> bool:
 # Where the ATS fleet rotation left off, per platform. Matches the existing
 # `.bot_state*.json` ignore rule because that is what it is -- runtime state,
 # not data: losing it costs one repeated rotation, never a missed company.
+# How long one platform's fan-out may run, and how long the whole cycle may.
+#
+# These two and the scheduler's width decide, between them, whether every
+# platform gets asked at all. Each platform is one scheduler submission, so at
+# most `scheduler workers` platforms run at once and the rest queue: sixteen
+# platforms across twelve workers is two waves, and two waves of 600s fits
+# inside 1800s. Adding a platform is therefore free until it pushes the wave
+# count up -- which is why `test_ats_cycle_budget.py` checks the arithmetic
+# rather than leaving it to be rediscovered when a platform silently stops
+# being reached.
+#
+# Worst case by construction: almost every platform finishes in seconds, and
+# only the largest fleets approach their bound at all.
+ATS_PLATFORM_TIMEOUT_S = 600
+
+# Absolute ceiling on a cycle however narrow the host. The loop scrapes four
+# times a day, so a cycle has six hours of room; this leaves it most of that
+# while still guaranteeing the loop returns to its own scheduling.
+ATS_CYCLE_TIMEOUT_CAP_S = 14400
+
+
+def ats_cycle_timeout(platform_count: int, workers: int) -> int:
+    """Long enough for every platform to get a turn on THIS host.
+
+    A fixed 1800s assumed the roster fits in three waves, which was true at
+    twelve workers and fifteen platforms. It is not true everywhere: at five
+    workers, fifteen platforms fill 1800s exactly and sixteen need 2400s, so
+    the sixteenth platform pushes a whole wave past the bound. That wave is
+    cancelled wholesale -- those platforms are never asked, and the cycle still
+    returns what it gathered and reports success.
+
+    Deriving the bound instead means adding a platform can never silently cost
+    a wave, on any host, which is the failure mode this codebase keeps finding:
+    something stops happening and nothing says so.
+    """
+    waves = max(1, math.ceil(max(platform_count, 1) / max(workers, 1)))
+    return min(waves * ATS_PLATFORM_TIMEOUT_S, ATS_CYCLE_TIMEOUT_CAP_S)
+
 _ATS_ROTATION_STATE = ".bot_state.ats_rotation.json"
 
 # Platforms are scraped concurrently and share one state file, so the
@@ -919,7 +957,7 @@ class WatcherManager:
                             self._tracked_to_thread(
                                 _scrape_one, platform, label=scheduler_labels.ats_scrape_label(platform)
                             ),
-                            timeout=600,
+                            timeout=ATS_PLATFORM_TIMEOUT_S,
                         )
                     except Exception as exc:
                         # A platform cut off at the 600s bound is exactly when
@@ -946,7 +984,9 @@ class WatcherManager:
                 # blended "ats_scrape" bucket.
                 per_platform_results = await asyncio.wait_for(
                     asyncio.gather(*[_scrape_one_bounded(p) for p in platforms]),
-                    timeout=1800,
+                    timeout=ats_cycle_timeout(
+                        len(platforms), self.scheduler.stats().get("workers", 1)
+                    ),
                 )
                 all_results = [item for chunk in per_platform_results for item in chunk]
 

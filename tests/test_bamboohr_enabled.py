@@ -48,9 +48,13 @@ def test_an_absent_setting_leaves_it_on():
     assert 'ats.get("bamboohr_enabled", True)' in src
 
 
-def test_bamboohr_is_one_of_the_sixteen_platforms():
+def test_bamboohr_is_one_of_the_scraped_platforms():
+    """Asserted against the roster rather than a literal count: the committed
+    ats_service carries six platforms and the working tree sixteen, so a
+    hardcoded number here fails on a clean checkout while saying nothing about
+    BambooHR.
+    """
     assert A.BAMBOOHR in A.ATS_PLATFORMS
-    assert len(A.ATS_PLATFORMS) == 16
 
 
 def test_bamboohr_has_a_scraper():
@@ -73,7 +77,7 @@ def test_the_loop_submits_it_when_enabled():
         if p != BAMBOOHR or config.ats_bamboohr_enabled
     )
     assert BAMBOOHR in platforms
-    assert len(platforms) == 16
+    assert len(platforms) == len(ATS_PLATFORMS)
 
 
 def test_the_loop_still_drops_it_when_switched_off():
@@ -88,7 +92,7 @@ def test_the_loop_still_drops_it_when_switched_off():
         if p != BAMBOOHR or config.ats_bamboohr_enabled
     )
     assert BAMBOOHR not in platforms
-    assert len(platforms) == 15
+    assert len(platforms) == len(ATS_PLATFORMS) - 1
 
 
 def test_the_gate_in_the_loop_matches_the_one_tested_here():
