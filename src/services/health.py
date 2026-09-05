@@ -382,6 +382,83 @@ def _format_queue_field(scheduler_stats: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# Discord refuses an embed field whose value exceeds this, with a 400 that
+# takes the whole `.health` reply down rather than the one field. Every field
+# built from a per-platform list is therefore fitted rather than assumed to fit.
+_FIELD_VALUE_LIMIT = 1024
+
+# Runs of nothing before a platform is called out. Matches the default on
+# `silent_ats_platforms`; one empty run is ordinary, three in a row is not.
+SILENT_RUN_THRESHOLD = 3
+
+
+def _join_within_limit(lines: list[str], limit: int = _FIELD_VALUE_LIMIT) -> str:
+    """As many whole lines as fit, and an honest count of what did not.
+
+    A fixed `lines[:12]` slice is wrong in both directions: it drops four of
+    sixteen platforms without saying so, and it still overflows once the lines
+    themselves grow. Fitting by length keeps every line that can be shown and
+    names the remainder, so nothing disappears silently.
+    """
+    if not lines:
+        return ""
+    kept: list[str] = []
+    used = 0
+    for i, line in enumerate(lines):
+        remaining = len(lines) - i
+        # Reserve room for the "+N more" line, but only while one is still
+        # needed -- the last line must not be evicted to make room for a
+        # summary of nothing.
+        tail = f"\n… +{remaining} more" if remaining > 1 else ""
+        cost = len(line) + (1 if kept else 0)
+        if used + cost + len(tail) > limit:
+            break
+        kept.append(line)
+        used += cost
+    dropped = len(lines) - len(kept)
+    if not kept:
+        # A single line longer than the whole budget: say so rather than
+        # returning "" and letting the field vanish.
+        return f"… {len(lines)} platform(s), too long to display"
+    if dropped:
+        kept.append(f"… +{dropped} more")
+    return "\n".join(kept)
+
+
+def _format_ats_coverage_field(tracker: WatcherHealthTracker) -> str | None:
+    """How much of each platform's fleet the last cycle reached, worst first.
+
+    `ats_fleet_coverage` and `silent_ats_platforms` both answer a question the
+    bot could not previously be asked from Discord: whether a platform is quiet
+    because there was nothing to find, or because the cycle never got to most
+    of its fleet. Returns None when neither has anything to say, so the caller
+    can leave the field out rather than show an empty one.
+    """
+    coverage = tracker.ats_fleet_coverage()
+    silent = dict(tracker.silent_ats_platforms(threshold=SILENT_RUN_THRESHOLD))
+    if not coverage and not silent:
+        return None
+
+    lines: list[str] = []
+    for row in coverage:
+        name = str(row["platform"])
+        pct = row["reached_pct"]
+        icon = "🔴" if pct < 50 else "🟡" if pct < 90 else "🟢"
+        note = f" · silent {silent[name]}×" if name in silent else ""
+        lines.append(
+            f"{icon} **{name}**: {pct}% reached "
+            f"({int(row['completed']):,}/{int(row['submitted']):,}){note}"
+        )
+    # A platform can be silent without any recorded cycle -- it is refused
+    # before submitting anything. Omitting it here would hide the loudest
+    # symptom there is.
+    seen = {str(row["platform"]) for row in coverage}
+    for name, runs in silent.items():
+        if name not in seen:
+            lines.append(f"🔇 **{name}**: silent {runs}× · no cycle recorded")
+    return _join_within_limit(lines)
+
+
 def build_channel_health_embed(
     tracker: WatcherHealthTracker,
     channel_id: int,
@@ -508,8 +585,12 @@ def build_channel_health_embed(
                 f"{ph.total_new_jobs:,} new total{errs} · {_fmt_ago(ph.last_scrape_at)}"
             )
         ats_embed.add_field(
-            name="Platforms", value="\n".join(plat_lines[:12]), inline=False
+            name="Platforms", value=_join_within_limit(plat_lines), inline=False
         )
+
+    coverage = _format_ats_coverage_field(tracker)
+    if coverage:
+        ats_embed.add_field(name="Fleet Coverage", value=coverage, inline=False)
 
     return [main, ats_embed]
 
@@ -577,6 +658,10 @@ def build_all_health_embed(
         ),
         inline=False,
     )
+
+    coverage = _format_ats_coverage_field(tracker)
+    if coverage:
+        embed.add_field(name="ATS Fleet Coverage", value=coverage, inline=False)
 
     browser = tracker.get_browser_health()
     # last_probe_success reflects current state; the old check (any success
