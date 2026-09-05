@@ -6,6 +6,7 @@ import math
 import os
 import subprocess
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TypeVar
@@ -60,6 +61,17 @@ def _sync_geonames() -> bool:
     if tail:
         print(tail[-1])
     return result.returncode == 0
+
+
+# Where the ATS fleet rotation left off, per platform. Matches the existing
+# `.bot_state*.json` ignore rule because that is what it is -- runtime state,
+# not data: losing it costs one repeated rotation, never a missed company.
+_ATS_ROTATION_STATE = ".bot_state.ats_rotation.json"
+
+# Platforms are scraped concurrently and share one state file, so the
+# read-modify-write has to be serialised or two platforms landing together lose
+# one of the two cursors.
+_ATS_ROTATION_LOCK = threading.Lock()
 
 
 class WatcherManager:
@@ -652,9 +664,17 @@ class WatcherManager:
         fleet, CA-yielding boards inside the first 250 per platform go from 43
         to 1,031; for US, 400 to 1,843.
 
-        None means "no opinion" -- scrape_ats_platform then loads the fleet
-        itself exactly as before, which is what a checkout with no archive or no
-        enabled channel gets.
+        Two orderings compose here. Boards known to post in a wanted country go
+        to the front, and everything behind them is rotated to resume where the
+        last cycle stopped, so the companies a cut-off cycle cancels are not the
+        same ones every time. With no archive and no enabled channel the first
+        does nothing and the second still applies -- a fleet nobody has an
+        opinion about is exactly the case where always asking it in file order
+        costs the most.
+
+        None means "no opinion at all", and `scrape_ats_platform` then loads the
+        fleet itself exactly as before. Only an empty fleet or a failure gets
+        there.
         """
         try:
             from services import ats_service
@@ -666,13 +686,62 @@ class WatcherManager:
             preferred: set[str] = set()
             for country in self._priority_countries():
                 preferred |= geo_priority.slugs_for(country)
-            if not preferred:
-                return None
-            return geo_priority.rank(fleet, preferred)
+            head, tail = geo_priority.partition(fleet, preferred)
+            return head + self._rotate_tail(platform, tail, len(head))
         except Exception as exc:
             # Ordering is an optimisation; losing it must not cost the scrape.
             print(f"[ats-scrape] {platform}: could not order the fleet ({exc})")
             return None
+
+    def _ats_rotation_state_path(self) -> Path:
+        base = getattr(getattr(self, "config", None), "base_dir", None)
+        return Path(base or ".") / _ATS_ROTATION_STATE
+
+    def _rotate_tail(self, platform: str, tail: list[str], head_size: int) -> list[str]:
+        """`tail`, resumed from the point the previous cycle actually reached.
+
+        The head is the geo-preferred group and does not move: it is at the
+        front precisely because it should be asked first on every cycle. What
+        follows it is what a cut-off cycle cancels, and in fleet-file order that
+        is the same companies every cycle, indefinitely. Rotating the tail by
+        how far the last cycle got means the cancelled remainder moves instead,
+        so a platform that reaches 43% of its fleet each pass still offers the
+        whole fleet a turn rather than asking the same 43% forever.
+
+        Nothing is dropped -- the result is a permutation of `tail`, so the
+        cycle submits exactly the work it would have submitted anyway.
+
+        Two approximations, both deliberate. `completed` counts the whole
+        fan-out, so the head size is subtracted to get how far into the tail the
+        cycle reached; and workers finish roughly, not exactly, in submission
+        order. Being a little off costs asking a handful of companies twice,
+        which is what every cycle did before this.
+        """
+        from services import ats_traversal
+
+        if not tail:
+            return []
+        path = self._ats_rotation_state_path()
+        with _ATS_ROTATION_LOCK:
+            state = ats_traversal.load_state(path)
+            entry = state.get("platforms", {}).get(platform) or {}
+            # The rotation the previous cycle was handed, reconstructed so
+            # "it reached N" can be turned back into "it stopped here".
+            previous = ats_traversal.rotate(tail, entry.get("last_digest"))
+            reached = max(0, self._ats_last_fanout(platform)["completed"] - head_size)
+            cursor = ats_traversal.cursor_after(previous, reached)
+            if cursor is None:
+                # No cycle has reported yet, or it reached nothing past the
+                # head. Advancing on that would step over companies that were
+                # never asked, which is the failure this exists to prevent.
+                return previous
+            ats_traversal.record_progress(
+                state, platform, cursor,
+                wrapped=reached >= len(previous),
+                now=datetime.now(timezone.utc).timestamp(),
+            )
+            ats_traversal.save_state(path, state)
+            return ats_traversal.rotate(tail, cursor)
 
     @staticmethod
     def _ats_last_fanout(platform: str) -> dict[str, int]:

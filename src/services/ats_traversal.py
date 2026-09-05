@@ -1,8 +1,10 @@
 """Decide which companies an ATS cycle should ask, and remember where it got to.
 
-**Not wired into the scrape loop.** `grep -rn ats_traversal src/` finds only this
-module and its test. Read the next two paragraphs before wiring it in, because
-the claim it was written on turned out to be wrong.
+**Half of this is wired in.** `WatcherManager._rotate_tail` calls `rotate` and
+`cursor_after` on every ATS cycle. `next_slice` and `plan_cycle` are not called
+by anything, and should not be wired without reading the correction below --
+they hand back a bounded slice and leave the rest of the fleet unasked, which at
+the count they were sized for would have cut coverage by a factor of forty.
 
 *Correction, and it matters.* This docstring previously said the fan-out reached
 a few hundred slugs and that "the other ~98% of the fleet is submitted and
@@ -29,6 +31,12 @@ irrelevant and this changes nothing. When one does not (icims has come in at
 companies. Digest order and a resume cursor make the *unfinished* remainder
 rotate rather than being permanently the same set. That is a real but bounded
 benefit, much smaller than the one first claimed here.
+
+`rotate` is the form that benefit takes without any cost attached: the caller
+submits the whole fleet exactly as before -- same requests, same politeness
+ceiling, same load on the platform -- and only the identity of the cancelled
+tail moves. `next_slice` buys sharper ordering by not asking the rest, which is
+a trade, and this repo does not want one.
 
 Two decisions carry this module.
 
@@ -142,6 +150,47 @@ def next_slice(
         scanned += 1
 
     return [slug for _, slug in picked], cursor, wrapped
+
+
+def rotate(slugs: Iterable[str], last_digest: str | None = None) -> list[str]:
+    """The whole fleet in digest order, beginning just after `last_digest`.
+
+    The counterpart to `next_slice`, and the one a scrape loop should reach for
+    first. `next_slice` hands back a bounded slice and leaves the rest unasked,
+    which trades coverage for order; this drops nothing. The caller submits
+    exactly the fleet it would have submitted anyway, and the rotation only
+    decides which companies sit in the tail that a cut-off cycle never reaches.
+    A cycle that completes its fleet -- the common case -- is unaffected.
+
+    Over successive cycles the cut-off tail moves, so a platform that reaches
+    43% each time still offers every company a turn rather than asking the same
+    43% forever.
+    """
+    order = stable_order(slugs)
+    if not order:
+        return []
+    start = 0 if not last_digest else bisect_right(order, (last_digest, chr(0x10FFFF)))
+    if start >= len(order):
+        # The recorded cursor sits past the end -- a shrunken fleet, or a pass
+        # that finished on the last entry. Beginning again is the whole point
+        # of a rotation, not an error.
+        start = 0
+    return [slug for _, slug in order[start:]] + [slug for _, slug in order[:start]]
+
+
+def cursor_after(rotated: Sequence[str], reached: int) -> str | None:
+    """Where a cycle that reached `reached` of `rotated` stopped, as a digest.
+
+    None means "leave the cursor alone": a cycle that asked nobody has no new
+    information, and advancing on it would step over companies that were never
+    asked -- the failure this rotation exists to prevent.
+
+    `reached` past the end is a completed pass, which lands on the final entry
+    so the next rotation starts from the top again.
+    """
+    if reached <= 0 or not rotated:
+        return None
+    return digest_for(rotated[min(int(reached), len(rotated)) - 1])
 
 
 def load_state(path: Path) -> dict[str, Any]:

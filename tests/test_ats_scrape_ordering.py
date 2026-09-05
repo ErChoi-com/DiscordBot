@@ -36,6 +36,19 @@ def _manager(channels: dict[int, dict]) -> WatcherManager:
     return mgr
 
 
+@pytest.fixture(autouse=True)
+def _rotation_state_in_tmp(monkeypatch, tmp_path):
+    """These tests are about which boards are preferred, not about where the
+    rotation cursor is kept -- but `_ordered_slugs` persists one, and without
+    this a manager built with no config would write it into the repo root.
+    """
+    monkeypatch.setattr(
+        WatcherManager,
+        "_ats_rotation_state_path",
+        lambda self: tmp_path / "rotation.json",
+    )
+
+
 # ── which countries the scrape should favour ─────────────────────────────────
 
 def test_an_enabled_channels_location_decides_the_country():
@@ -101,7 +114,11 @@ def test_preferred_boards_are_asked_first(monkeypatch):
     )
 
     mgr = _manager({1: {"enabled": True, "location": "Canada"}})
-    assert mgr._ordered_slugs("greenhouse") == ["acme", "zeta", "beta"]
+    got = mgr._ordered_slugs("greenhouse")
+    assert got[0] == "acme"
+    # The rest is rotated rather than left in fleet order, so only its
+    # membership is fixed -- see test_ats_fleet_rotation.py for the rotation.
+    assert sorted(got[1:]) == ["beta", "zeta"]
 
 
 def test_ordering_never_drops_a_board(monkeypatch):
@@ -121,14 +138,16 @@ def test_ordering_never_drops_a_board(monkeypatch):
     assert sorted(got) == sorted(fleet)
 
 
-def test_no_wanted_country_leaves_the_scraper_to_load_its_own_fleet(monkeypatch):
-    """None means "no opinion", which is what a checkout with no archive or no
-    enabled channel gets -- identical to the behaviour before this existed.
+def test_no_wanted_country_still_rotates_rather_than_giving_up(monkeypatch):
+    """With nothing preferred there is no head, but the tail rotation is what
+    a fleet nobody has an opinion about needs most: in file order the same
+    companies are cancelled every cycle forever. The fleet is still returned
+    whole, so the scrape submits identical work either way.
     """
     from services import ats_service
 
     monkeypatch.setattr(ats_service, "load_company_lists", lambda: {"lever": ["a", "b"]})
-    assert _manager({})._ordered_slugs("lever") is None
+    assert sorted(_manager({})._ordered_slugs("lever")) == ["a", "b"]
 
 
 def test_an_unknown_platform_yields_no_opinion(monkeypatch):

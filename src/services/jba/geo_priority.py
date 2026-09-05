@@ -342,6 +342,26 @@ def rank(
     `preferred` overrides the country lookup, which is what makes this testable
     without an archive and lets a caller supply its own ordering rule.
     """
+    front, back = partition(slugs, preferred, country)
+    return front + back
+
+
+def partition(
+    slugs: list[str],
+    preferred: Iterable[str] | None = None,
+    country: str = DEFAULT_COUNTRY,
+) -> tuple[list[str], list[str]]:
+    """The same stable partition `rank` performs, with the boundary still visible.
+
+    `rank` concatenates the two groups, so a caller that wants to treat them
+    differently -- reordering only the part a cut-off cycle never reaches, while
+    leaving the preferred head where it is -- cannot recover the boundary
+    without redoing the matching. Returning it keeps one definition of
+    "preferred" rather than a second, drifting copy at the call site.
+
+    `front + back` is always exactly the input, in the input's relative order
+    within each group.
+    """
     if preferred is None:
         preferred = slugs_for(country)
     wanted = {str(s).strip().casefold() for s in preferred}
@@ -350,9 +370,9 @@ def rank(
         # loop below would put every slug in `back` and return the same order.
         # Mutation confirms no test can distinguish them -- it is here to skip
         # a 26,000-element pass on a checkout with no archive yet.
-        return list(slugs)
+        return [], list(slugs)
     front: list[str] = []
     back: list[str] = []
     for slug in slugs:
         (front if any(k in wanted for k in match_keys(slug)) else back).append(slug)
-    return front + back
+    return front, back
