@@ -221,6 +221,28 @@ jobs:
           python scripts/harvest_ats.py "${args[@]}" > harvest.json
           cat harvest.json
 
+      - name: Re-apply current rules to what was just collected
+        # Prune runs twice on purpose. The pass before Collect exists because
+        # pruning is a read-modify-write over the files a collection then
+        # writes, so it cannot run concurrently with one. But that pass can
+        # only clean what was already published -- anything the collection
+        # itself introduces is published uncleaned and waits a whole week for
+        # the next run's first pass.
+        #
+        # Measured on the first published harvest: 56 bamboohr slugs carrying
+        # undecoded %2f residue ("2faaei" for "aaei") reached the branch and
+        # the bot synced every one. Each is a duplicate of a company already
+        # held under its right name, and every probe of one is a request that
+        # cannot succeed. Running the same prune after Collect drops all 56
+        # before publication instead of after.
+        #
+        # Safe here in a way it is not elsewhere: Collect has finished writing,
+        # and the prune is offline and idempotent -- it replays the extractor
+        # used to harvest, so it cannot remove anything a fresh sweep keeps.
+        run: |
+          set -euo pipefail
+          python scripts/harvest_ats.py --prune --out data/ats_harvest
+
       - name: Verify the collection before publishing it
         # A collapsed harvest is the failure mode that rots unnoticed: an index
         # returning empty pages, or a URL convention changing under the

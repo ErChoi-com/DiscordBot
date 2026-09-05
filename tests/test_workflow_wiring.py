@@ -264,3 +264,57 @@ def test_the_job_timeout_still_covers_collection(workflow, steps):
     assert timeout >= 120, f"{timeout} minutes is not enough for a full sweep"
 
 
+
+
+# --------------------------------------------------------------------------
+# Prune runs on both sides of Collect
+# --------------------------------------------------------------------------
+
+_POST_COLLECT_PRUNE = "Re-apply current rules to what was just collected"
+
+
+def _order(workflow) -> list[str]:
+    return [s["name"] for s in workflow["jobs"]["harvest"]["steps"]]
+
+
+def test_the_collection_is_pruned_before_it_is_published(workflow):
+    """The pass before Collect can only clean what was already published, so
+    anything the collection itself introduces used to reach the branch
+    uncleaned and wait a week for the next run.
+
+    Measured on the first published harvest: 56 bamboohr slugs carrying
+    undecoded %2f residue -- "2faaei" for "aaei" -- were published and every
+    bot synced them. Each duplicates a company already held under its right
+    name, so every probe of one is a request that cannot succeed.
+    """
+    order = _order(workflow)
+    assert _POST_COLLECT_PRUNE in order, "the collection is published unpruned"
+    assert order.index("Collect") < order.index(_POST_COLLECT_PRUNE), \
+        "pruning before Collect cannot clean what Collect writes"
+    assert order.index(_POST_COLLECT_PRUNE) < order.index("Publish to the ats-harvest branch"), \
+        "the prune must happen before publication, not after"
+
+
+def test_the_seeded_prune_still_runs_before_collect(workflow):
+    """Pruning is a read-modify-write over the files a collection writes, so
+    the seeded pass has to stay on the near side of Collect.
+    """
+    order = _order(workflow)
+    assert order.index("Re-apply current rules to the seeded harvest") < order.index("Collect")
+
+
+def test_both_prunes_target_the_same_directory(steps):
+    """A prune pointed at a different --out would silently clean nothing."""
+    seeded = _joined(steps["Re-apply current rules to the seeded harvest"])
+    after = _joined(steps[_POST_COLLECT_PRUNE])
+    assert "--prune --out data/ats_harvest" in seeded
+    assert "--prune --out data/ats_harvest" in after
+
+
+def test_the_percent_encoding_residue_rule_exists_to_back_this_up():
+    """The workflow ordering only matters because the prune has a rule that
+    fires here. If that rule is removed, the extra step is dead weight.
+    """
+    import inspect
+    src = inspect.getsource(hc.prune_existing)
+    assert "252f" in src and "2f" in src
