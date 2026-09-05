@@ -1,14 +1,16 @@
-"""Walking the whole ATS fleet instead of its alphabetic head.
+"""Ordering the ATS fleet so an unfinished pass does not always stop in the same place.
 
-The bug this guards is not hypothetical. Because the company list is submitted
-in file order and the tail is cancelled at the budget, the same head was asked
-every cycle; once its jobs were archived, dedup dropped them and ATS output
-went from 8,434 rows (2026-08-06) to 30 (2026-08-07) on every platform at once.
+See the module docstring for the correction: the fan-out reaches 43-100% of each
+platform per cycle, not the ~2% this was first written against, and the August
+volume drop was a backlog being absorbed rather than coverage shrinking.
 
-The properties that matter are coverage ones -- every company gets a turn, no
-company is skipped, and the walk survives both a restart and a fleet that
-changes size underneath it. They are tested by actually walking, not by
-asserting on internals.
+What survives that correction is narrower and still real. A pass that completes
+makes ordering irrelevant. A pass that does not -- icims has come in at 43% --
+cancels its tail, and in file order the tail is the same companies every time.
+These tests pin the ordering properties that make the unfinished remainder
+rotate instead: every company gets a turn, none is skipped, and the walk
+survives a restart and a fleet that changes size underneath it. They are tested
+by actually walking, not by asserting on internals.
 """
 from __future__ import annotations
 

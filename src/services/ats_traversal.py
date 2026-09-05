@@ -1,16 +1,34 @@
 """Decide which companies an ATS cycle should ask, and remember where it got to.
 
-`scrape_ats_platform` submits its whole company list to a bounded pool and
-cancels whatever has not finished when the budget runs out. The list is in file
-order, so "whatever finished" is always its head -- the same few hundred slugs,
-every cycle, for the life of the bot. The other ~98% of the fleet is submitted
-and cancelled without ever being asked.
+**Not wired into the scrape loop.** `grep -rn ats_traversal src/` finds only this
+module and its test. Read the next two paragraphs before wiring it in, because
+the claim it was written on turned out to be wrong.
 
-That stayed invisible while the head was still yielding. Once its jobs were all
-archived, `_drop_already_archived` correctly began dropping them as duplicates,
-and ATS output fell from 8,434 rows on 2026-08-06 to 30 on 2026-08-07 across
-every platform at once. Nothing broke: the bot had exhausted the only slice it
-could reach.
+*Correction, and it matters.* This docstring previously said the fan-out reached
+a few hundred slugs and that "the other ~98% of the fleet is submitted and
+cancelled without ever being asked". That is false, and it was committed as
+fact. The bot's own logs record the opposite: `[ats] timed out waiting on N of M
+fetches` reports what was **cancelled**, so completion is M-N, and across
+platforms that is 43-100% -- typically 73-98%, with workday completing 14,989 of
+14,990. The error was taking the printed number as the answer instead of its
+complement. `services.health.ats_fleet_coverage` now records the reached
+fraction directly so the question does not have to be inferred from a log again.
+
+The August drop this module cited is real but has a different cause. Row count
+and distinct-company count collapsed together -- 2026-08-06: 8,459 rows from
+2,023 companies; 08-07: 48 rows from 16 -- which is the signature of a backlog
+being absorbed, not of coverage shrinking. Companies reached for the first time
+dump their whole existing job list into the archive as new; once that is
+banked, later cycles find only genuinely new postings. Current volume is
+roughly the steady-state rate.
+
+So what is this module actually for? Ordering, on the cycles that do not
+complete. When a pass finishes everything -- the common case -- order is
+irrelevant and this changes nothing. When one does not (icims has come in at
+43%), the tail is cancelled, and in file order the tail is always the same
+companies. Digest order and a resume cursor make the *unfinished* remainder
+rotate rather than being permanently the same set. That is a real but bounded
+benefit, much smaller than the one first claimed here.
 
 Two decisions carry this module.
 
