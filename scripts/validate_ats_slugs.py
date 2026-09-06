@@ -756,6 +756,20 @@ def reconcile_stores(dead: dict[str, str], checked: dict[str, str],
     dead marks and 19 orphaned confirmed-live entries, and the sample is exactly
     the junk list ('100', 'ads.txt', '2fwww', 'en-ca', 'llms.txt').
 
+    Also drops confirmed-live entries for slugs that now carry a dead mark. The
+    two stores must not disagree, and apply_checked already enforces that for
+    slugs *this* probes -- but it is not the only writer. ats_service marks
+    slugs dead from the bot's own scrape cycles and knows nothing about the
+    confirmed-live store, so a slug confirmed live in one run and found dead by
+    the bot a week later stays in both files. Measured before this existed: 137
+    such slugs across eight platforms, 101 of them recruitee.
+
+    That contradiction is not cosmetic. monitor_ats_scrapability samples the
+    confirmed-live store, and ats_service refuses to scrape a dead-marked slug,
+    so a sampled contradiction returns no rows and is recorded as the platform
+    having gone silent -- a false alarm from the one tool whose job is telling
+    real silence from noise.
+
     Refuses rather than acts when the candidate list looks implausible. An
     empty or truncated harvest file makes *every* mark look orphaned, and this
     deletes what it is given -- so "no candidates" must never read as "nothing
@@ -763,7 +777,8 @@ def reconcile_stores(dead: dict[str, str], checked: dict[str, str],
     memory of what is dead with it.
     """
     known = set(candidates)
-    stats = {"dead_orphans": 0, "checked_orphans": 0, "refused": 0}
+    stats = {"dead_orphans": 0, "checked_orphans": 0, "contradictions": 0,
+             "refused": 0}
     if not known:
         log(f"[validate] {platform}: no candidates loaded -- refusing to "
             f"reconcile {len(dead)} dead / {len(checked)} confirmed-live marks")
@@ -788,6 +803,18 @@ def reconcile_stores(dead: dict[str, str], checked: dict[str, str],
         del checked[slug]
     stats["dead_orphans"] = len(dead_gone)
     stats["checked_orphans"] = len(checked_gone)
+
+    # The dead mark wins. Both stores say when, but only one of them is a
+    # claim the board still answers, and it is the one contradicted by a later
+    # probe -- ats_service writes a dead mark when a board actually refused,
+    # while a confirmed-live entry only records that it answered once.
+    contradictions = [s for s in checked if s in dead]
+    for slug in contradictions:
+        del checked[slug]
+    stats["contradictions"] = len(contradictions)
+    if contradictions:
+        log(f"[validate] {platform}: {len(contradictions)} slug(s) were in both "
+            f"the confirmed-live and dead stores; the dead mark wins")
     if dead_gone or checked_gone:
         log(f"[validate] {platform}: dropped {len(dead_gone)} dead and "
             f"{len(checked_gone)} confirmed-live marks for slugs no longer "
@@ -1361,7 +1388,8 @@ def _run(args, log: Callable[[str], None], _lock) -> int:
         checked_map = load_checked(platform)
         recon = reconcile_stores(dead_map, checked_map, candidates,
                                  log=log, platform=platform)
-        if (recon["dead_orphans"] or recon["checked_orphans"]) and not args.dry_run:
+        if (recon["dead_orphans"] or recon["checked_orphans"]
+                or recon["contradictions"]) and not args.dry_run:
             save_dead(platform, dead_map)
             save_checked(platform, checked_map)
         targets = select_targets(platform, dead_map, recheck_dead=args.recheck_dead,

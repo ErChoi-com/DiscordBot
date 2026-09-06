@@ -37,6 +37,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 CHECKED_DIR = REPO_ROOT / "data" / "ats_checked"
+DEAD_DIR = REPO_ROOT / "data" / "dead_slugs"
 STATE_PATH = REPO_ROOT / ".ats_validation" / "scrapability_monitor.json"
 
 # Three is enough to tell "this platform answers" from "this platform does not",
@@ -129,19 +130,39 @@ def silent_platforms(state: dict[str, Any], threshold: int) -> list[tuple[str, i
     return sorted(out, key=lambda pair: (-pair[1], pair[0]))
 
 
-def sample_slugs(platform: str, count: int, checked_dir: Path, seed: Any = None) -> list[str]:
+def _slugs_in(path: Path) -> set[str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if isinstance(data, dict):
+        return set(data)
+    return set(data or ())
+
+
+def sample_slugs(platform: str, count: int, checked_dir: Path, seed: Any = None,
+                 dead_dir: Path | None = None) -> list[str]:
     """`count` confirmed-live slugs for a platform, or [] if there are none.
 
     Deliberately re-drawn each run rather than pinned: a fixed sample would
     report a platform healthy on the strength of three boards that happen to
     still work, and would never notice the rest of the fleet rotting.
+
+    Dead-marked slugs are excluded. The two stores are supposed to be
+    disjoint, and the validator keeps them so for every slug it probes -- but
+    ats_service also marks slugs dead from the bot's own scrape cycles and
+    never touches the confirmed-live store, so a slug confirmed live once and
+    found dead later sits in both. Measured: 137 across eight platforms.
+
+    Sampling one is a false alarm by construction. ats_service refuses to
+    scrape a dead-marked slug and returns nothing, and this records that as the
+    platform having gone silent -- the exact confusion this monitor exists to
+    prevent, produced by the monitor itself. Filtering here rather than relying
+    on the repair means a mark the bot wrote an hour ago is already respected.
     """
-    path = checked_dir / f"{platform}.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    slugs = sorted(data) if isinstance(data, dict) else sorted(data or [])
+    dead_dir = DEAD_DIR if dead_dir is None else dead_dir
+    live = _slugs_in(checked_dir / f"{platform}.json")
+    slugs = sorted(live - _slugs_in(dead_dir / f"{platform}.json"))
     if not slugs:
         return []
     rng = random.Random(seed)

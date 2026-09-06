@@ -212,23 +212,23 @@ def test_save_state_replaces_atomically_and_leaves_no_temp_file(tmp_path):
 def test_sample_draws_the_requested_number_of_confirmed_live_slugs(tmp_path):
     (tmp_path / "lever.json").write_text(
         json.dumps({f"c{i}": "2026-09-01" for i in range(50)}), encoding="utf-8")
-    got = mon.sample_slugs("lever", 3, tmp_path, seed="fixed")
+    got = mon.sample_slugs("lever", 3, tmp_path, seed="fixed", dead_dir=tmp_path / "no_dead")
     assert len(got) == 3
     assert len(set(got)) == 3
 
 
 def test_sample_is_capped_by_what_the_platform_actually_has(tmp_path):
     (tmp_path / "tiny.json").write_text(json.dumps({"only": "2026-09-01"}), encoding="utf-8")
-    assert mon.sample_slugs("tiny", 5, tmp_path, seed="fixed") == ["only"]
+    assert mon.sample_slugs("tiny", 5, tmp_path, seed="fixed", dead_dir=tmp_path / "no_dead") == ["only"]
 
 
 def test_a_platform_with_no_confirmed_live_file_samples_nothing(tmp_path):
-    assert mon.sample_slugs("ghost", 3, tmp_path, seed="fixed") == []
+    assert mon.sample_slugs("ghost", 3, tmp_path, seed="fixed", dead_dir=tmp_path / "no_dead") == []
 
 
 def test_an_empty_confirmed_live_file_samples_nothing(tmp_path):
     (tmp_path / "empty.json").write_text("{}", encoding="utf-8")
-    assert mon.sample_slugs("empty", 3, tmp_path, seed="fixed") == []
+    assert mon.sample_slugs("empty", 3, tmp_path, seed="fixed", dead_dir=tmp_path / "no_dead") == []
 
 
 def test_the_sample_is_redrawn_between_runs_rather_than_pinned():
@@ -242,7 +242,7 @@ def test_the_sample_is_redrawn_between_runs_rather_than_pinned():
         checked = _P(d)
         (checked / "big.json").write_text(
             json.dumps({f"c{i}": "2026-09-01" for i in range(200)}), encoding="utf-8")
-        draws = {tuple(mon.sample_slugs("big", 3, checked, seed=f"run{i}")) for i in range(8)}
+        draws = {tuple(mon.sample_slugs("big", 3, checked, seed=f"run{i}", dead_dir=checked / "no_dead")) for i in range(8)}
 
     assert len(draws) > 1, "every run drew the same boards"
 
@@ -254,5 +254,5 @@ def test_sampling_never_returns_duplicates(tmp_path, count):
     """
     (tmp_path / "p.json").write_text(
         json.dumps({f"c{i}": "2026-09-01" for i in range(20)}), encoding="utf-8")
-    got = mon.sample_slugs("p", count, tmp_path, seed="fixed")
+    got = mon.sample_slugs("p", count, tmp_path, seed="fixed", dead_dir=tmp_path / "no_dead")
     assert len(got) == len(set(got)) == count
