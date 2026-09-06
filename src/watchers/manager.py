@@ -124,6 +124,34 @@ def ats_cycle_timeout(platform_count: int, workers: int) -> int:
     waves = max(1, math.ceil(max(platform_count, 1) / max(workers, 1)))
     return min(waves * ATS_PLATFORM_TIMEOUT_S, ATS_CYCLE_TIMEOUT_CAP_S)
 
+def ats_platform_slots(workers: int, reserved_interactive: int = 0) -> int:
+    """How many ATS platforms may hold a scheduler worker at the same time.
+
+    The fan-out submitted every platform at once. That is fine as arbitration
+    -- each one is a separate scheduler task, so nothing is hidden from the
+    worker accounting -- but arbitration only orders the *queue*, and these
+    tasks run for minutes each with nothing to preempt them. Eighteen
+    platforms against ten general workers therefore did not share the pool
+    with the job and reddit watchers; it took the pool, and the watchers sat
+    behind it until the next cycle pushed them back again.
+
+    Measured on this host while the watchers had gone quiet for six hours:
+    workers=12 active=12, `completed` frozen at 20 across three consecutive
+    watchdog dumps, one lever scrape at 2,584s, and three job scrapes queued.
+    Glassdoor and ZipRecruiter both returned rows the whole time when run by
+    hand -- they were never asked.
+
+    Half the general workers, because the point is a floor for everything
+    else rather than a ceiling for ATS: it is the same shape as the
+    scheduler's own reserved-interactive floor, one tier down, where the
+    contention now is background against background. The reserved-interactive
+    workers are excluded because ATS work cannot run on them anyway, so
+    counting them would quietly hand ATS more of the pool than intended.
+    """
+    general = max(1, workers - max(0, reserved_interactive))
+    return max(1, general // 2)
+
+
 _ATS_ROTATION_STATE = ".bot_state.ats_rotation.json"
 
 # Platforms are scraped concurrently and share one state file, so the
@@ -1253,11 +1281,8 @@ class WatcherManager:
                 # commands rely on during this up-to-30-minute cycle. This also
                 # gives each platform its own measured cost instead of one
                 # blended "ats_scrape" bucket.
-                per_platform_results = await asyncio.wait_for(
-                    asyncio.gather(*[_scrape_one_bounded(p) for p in platforms]),
-                    timeout=ats_cycle_timeout(
-                        len(platforms), self.scheduler.stats().get("workers", 1)
-                    ),
+                per_platform_results = await self._gather_ats_platforms(
+                    platforms, _scrape_one_bounded
                 )
                 # After the gather, not before: each platform resets its own
                 # breaker as its fan-out starts, so only once every platform
@@ -1295,6 +1320,40 @@ class WatcherManager:
                 )
             except Exception as exc:
                 print(f"[ats-scrape] Scrape cycle error: {exc}")
+
+    async def _gather_ats_platforms(
+        self,
+        platforms: list[str],
+        scrape_one: Callable[[str], Awaitable[list[dict[str, Any]]]],
+    ) -> list[list[dict[str, Any]]]:
+        """Run every platform, at most ats_platform_slots() of them at a time.
+
+        Bounded rather than one submission per platform all at once: see
+        ats_platform_slots for what the unbounded fan-out did to the watchers.
+
+        The same number is what the cycle bound is derived from.
+        ats_cycle_timeout counts waves, and a wave is now this wide instead of
+        the whole pool; passing the worker count here would under-estimate the
+        cycle and cancel its last wave, which is the exact failure that
+        function exists to prevent.
+        """
+        stats = self.scheduler.stats()
+        slots = ats_platform_slots(
+            int(stats.get("workers", 1) or 1),
+            int(stats.get("reserved_interactive", 0) or 0),
+        )
+        gate = asyncio.Semaphore(slots)
+
+        async def _gated(platform: str) -> list[dict[str, Any]]:
+            # Acquired outside scrape_one so that its own per-platform budget
+            # measures the scrape rather than the wait for a slot.
+            async with gate:
+                return await scrape_one(platform)
+
+        return await asyncio.wait_for(
+            asyncio.gather(*[_gated(p) for p in platforms]),
+            timeout=ats_cycle_timeout(len(platforms), slots),
+        )
 
     def _ensure_ats_scrape_loop(self) -> None:
         if self._ats_scrape_task is not None and not self._ats_scrape_task.done():
