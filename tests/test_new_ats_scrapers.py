@@ -28,6 +28,32 @@ from services import ats_service as a  # noqa: E402
 _REAL_ENRICH_ROWS = a._enrich_rows
 
 
+def _geo_table_loaded() -> bool:
+    """Whether the 632k-city geo table is usable in this process.
+
+    Cheap when it is missing, which is the case that matters: _load_geo_lookup
+    fails immediately and _geo_cities is left empty. Where the table is present
+    this is one load that these tests would trigger anyway.
+    """
+    a._ensure_geo_loaded()
+    return bool(a._geo_cities)
+
+
+# A handful of cases below need a city resolved to a country, which only the
+# geo table can do. data/geo.db is 97MB and gitignored, so CI never has it, and
+# locally the running bot can hold it long enough that the load fails with
+# "database is locked". Either way ats_service degrades to country-only
+# matching and prints a warning -- so those cases were not failing on the logic
+# they assert, they were asserting against a different function. They ran red
+# on every clean checkout while passing on the developer's machine, which is
+# the worst way for a test to be wrong.
+needs_geo_table = pytest.mark.skipif(
+    not _geo_table_loaded(),
+    reason="needs the geo city table (data/geo.db, 97MB and gitignored; "
+           "build it with scripts/build_geo_db.py)",
+)
+
+
 @pytest.fixture(autouse=True)
 def _no_dead_marks(monkeypatch):
     """Keep every test off the real dead-slug store, and off the network.
@@ -849,9 +875,10 @@ def test_jazzhr_deferred_filter_excludes_the_wrong_city(monkeypatch):
     # A bare country search still means the whole country.
     ("Toronto, ON, CA", "Canada", True),
     ("Austin, TX, US", "Canada", False),
-    # Nothing in the posting contradicts the search, so it is kept.
-    ("Canada", "Toronto", True),
-    ("Remote - US", "Boston", True),
+    # Nothing in the posting contradicts the search, so it is kept. Both need
+    # the geo table to place the searched city before they can tell that.
+    pytest.param("Canada", "Toronto", True, marks=needs_geo_table),
+    pytest.param("Remote - US", "Boston", True, marks=needs_geo_table),
     # An empty search is not a filter; an empty job location cannot match one.
     ("Toronto, ON, CA", "", True),
     ("", "Toronto", False),
@@ -916,6 +943,7 @@ def test_icims_drops_unavailable_placeholders(monkeypatch):
     assert meta["resolved"] == "1"
 
 
+@needs_geo_table
 def test_ontario_california_is_not_ontario_canada():
     """A real row from the live boards: "Ontario, CA, US".
 

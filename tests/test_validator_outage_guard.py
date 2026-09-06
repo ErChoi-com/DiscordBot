@@ -264,12 +264,22 @@ def test_apply_checked_expires_entries_past_twice_the_recheck_window():
 # population -- targets exclude slugs already marked dead, so its rate is of
 # survivors. Measured on real data that difference was 97.5% against 38.8%.
 
-def test_sample_cannot_reach_slugs_already_marked_dead():
+def test_sample_cannot_reach_slugs_already_marked_dead(monkeypatch):
     """The bias, stated as a test: 80% of this population is dead and the
-    sample draws none of it."""
+    sample draws none of it.
+
+    load_candidates is replaced because select_targets otherwise reads
+    data/ats_harvest/lever.json, which is gitignored. The candidates list below
+    was already here and unused, so the test was silently asserting against
+    whatever real fleet happened to be on the machine -- green locally, and
+    `assert 0 == 20` on any clean checkout, which is every CI run. Stubbing it
+    is safe here in a way it would not be for the audit test below: this call
+    takes its dead map as an argument rather than reading it from disk.
+    """
     today = dt.date(2026, 9, 4)
     candidates = [f"s{i}" for i in range(100)]
     dead = {f"s{i}": today.isoformat() for i in range(80)}
+    monkeypatch.setattr(v, "load_candidates", lambda p: list(candidates))
 
     with_dead = v.select_targets("lever", dead, recheck_dead=False, limit=None,
                                  sample=20, today=today)
