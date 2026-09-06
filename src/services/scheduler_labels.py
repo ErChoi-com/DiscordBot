@@ -27,6 +27,9 @@ GEONAMES_SYNC = "geonames_sync"
 GEO_INDEX_REFRESH = "geo_index_refresh"
 # A bounded network sweep of the fleet, nothing like the two above it.
 ATS_SLUG_VALIDATION = "ats_slug_validation"
+# Reads a week of archive rather than the network; its own bucket so a slow
+# archive read is not mistaken for a slow sweep.
+ATS_YIELD_CHECK = "ats_yield_check"
 REDDIT_SCRAPE = "reddit_scrape"
 
 # -- Resume commands --

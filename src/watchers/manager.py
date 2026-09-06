@@ -950,6 +950,54 @@ class WatcherManager:
             # losing it must not cost the scrape that was about to run.
             print(f"[ats-scrape] could not validate company slugs ({exc})")
 
+    async def _check_platform_yield(self) -> None:
+        """Ask whether every platform that has boards is producing any jobs.
+
+        A scraper returning [] is indistinguishable from a platform whose
+        companies happen to have nothing open, so this failure is silent by
+        construction. It was found by reading the archive by source: bamboohr
+        and paylocity contributed nothing across a full week against 13,755 and
+        9,325 confirmed-live companies -- one switched off by a config flag,
+        the other harvested and probed with no scraper behind it at all.
+
+        scripts/check_platform_yield.py was written for exactly that and, like
+        the validator before it, nothing ever ran it. The per-cycle silence in
+        `.health` is not a substitute: that counter lives in the process and
+        resets on every restart, while this reads a week of committed archive
+        and so survives one.
+
+        Reported rather than enforced. A platform going quiet is a fact about
+        the fleet, not a reason to stop a scrape that is about to run, and the
+        script's own exit code says the same thing to whoever runs it by hand.
+        """
+        script = Path(self.config.base_dir) / "scripts" / "check_platform_yield.py"
+        if not script.exists():
+            return
+        try:
+            def _check() -> tuple[int, str]:
+                proc = subprocess.run(
+                    [sys.executable, str(script), "--days", "7"],
+                    cwd=str(self.config.base_dir),
+                    capture_output=True, text=True,
+                )
+                return proc.returncode, (proc.stdout or "").strip()
+
+            rc, out = await self._tracked_to_thread(
+                _check, label=scheduler_labels.ATS_YIELD_CHECK
+            )
+            # rc 1 means at least one platform is silent, which is the whole
+            # point of running this -- print the verdict lines, not the table.
+            verdicts = [line for line in out.splitlines()
+                        if line.startswith(("Silent:", "Thin ", "Unvalidated:"))]
+            if verdicts:
+                for line in verdicts:
+                    print(f"[ats-scrape] yield: {line}")
+            elif rc == 0:
+                print("[ats-scrape] yield: every platform with coverage "
+                      "contributed jobs this week")
+        except Exception as exc:
+            print(f"[ats-scrape] could not check platform yield ({exc})")
+
     async def _refresh_geo_index(self) -> None:
         """Rebuild the country index that decides which boards go first.
 
@@ -1010,6 +1058,9 @@ class WatcherManager:
                     # company discovered today should be orderable today.
                     await self._validate_company_slugs()
                     await self._refresh_geo_index()
+                    # Last: it reads what the three above just wrote, and it is
+                    # the only one of the four that changes nothing.
+                    await self._check_platform_yield()
 
             now_ts = datetime.now(timezone.utc).timestamp()
             wait = ATS_SCRAPE_INTERVAL - (now_ts - last_scrape_ts)
