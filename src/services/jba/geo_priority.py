@@ -54,6 +54,24 @@ _CA_SUBDIVISION_NAMES: frozenset[str] = frozenset({
 _CA_SUBDIVISION_CODES: frozenset[str] = frozenset({
     "ab", "bc", "mb", "nb", "nl", "ns", "nt", "nu", "on", "pe", "qc", "sk", "yt",
 })
+
+#: The provinces a bare two-letter tail can be resolved from on its own.
+#:
+#: Four are left out because they are also ISO country codes, and "City, XX"
+#: gives nothing to choose with: nl is the Netherlands as well as Newfoundland
+#: and Labrador, pe is Peru as well as Prince Edward Island, sk is Slovakia as
+#: well as Saskatchewan, and nu is Niue as well as Nunavut. Reading those as
+#: Canada would turn "Amsterdam, NL" into a Canadian board -- the same class of
+#: mistake as reading "San Francisco, CA" as Canada, which this module already
+#: refuses to make.
+#:
+#: They still resolve when the location says so: "St John's, NL, Canada" is
+#: decided by the country name long before this, and the province-name and
+#: subdivision-beside-the-code rules above cover the rest. This set is only for
+#: the case where a bare code is the whole of the evidence.
+_CA_ONLY_SUBDIVISION_CODES: frozenset[str] = _CA_SUBDIVISION_CODES - frozenset({
+    "nl", "pe", "sk", "nu",
+})
 _US_SUBDIVISION_CODES: frozenset[str] = frozenset({
     "al", "ak", "az", "ar", "co", "ct", "de", "fl", "ga", "hi", "id", "il",
     "in", "ia", "ks", "ky", "la", "me", "md", "ma", "mi", "mn", "ms", "mo",
@@ -150,9 +168,25 @@ def country_of(location: str) -> str:
         return "CA"
 
     if len(tail) == 2 and tail.isalpha():
-        # An unambiguous US state code written without its country ("Austin, TX").
+        # A subdivision code written without its country: "Austin, TX",
+        # "Toronto, ON". Both halves are needed and only the US half was here,
+        # so a bare province fell through to the tail-as-country guess below
+        # and "Toronto, ON" came back as the country "ON".
+        #
+        # It looked harmless because it was wrong consistently: build() keyed
+        # those boards under "ON" too, so slugs_for("ON") returned something
+        # and the ordering looked like it worked. Measured on the live index, a
+        # channel scoped to "Mississauga, ON" was prioritising a 146-board "ON"
+        # bucket instead of the 931 boards under "CA".
+        #
+        # Safe to check both: the two tables do not overlap (no Canadian
+        # province code is also a US state code), and the codes that are
+        # genuinely ambiguous with a country -- "CA" itself -- are handled
+        # above and never reach here.
         if tail in _US_SUBDIVISION_CODES:
             return "US"
+        if tail in _CA_ONLY_SUBDIVISION_CODES:
+            return "CA"
         return tail.upper()
 
     return ""
