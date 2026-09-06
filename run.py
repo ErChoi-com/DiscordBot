@@ -204,7 +204,20 @@ def _run_bot_forwarding_signals(python_exe: str) -> int:
     cgroup mid-shutdown. Forward the signal, then wait for the child to finish
     its own drain.
     """
-    proc = subprocess.Popen([python_exe, str(APP)], cwd=ROOT)
+    # -u, because the bot's stdout is a file here, not a terminal, and Python
+    # block-buffers to a file. Without it the log only appears in ~8KB lumps
+    # whenever the buffer happens to fill, so a bot that has been running for
+    # hours can leave a log that stopped at startup -- which is exactly what it
+    # did: a two-day job-source outage produced no visible line, because every
+    # "Skipping glassdoor", every traceback and every [ats-scrape] was sitting
+    # in a buffer nobody could read.
+    #
+    # deploy/discordbot.service already sets PYTHONUNBUFFERED=1 for the same
+    # reason, so this only brings the launcher into line with the unit file.
+    # Any host started through run.py -- which is every restart driven by
+    # .reset -- was getting the un-flushed behaviour the deployment had already
+    # ruled out.
+    proc = subprocess.Popen([python_exe, "-u", str(APP)], cwd=ROOT)
 
     def _forward(signum, _frame):
         _log(f"received signal {signum}; forwarding to bot pid={proc.pid}")
