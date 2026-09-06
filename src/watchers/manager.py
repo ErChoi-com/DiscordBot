@@ -86,6 +86,14 @@ ATS_PLATFORM_TIMEOUT_S = 600
 # while still guaranteeing the loop returns to its own scheduling.
 ATS_CYCLE_TIMEOUT_CAP_S = 14400
 
+# Wall clock the daily slug validation may spend, shared across every platform
+# still to go. It runs once a day and delays that day's first scrape by at most
+# this, against six hours of room -- and what it buys that scrape is a fleet
+# with the morning's dead boards already suppressed. Deliberately far short of
+# a full sweep: the validator's TTL means each run probes what has gone stale,
+# so daily runs converge on the fleet rather than re-asking it.
+ATS_VALIDATION_BUDGET_S = 900.0
+
 
 def ats_cycle_timeout(platform_count: int, workers: int) -> int:
     """Long enough for every platform to get a turn on THIS host.
@@ -885,6 +893,63 @@ class WatcherManager:
             # scrape that was about to run.
             print(f"[ats-scrape] could not refresh company lists ({exc})")
 
+    async def _validate_company_slugs(self) -> None:
+        """Ask the boards themselves which ones still exist.
+
+        Harvesting is optimistic -- an archived URL proves a board existed when
+        it was crawled -- so measured live rates for fresh slugs run from 87%
+        down to 11%, and every miss costs a request per cycle forever until
+        something marks it dead. `scripts/validate_ats_slugs.py` closes that
+        loop, writing dead marks the scraper already reads and a confirmed-live
+        store the monitor samples from.
+
+        It had never been run by anything. Every file under `data/ats_checked`
+        exists because someone typed the command, which is why the two platforms
+        added most recently had no confirmed-live file at all and could not be
+        monitored -- a store maintained by hand is a store that stops being
+        maintained. Passing no `--platform` is deliberate for the same reason:
+        the next platform added gets validated because it exists, not because
+        someone remembered it.
+
+        Bounded, not exhaustive. `--total-budget-seconds` shares the wall clock
+        between the platforms still to go, and the validator's own TTL means a
+        platform whose slugs were checked recently reports "nothing to probe"
+        in milliseconds and leaves its share to one that needs it. So a daily
+        run converges on the whole fleet instead of re-asking the same boards.
+
+        Daily, after the company sync, so slugs discovered upstream this morning
+        are probed before they cost a cycle's worth of requests. It delays the
+        day's first scrape by at most the budget, which buys that scrape a fleet
+        with this morning's dead boards already suppressed.
+        """
+        script = Path(self.config.base_dir) / "scripts" / "validate_ats_slugs.py"
+        if not script.exists():
+            return
+        try:
+            def _validate() -> tuple[int, str]:
+                proc = subprocess.run(
+                    [sys.executable, str(script),
+                     "--total-budget-seconds", str(ATS_VALIDATION_BUDGET_S)],
+                    cwd=str(self.config.base_dir),
+                    capture_output=True, text=True,
+                )
+                return proc.returncode, (proc.stdout or "").strip()
+
+            rc, out = await self._tracked_to_thread(
+                _validate, label=scheduler_labels.ATS_SLUG_VALIDATION
+            )
+            tail = out.splitlines()[-1] if out else ""
+            if rc == 0:
+                print("[ats-scrape] slug validation ran"
+                      + (f": {tail}" if tail else ""))
+            else:
+                print(f"[ats-scrape] slug validation exited {rc}; keeping the "
+                      "dead and confirmed-live stores as they are")
+        except Exception as exc:
+            # Suppression is an optimisation over asking a dead board again;
+            # losing it must not cost the scrape that was about to run.
+            print(f"[ats-scrape] could not validate company slugs ({exc})")
+
     async def _refresh_geo_index(self) -> None:
         """Rebuild the country index that decides which boards go first.
 
@@ -940,8 +1005,10 @@ class WatcherManager:
                 scrapes_today = 0
                 if rolled_over:
                     await self._refresh_company_lists()
-                    # After the sync, not before: a company discovered upstream
-                    # today should be orderable today.
+                    # After the sync, not before: a slug discovered upstream
+                    # today should be probed before it costs a cycle, and a
+                    # company discovered today should be orderable today.
+                    await self._validate_company_slugs()
                     await self._refresh_geo_index()
 
             now_ts = datetime.now(timezone.utc).timestamp()

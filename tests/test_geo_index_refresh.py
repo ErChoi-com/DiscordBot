@@ -134,13 +134,18 @@ def test_the_rebuild_is_not_wired_into_every_cycle():
     index the ordering can happily run a few hours behind.
     """
     lines = inspect.getsource(WatcherManager._run_ats_scrape_loop).splitlines()
+    indent = lambda l: len(l) - len(l.lstrip())
     guard = next(i for i, l in enumerate(lines) if "if rolled_over:" in l)
     call = next(i for i, l in enumerate(lines) if "_refresh_geo_index()" in l)
-    indent = lambda l: len(l) - len(l.lstrip())
 
-    assert call > guard, "the rebuild runs before the day-rollover guard"
-    assert indent(lines[call]) > indent(lines[guard]), (
-        "the rebuild is not inside the day-rollover branch")
+    assert call > guard, "it runs before the day-rollover guard"
+    # Every line between the guard and the call must stay inside the guard's
+    # block. Comparing the call's indent to the guard's alone is not enough:
+    # a branch that has been emptied out still leaves an `if rolled_over:`
+    # line above a call that no longer sits inside it.
+    body = [l for l in lines[guard + 1:call + 1] if l.strip()]
+    assert all(indent(l) > indent(lines[guard]) for l in body), (
+        "it is not inside the day-rollover branch")
 
 
 def test_refresh_is_the_only_thing_that_writes_the_cache():

@@ -25,6 +25,8 @@ GEONAMES_SYNC = "geonames_sync"
 # Rebuilding the country index reads every archive zip, which is nothing like
 # the git fetch above or the scrape below; its own bucket for the same reason.
 GEO_INDEX_REFRESH = "geo_index_refresh"
+# A bounded network sweep of the fleet, nothing like the two above it.
+ATS_SLUG_VALIDATION = "ats_slug_validation"
 REDDIT_SCRAPE = "reddit_scrape"
 
 # -- Resume commands --
