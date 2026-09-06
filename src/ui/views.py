@@ -51,6 +51,11 @@ def _sanitize_modal_text_input_labels(modal: discord.ui.Modal) -> list[int]:
     return lengths
 
 
+# orphan-ok: the whole channel-mode surface is currently unreachable --
+# ModeDropdownView has no command that opens it either, so nothing can call
+# store.set_mode. This renderer is not the orphan to fix; the missing entry
+# point is. Leaving it in place so wiring one command restores the feature
+# whole rather than rebuilding it.
 def format_mode_summary(store: RuntimeStore, channel_id: int) -> str:
     current = store.get_mode(channel_id)
     mode_lines = [f"Current mode: `{current}`", "Available modes:"]

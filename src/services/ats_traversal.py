@@ -237,6 +237,12 @@ def record_progress(
     return entry
 
 
+# orphan-ok: unwired for the same reason next_slice is, and it is next_slice
+# that this calls. The scrape loop walks the fleet with rotate/cursor_after
+# instead (manager._rotate_tail), which asks the whole fleet in a rotated order
+# rather than a fixed-size slice of it -- at the current counts a slice would
+# cut coverage roughly forty-fold. Kept as the assembled form of the slice walk
+# for a caller that genuinely wants a bounded slice; the scrape loop is not it.
 def plan_cycle(
     state: dict[str, Any],
     platform: str,
