@@ -116,26 +116,6 @@ def confirmed_live(platform: str, checked_dir: Path | None = None) -> int:
     return len(data) if isinstance(data, (dict, list)) else 0
 
 
-def count_by_platform(records: Iterable[dict[str, Any]],
-                      platforms: Iterable[str]) -> dict[str, int]:
-    """Archived jobs per ATS platform.
-
-    Records are matched on `_source_site`, which the ATS scrapers set to the
-    platform key. The watcher send path writes a presentation label instead
-    ("LinkedIn"), so those simply do not match any platform and are ignored --
-    this is a question about the ATS scrapers, not about every source.
-    """
-    names = {p.lower() for p in platforms}
-    counts = {p: 0 for p in names}
-    for record in records:
-        if not isinstance(record, dict):
-            continue
-        site = str(record.get("_source_site") or "").strip().lower()
-        if site in counts:
-            counts[site] += 1
-    return counts
-
-
 #: Fields the pipeline acts on, and the way each one fails when it is blank.
 #: They are reported separately because they are not the same failure:
 #:
@@ -159,7 +139,14 @@ def field_coverage(records: Iterable[dict[str, Any]],
     """Per platform: total jobs, and how many carry each tracked field.
 
     One pass over the records, so the totals and the per-field counts can never
-    disagree about which records belong to a platform.
+    disagree about which records belong to a platform. This replaced a separate
+    count_by_platform/describe_coverage pair that computed the same totals a
+    second way and could drift from these.
+
+    Records are matched on `_source_site`, which the ATS scrapers set to the
+    platform key. The watcher send path writes a presentation label instead
+    ("LinkedIn"), so those simply do not match any platform and are ignored --
+    this is a question about the ATS scrapers, not about every source.
     """
     names = {p.lower() for p in platforms}
     fields = tuple(fields)
@@ -175,13 +162,6 @@ def field_coverage(records: Iterable[dict[str, Any]],
             if str(record.get(field) or "").strip():
                 out[site][field] += 1
     return out
-
-
-def describe_coverage(records: Iterable[dict[str, Any]],
-                      platforms: Iterable[str]) -> dict[str, tuple[int, int]]:
-    """(jobs, jobs carrying a description) per platform."""
-    cov = field_coverage(records, platforms, ("description",))
-    return {p: (c["jobs"], c["description"]) for p, c in cov.items()}
 
 
 def description_pct(jobs: int, described: int) -> float:

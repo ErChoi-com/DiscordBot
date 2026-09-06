@@ -46,13 +46,17 @@ def test_the_boundary_is_inclusive_of_the_threshold():
 
 # ── counting ────────────────────────────────────────────────────────────────
 
+def _jobs(records, platforms):
+    return {p: c["jobs"] for p, c in y.field_coverage(records, platforms).items()}
+
+
 def test_jobs_are_counted_by_source_platform():
     records = [
         {"_source_site": "greenhouse"}, {"_source_site": "greenhouse"},
         {"_source_site": "lever"},
     ]
-    counts = y.count_by_platform(records, ["greenhouse", "lever", "ashby"])
-    assert counts == {"greenhouse": 2, "lever": 1, "ashby": 0}
+    assert _jobs(records, ["greenhouse", "lever", "ashby"]) == {
+        "greenhouse": 2, "lever": 1, "ashby": 0}
 
 
 def test_the_watcher_send_path_is_not_counted():
@@ -60,18 +64,18 @@ def test_the_watcher_send_path_is_not_counted():
     key. Counting them would mask a dead ATS scraper behind unrelated sources."""
     records = [{"_source_site": "LinkedIn"}, {"_source_site": "Indeed/CAE"},
                {"_source_site": "greenhouse"}]
-    assert y.count_by_platform(records, ["greenhouse"]) == {"greenhouse": 1}
+    assert _jobs(records, ["greenhouse"]) == {"greenhouse": 1}
 
 
 def test_source_matching_is_case_insensitive():
     """The archive holds both "iCIMS" and "icims" depending on the writer."""
     records = [{"_source_site": "iCIMS"}, {"_source_site": "icims"}]
-    assert y.count_by_platform(records, ["icims"]) == {"icims": 2}
+    assert _jobs(records, ["icims"]) == {"icims": 2}
 
 
 def test_malformed_records_do_not_stop_the_count():
     records = [None, "junk", {"_source_site": None}, {}, {"_source_site": "lever"}]
-    assert y.count_by_platform(records, ["lever"]) == {"lever": 1}
+    assert _jobs(records, ["lever"]) == {"lever": 1}
 
 
 # ── reading the confirmed-live store ────────────────────────────────────────
@@ -144,6 +148,11 @@ def test_an_unreadable_day_does_not_hide_the_rest(archive, monkeypatch, capsys):
 # at 100%, while workday, greenhouse, ashby, icims, lever and smartrecruiters --
 # 74% of all archived ATS jobs -- sit between 1% and 6%.
 
+def _described(records, platforms):
+    cov = y.field_coverage(records, platforms, ("description",))
+    return {p: (c["jobs"], c["description"]) for p, c in cov.items()}
+
+
 def test_description_coverage_is_counted_per_platform():
     records = [
         {"_source_site": "greenhouse", "description": "Build things."},
@@ -151,7 +160,7 @@ def test_description_coverage_is_counted_per_platform():
         {"_source_site": "greenhouse"},
         {"_source_site": "lever", "description": "Ship things."},
     ]
-    assert y.describe_coverage(records, ["greenhouse", "lever", "ashby"]) == {
+    assert _described(records, ["greenhouse", "lever", "ashby"]) == {
         "greenhouse": (3, 1), "lever": (1, 1), "ashby": (0, 0)}
 
 
@@ -159,17 +168,15 @@ def test_a_whitespace_only_description_does_not_count():
     """"   " is the same as absent to a matcher, and counting it would report
     a platform as covered while it supplies nothing readable."""
     records = [{"_source_site": "lever", "description": "   \n  "}]
-    assert y.describe_coverage(records, ["lever"]) == {"lever": (1, 0)}
+    assert _described(records, ["lever"]) == {"lever": (1, 0)}
 
 
-def test_totals_agree_with_the_plain_count():
-    """Counted in one pass so the two can never disagree about which records
-    belong to a platform."""
+def test_the_total_counts_a_job_whether_or_not_it_has_a_description():
+    """The total is the denominator of every percentage in the report, so a
+    job missing the field must still be counted as a job."""
     records = [{"_source_site": "lever", "description": "x"},
                {"_source_site": "lever"}, {"_source_site": "LinkedIn"}]
-    coverage = y.describe_coverage(records, ["lever"])
-    counts = y.count_by_platform(records, ["lever"])
-    assert coverage["lever"][0] == counts["lever"] == 2
+    assert _described(records, ["lever"]) == {"lever": (2, 1)}
 
 
 def test_description_pct_of_a_platform_with_no_jobs_is_zero():
@@ -299,14 +306,6 @@ def test_a_platform_complete_on_every_field_is_not_flagged(
         dict(full, _source_site="paylocity")])
     assert y.main(["--days", "1", "--min-live", "100"]) == 0
     assert "Thin" not in capsys.readouterr().out
-
-
-def test_describe_coverage_still_agrees_with_the_general_counter():
-    """The old helper is now a view over field_coverage; they must not drift."""
-    records = [{"_source_site": "lever", "description": "x"},
-               {"_source_site": "lever"}]
-    assert y.describe_coverage(records, ["lever"]) == {"lever": (2, 1)}
-    assert y.field_coverage(records, ["lever"])["lever"]["description"] == 1
 
 
 # ── the unvalidated backlog ─────────────────────────────────────────────────
