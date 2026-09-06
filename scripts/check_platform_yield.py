@@ -49,10 +49,43 @@ NO_COVERAGE = "no-coverage"
 #: over one week: teamtailor, recruitee, rippling, jazzhr, workable and jobvite
 #: sit at 100%, while workday, greenhouse, ashby, icims, lever and
 #: smartrecruiters -- 74% of all archived ATS jobs -- sit between 1% and 6%.
-#: Advisory rather than fatal: a thin description is a quality problem, while a
+#: Advisory rather than fatal: a thin field is a quality problem, while a
 #: silent platform is a broken one, and collapsing the two would make the exit
 #: status useless for gating.
 MIN_DESCRIPTION_PCT = 20.0
+
+#: One floor per field, because the three consequences below are not the same
+#: severity and a single number silently rated them as if they were.
+#:
+#: Measured on the live fleet at the time these were set:
+#:
+#:   description  every platform sits between 19% and 100%, with greenhouse 25%,
+#:                lever 26% and ashby 22% clustered near the bottom. That band
+#:                is the ATS list endpoints, not this repo -- most return a
+#:                title and a link and nothing else, and fetching each posting
+#:                to fill it in is a request per job. So 20% flags the genuine
+#:                outliers (icims 19%, smartrecruiters 9%) without declaring
+#:                most of the fleet broken for behaving normally.
+#:
+#:   location     every platform except icims is at 100%. A blank location does
+#:                not degrade a job, it removes it: _matches_location returns
+#:                False, so the posting is dropped from every location-scoped
+#:                search and a Canadian channel never sees it. At 90% a
+#:                platform losing a tenth of its jobs that way gets named, and
+#:                nothing normal trips it.
+#:
+#:   date_posted  the opposite direction, and the reason a single floor was
+#:                wrong. _posting_age_ok returns True when the field is blank,
+#:                so a job with no date is EXEMPT from "newer than N hours" and
+#:                a years-old posting is shown as fresh. Nothing is lost, so it
+#:                cannot be caught by looking for missing jobs -- and ashby, at
+#:                22%, passed the old shared floor by two points while 78% of
+#:                its postings skipped the freshness filter entirely.
+FIELD_FLOORS: dict[str, float] = {
+    "description": MIN_DESCRIPTION_PCT,
+    "location": 90.0,
+    "date_posted": 80.0,
+}
 
 #: What actually happens to a job missing each field. Spelled out because the
 #: two directions are opposite, and reading one as the other sends someone
@@ -164,6 +197,20 @@ def field_coverage(records: Iterable[dict[str, Any]],
     return out
 
 
+def floor_for(field: str, override: float | None = None) -> float:
+    """The advisory floor for one field.
+
+    An override applies to every field, which is what a caller asking for one
+    number means. A field with no floor of its own falls back to the
+    description floor rather than to zero: a new tracked field should be
+    reported like the others until someone measures what it deserves, not
+    silently exempt.
+    """
+    if override is not None:
+        return override
+    return FIELD_FLOORS.get(field, MIN_DESCRIPTION_PCT)
+
+
 def description_pct(jobs: int, described: int) -> float:
     """Share of a platform's jobs carrying a field, 0.0 when it has none."""
     return (100.0 * described / jobs) if jobs else 0.0
@@ -203,11 +250,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-live", type=int, default=100,
                         help="confirmed-live companies below which silence "
                              "proves nothing (default 100)")
-    parser.add_argument("--min-description-pct", type=float,
-                        default=MIN_DESCRIPTION_PCT, metavar="PCT",
-                        help="advisory floor for description coverage "
-                             f"(default {MIN_DESCRIPTION_PCT:.0f}); reported, "
-                             "never fatal")
+    parser.add_argument("--min-field-pct", type=float, default=None,
+                        metavar="PCT",
+                        help="override the per-field advisory floors with one "
+                             "number for every field (defaults: "
+                             + ", ".join(f"{f} {p:.0f}" for f, p in FIELD_FLOORS.items())
+                             + "); reported, never fatal")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
@@ -245,7 +293,7 @@ def main(argv: list[str] | None = None) -> int:
         for field in TRACKED_FIELDS:
             pct = description_pct(jobs, counts.get(field, 0))
             row[f"{field}_pct"] = round(pct, 1)
-            if verdict == OK and pct < args.min_description_pct:
+            if verdict == OK and pct < floor_for(field, args.min_field_pct):
                 thin[field].append(f"{platform} ({pct:.0f}%)")
         rows.append(row)
         if verdict == SILENT:
@@ -267,8 +315,12 @@ def main(argv: list[str] | None = None) -> int:
 
     for field in TRACKED_FIELDS:
         if thin[field]:
+            floor = floor_for(field, args.min_field_pct)
             print()
-            print(f"Thin {field}: " + ", ".join(thin[field]))
+            # The floor is on the line: "thin" means nothing without the number
+            # it is thin against, and the three numbers are deliberately not
+            # the same.
+            print(f"Thin {field} (under {floor:.0f}%): " + ", ".join(thin[field]))
             print("  -> " + FIELD_CONSEQUENCE[field])
     if any(thin.values()):
         print()
