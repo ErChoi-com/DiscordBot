@@ -2382,18 +2382,66 @@ def _fetch_smartrecruiters_detail(job_url: str) -> dict[str, str]:
     return meta
 
 
+_ENRICH_GATES: dict[str, threading.Semaphore] = {}
+_ENRICH_GATES_LOCK = threading.Lock()
+
+
+def _enrich_gate(platform: str) -> threading.Semaphore:
+    """The number of enrichment requests allowed in flight against one vendor.
+
+    PLATFORM_WORKERS is described throughout this file as a measured politeness
+    ceiling, to be scaled down and never up. It was not the ceiling.
+    _scrape_ats_platform fans out that many slugs at once, and every one of
+    those slugs then opened its own enrichment pool of five on top. The pools
+    nest, so the real rate against a vendor was the product: thirty slugs times
+    five enrichers is a hundred and fifty concurrent requests to bamboohr.com.
+
+    Measured consequence, not a theory. bamboohr's /careers/{id}/detail returns
+    a posting date and a full description reliably when asked one at a time --
+    three of three probed, about 2.9s each -- and 4 of 212 archived rows came
+    back with either. The same 4 for both fields, so enrichment succeeded four
+    times and was refused the rest. icims and oracle, the other platforms that
+    must enrich, sit at 26% and 18%. greenhouse and lever report 100% because
+    their list endpoints carry the fields and they never enrich at all, which
+    is what places the damage exactly where the extra requests are.
+
+    One gate per platform, held for the life of the process, because what needs
+    bounding is the total in flight against a host -- and that is the one thing
+    a per-call pool size cannot express, however small it is made.
+    """
+    with _ENRICH_GATES_LOCK:
+        gate = _ENRICH_GATES.get(platform)
+        if gate is None:
+            gate = threading.Semaphore(
+                capacity.workers(PLATFORM_WORKERS.get(platform, 10), minimum=2))
+            _ENRICH_GATES[platform] = gate
+        return gate
+
+
 def _enrich_rows(rows: list[dict[str, Any]], fetch: Any) -> None:
     """Fill date_posted (and location, when blank) from each row's job page.
 
     Writes are guarded: a failed fetch must leave what the listing already gave
     us rather than blanking it. An unconditional write is how a rate-limited
     batch would erase good locations and take the jobs with them.
+
+    The platform is read off the rows rather than passed in. Every caller here
+    builds rows through _board_rows or stamps _source_site itself, so it is
+    already present at all seven call sites -- and taking it from the data
+    removes the one way a caller could gate a vendor behind another vendor's
+    ceiling.
     """
     if not rows:
         return
+    gate = _enrich_gate(str(rows[0].get("_source_site") or ""))
+
+    def _gated(url: str) -> dict[str, str]:
+        with gate:
+            return fetch(url)
+
     meta_workers = capacity.workers(5, minimum=2)
     with ThreadPoolExecutor(max_workers=meta_workers) as pool:
-        futures = {pool.submit(fetch, row["job_url"]): row["job_url"] for row in rows}
+        futures = {pool.submit(_gated, row["job_url"]): row["job_url"] for row in rows}
         by_url: dict[str, dict[str, str]] = _collect_results(
             futures, capacity.timeout(_fanout_budget(len(rows), meta_workers)))
     for row in rows:
