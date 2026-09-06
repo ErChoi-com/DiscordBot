@@ -64,6 +64,13 @@ jobs:
           age_days=$(( ( $(date -u +%s) - $(date -u -d "$last_commit" +%s) ) / 86400 ))
           subject=$(git log -1 --format=%s -- data/jba/jobs)
 
+          # The summary is a diagnostic, not the check, and `|| true` keeps it
+          # that way. `git ls-tree --long --name-only` is a usage error -- git
+          # exits 129 -- so under `set -euo pipefail` this block failed the job
+          # before the threshold below was ever evaluated. It ran red every day
+          # from 2026-08-30 while the archive it reports on was inside the
+          # threshold the whole time, which is worse than no alarm: a check
+          # that cries wolf daily is one nobody reads on the day it is right.
           {
             echo "## Job archive health"
             echo
@@ -77,9 +84,9 @@ jobs:
             echo '### Archives in the repo'
             echo
             echo '```'
-            git ls-tree -r --long HEAD --name-only -- data/jba/jobs | sort
+            git ls-tree -r --long HEAD -- data/jba/jobs | sort
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          } >> "$GITHUB_STEP_SUMMARY" || true
 
           if [ "$age_days" -gt "$MAX_AGE_DAYS" ]; then
             echo "::error::No job archive has been committed for ${age_days} days" \
