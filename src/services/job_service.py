@@ -11,7 +11,7 @@ import hashlib
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -1574,8 +1574,8 @@ def scrape_glassdoor_postings(
                     job_url = f"https://www.glassdoor.com{job_url}"
 
                 enriched_location = glassdoor_location_from_detail_page(session, job_url, location_text)
-                
-                results.append({
+
+                row = {
                     "title": title_text,
                     "company": company_text,
                     "location": enriched_location,
@@ -1584,7 +1584,25 @@ def scrape_glassdoor_postings(
                     "job_url_direct": job_url,
                     "_source_site": "glassdoor",
                     "_source_sites": ["glassdoor"],
-                })
+                }
+                # The card's age was already parsed to filter on it, and was
+                # then thrown away -- so every Glassdoor row reached the
+                # pipeline dateless, and the watcher stamped it with the day it
+                # happened to be scraped. That is a fabricated posting date: a
+                # listing the card called "7d" old was archived as posted
+                # today, and repost detection keys on exactly that field.
+                # Glassdoor was the only source doing this; ZipRecruiter
+                # recovers real timestamps from the page.
+                #
+                # Day granularity because that is what the card carries ("3d",
+                # "24h"). Omitted rather than guessed when the card says
+                # nothing, since no date is honestly "unknown" and is already
+                # handled downstream, whereas a wrong one is not detectable.
+                if card_age_hours is not None:
+                    row["date_posted"] = (
+                        datetime.now(timezone.utc) - timedelta(hours=card_age_hours)
+                    ).strftime("%Y-%m-%d")
+                results.append(row)
                 if len(results) >= results_wanted:
                     break
             except Exception:
