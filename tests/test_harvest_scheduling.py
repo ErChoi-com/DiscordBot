@@ -6,8 +6,10 @@ workflow lives on a feature branch -- so the only thing that ever started a
 harvest was a person. These two flags are what let something on a fixed
 schedule call the harvester unconditionally:
 
-  --only-new-crawls      answer "nothing new" in milliseconds and no requests,
+  --only-new-crawls      sweep nothing when the newest crawl is already swept,
                          which is the answer on twenty-nine days out of thirty
+                         (measured: 24s to decide that, against 139s to sweep
+                         all eighteen platforms)
   --total-budget-seconds stop between platforms so a scheduled run cannot
                          delay whatever is queued behind it
 
@@ -340,6 +342,90 @@ def test_the_next_run_resumes_the_crawl_the_budget_cut_short(tmp_path, monkeypat
     assert hc.main(args) == 0
     assert hc.load_existing(out / "lever.json") == {"globex"}
     assert hc._load_swept(out / "_swept.json") == {"CC-MAIN-2026-34"}
+
+
+# --------------------------------------------------------------------------
+# What the gate costs when the catalogue is unreachable
+# --------------------------------------------------------------------------
+
+def _collinfo_counter(monkeypatch, tmp_path):
+    """Count attempts on collinfo.json, and fail every one of them.
+
+    The query service hosting collinfo.json is recorded in this repo as
+    unreachable from the deployment host, so this is the normal case there,
+    not a contrived one.
+    """
+    calls: list[str] = []
+
+    def fetch(url: str) -> bytes:
+        if url == hc.COLLINFO_URL:
+            calls.append(url)
+            raise urllib.error.URLError("query service unreachable")
+        raise _http_error(404, b'{"message": "No Captures found"}')
+
+    monkeypatch.setattr(hc, "_http_get", fetch)
+    monkeypatch.setattr(hc.time, "sleep", lambda s: None)
+    _offline_bulk(monkeypatch)
+    hc._save_crawl_cache(tmp_path / "_crawls.json", ["CC-MAIN-2026-34"])
+    hc._save_swept(tmp_path / "_swept.json", ["CC-MAIN-2026-34"])
+    return calls
+
+
+def test_the_gated_path_takes_one_shot_at_the_catalogue(tmp_path, monkeypatch):
+    """The retry ladder is sized for fetching data, where giving up loses a
+    page of companies. Asking whether a crawl exists wants the opposite trade.
+
+    Measured on the deployment host: one attempt fails in 21s and the full
+    ladder in 98s, every day, to learn there is nothing to do.
+    """
+    calls = _collinfo_counter(monkeypatch, tmp_path)
+    rc = hc.main(["--crawls", "1", "--index", "ccbulk", "--only-new-crawls",
+                  "--out", str(tmp_path), "--delay", "0"])
+    assert rc == 0
+    assert len(calls) == 1
+
+
+def test_an_ungated_run_still_retries_properly(tmp_path, monkeypatch):
+    """The shortened ladder must not leak into runs that are fetching data."""
+    calls = _collinfo_counter(monkeypatch, tmp_path)
+    hc.main(["--crawls", "1", "--index", "ccbulk",
+             "--out", str(tmp_path), "--delay", "0"])
+    assert len(calls) == hc.MAX_RETRIES
+
+
+def test_cdx_request_honours_a_retry_override():
+    attempts: list[str] = []
+
+    def fetch(url: str) -> bytes:
+        attempts.append(url)
+        raise urllib.error.URLError("down")
+
+    with pytest.raises(hc.HarvestError):
+        hc.cdx_request("u", fetch=fetch, sleep=lambda s: None, retries=1)
+    assert len(attempts) == 1
+
+    attempts.clear()
+    with pytest.raises(hc.HarvestError):
+        hc.cdx_request("u", fetch=fetch, sleep=lambda s: None)
+    assert len(attempts) == hc.MAX_RETRIES
+
+
+def test_a_zero_retry_request_still_asks_once():
+    """`retries` caps retrying; it is not permission to skip the request.
+
+    A caller deriving it from a remaining budget can reach zero, and without
+    the floor that produces "exhausted retries" having never opened a socket --
+    the index reported as down on the strength of no evidence at all.
+    """
+    attempts: list[str] = []
+
+    def fetch(url: str) -> bytes:
+        attempts.append(url)
+        raise urllib.error.URLError("down")
+
+    with pytest.raises(hc.HarvestError):
+        hc.cdx_request("u", fetch=fetch, sleep=lambda s: None, retries=0)
+    assert len(attempts) == 1
 
 
 def test_no_budget_means_no_ceiling(tmp_path, monkeypatch):

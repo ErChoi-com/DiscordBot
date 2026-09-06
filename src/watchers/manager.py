@@ -921,10 +921,13 @@ class WatcherManager:
 
         Cheap on the days there is nothing to do, which is nearly all of them.
         --only-new-crawls compares the newest crawl id against what this
-        directory has already been swept for and returns without making a
-        single request when they match. Common Crawl publishes roughly
-        monthly, so that is the answer on twenty-nine mornings out of thirty,
-        and it is what makes running this unconditionally affordable.
+        directory has already been swept for and sweeps nothing when they
+        match. Common Crawl publishes roughly monthly, so that is the answer
+        on twenty-nine mornings out of thirty. Measured from this host: 24s to
+        resolve the crawl and stop, against 139s to sweep all eighteen
+        platforms -- and the 24s is almost entirely one doomed request to the
+        query service, which this repo already records as unreachable from
+        here, before the bulk host answers the same question in 1.6s.
 
         Bounded, and the bound is safe only because the harvester resumes: a
         run the budget cuts short records nothing as swept, so tomorrow starts

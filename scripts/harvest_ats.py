@@ -641,6 +641,7 @@ def cdx_request(
     *,
     fetch: Fetcher | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    retries: int | None = None,
 ) -> bytes | None:
     """GET a CDX URL, retrying transient failures.
 
@@ -655,8 +656,14 @@ def cdx_request(
     # offline.
     if fetch is None:
         fetch = _http_get
+    # The retry ladder is sized for fetching index data, where giving up costs
+    # a page of companies. A caller only asking whether something exists wants
+    # the opposite trade -- a fast no beats a thorough one -- so it can shorten
+    # this. MAX_RETRIES stays the default; nothing that fetches data is
+    # affected.
+    attempts = MAX_RETRIES if retries is None else max(1, retries)
     last_exc: Exception | None = None
-    for attempt in range(MAX_RETRIES):
+    for attempt in range(attempts):
         try:
             return fetch(url)
         except urllib.error.HTTPError as exc:
@@ -687,7 +694,7 @@ def cdx_request(
             # that retrying would have fixed. Never return the partial body:
             # iter_urls would parse it happily and we would publish a page's
             # worth of companies as if it were complete.
-            if attempt < MAX_RETRIES - 1:
+            if attempt < attempts - 1:
                 last_exc = exc
                 sleep(2.0 * (2 ** attempt))
                 continue
@@ -900,6 +907,7 @@ def latest_crawls(
     sleep: Callable[[float], None] = time.sleep,
     cache_path: Path | None = None,
     discover_years: Iterable[int] | None = None,
+    retries: int | None = None,
 ) -> list[str]:
     """The N most recent crawl ids, newest first, with two fallbacks.
 
@@ -913,7 +921,7 @@ def latest_crawls(
     names real crawls. The worst case is missing the newest one for a week.
     """
     try:
-        raw = cdx_request(COLLINFO_URL, fetch=fetch, sleep=sleep)
+        raw = cdx_request(COLLINFO_URL, fetch=fetch, sleep=sleep, retries=retries)
         if raw is None:
             raise HarvestError("collinfo.json returned no data")
         ids = _parse_collinfo(raw)
@@ -1982,10 +1990,27 @@ def main(argv: list[str] | None = None) -> int:
 
         crawls: list[str] = []
         if "commoncrawl" in indexes or "ccbulk" in indexes:
+            # A gated run asks "is there a new crawl?" far more often than it
+            # harvests one -- most mornings that question is the entire run.
+            # collinfo.json lives on the query service, the host this repo
+            # already records as unreliable from here, and answering it there
+            # costs the whole retry ladder before the cache is consulted.
+            # Measured: one attempt fails in 21s, the full ladder in 98s, and
+            # discover_crawls_bulk returns the same newest id in 1.6s from the
+            # host the data itself lives on. So a gated run takes one shot at
+            # the catalogue and then asks that host, instead of spending a
+            # minute and a half failing thoroughly, every day, to learn there
+            # is nothing to do. Ungated runs are untouched.
+            discover_years = args.discover_years
+            resolve_retries = None
+            if args.only_new_crawls:
+                resolve_retries = 1
+                if discover_years is None:
+                    discover_years = [time.gmtime().tm_year]
             try:
                 crawls = args.crawls_explicit or latest_crawls(
                     args.crawls, cache_path=args.out / CRAWL_CACHE_NAME,
-                    discover_years=args.discover_years)
+                    discover_years=discover_years, retries=resolve_retries)
             except HarvestError as exc:
                 # Losing Common Crawl must not cancel the Wayback sweep: they
                 # are independent archives, and Wayback is Lever's only source.
@@ -1998,9 +2023,11 @@ def main(argv: list[str] | None = None) -> int:
 
         # "Nothing new" is the normal answer, not an error. Common Crawl
         # publishes roughly monthly, so anything on a daily schedule finds the
-        # same newest crawl on twenty-nine days out of thirty. Saying so in
-        # milliseconds, without a single index request, is what lets a caller
-        # run unconditionally instead of having to know the release calendar.
+        # same newest crawl on twenty-nine days out of thirty, and answering
+        # that without sweeping anything is what lets a caller run
+        # unconditionally instead of having to know the release calendar.
+        # Measured from this machine: 24s to resolve the crawl and stop,
+        # against 139s to sweep all eighteen platforms.
         swept_path = args.out / SWEPT_CACHE_NAME
         if args.only_new_crawls and crawls:
             already = _load_swept(swept_path)
