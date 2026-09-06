@@ -261,10 +261,22 @@ def test_each_consequence_says_what_actually_happens():
 
     Someone told only "location is thin" goes looking for missing jobs; someone
     told only "date is thin" needs to know stale jobs are being shown instead.
+
+    This used to assert the word DROPPED, which is how the location text got to
+    claim the opposite of what the code does: job_match._matches_channel_region
+    ends `return country is None` and job_service.filter_rows_by_region keeps an
+    unknown region explicitly for ATS rows. Pinning a word was a proxy for
+    pinning a meaning, and the proxy held while the meaning was false. So the
+    absence of that claim is now what is pinned.
     """
-    assert "DROPPED" in y.FIELD_CONSEQUENCE["location"]
+    location = y.FIELD_CONSEQUENCE["location"]
+    assert "DROPPED" not in location, (
+        "both region gates keep an unplaceable location; saying otherwise "
+        "defends the floor with a consequence that does not happen"
+    )
+    assert "kept" in location
     assert "EXEMPT" in y.FIELD_CONSEQUENCE["date_posted"]
-    assert y.FIELD_CONSEQUENCE["location"] != y.FIELD_CONSEQUENCE["date_posted"]
+    assert location != y.FIELD_CONSEQUENCE["date_posted"]
 
 
 def test_a_thin_location_is_reported_with_its_own_consequence(
@@ -279,7 +291,7 @@ def test_a_thin_location_is_reported_with_its_own_consequence(
     out = capsys.readouterr().out
     assert rc == 0
     assert "Thin location" in out and "greenhouse" in out.split("Thin location")[1]
-    assert "DROPPED" in out
+    assert "kept by both region gates" in out
 
 
 def test_a_thin_date_is_reported_as_an_exemption_not_a_loss(

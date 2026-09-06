@@ -90,10 +90,26 @@ FIELD_FLOORS: dict[str, float] = {
 #: What actually happens to a job missing each field. Spelled out because the
 #: two directions are opposite, and reading one as the other sends someone
 #: looking for missing jobs when the problem is stale ones being shown.
+# These are printed as the reason a floor exists, so they have to be true. The
+# location entry was not. It read "DROPPED from every location-scoped search",
+# which is the opposite of what both gates do for the platforms this guard is
+# applied to: job_match._matches_channel_region ends `return country is None`,
+# and job_service.filter_rows_by_region keeps an unknown region explicitly when
+# the row came from an ATS -- which icims, the platform it was flagging, is.
+#
+# Measured rather than reasoned: filter_rows_by_region keeps a blank-location
+# icims row under a Canada-only channel and drops the same row from a non-ATS
+# source, and _matches_location("", "Toronto") is False while
+# _matches_location("", "") is True. So the cost is real but narrower -- the
+# posting survives the region gate and is invisible to any search naming a
+# place. Overstating it is not harmless here: this text is the argument for the
+# floor, and a floor defended by a false consequence is one nobody can weigh.
 FIELD_CONSEQUENCE: dict[str, str] = {
     "description": "invisible to semantic matching, which reads this field.",
-    "location": "DROPPED from every location-scoped search: an empty location "
-                "matches nothing.",
+    "location": "kept by both region gates -- an unplaceable location passes "
+                "them, and ATS rows are kept explicitly -- but unable to match "
+                "any search naming a city or region, so it surfaces only for "
+                "searchers who named no place.",
     "date_posted": "EXEMPT from the 'newer than N hours' filter, so an old "
                    "posting is shown as though it were fresh.",
 }
