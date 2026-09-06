@@ -55,8 +55,29 @@ def test_ats_scrape_submits_one_scheduler_task_per_platform_and_survives_partial
     monkeypatch.setattr("services.jba.merge_data.log_jobs", lambda jobs: len(jobs))
 
     async def _run_one_cycle() -> None:
+        """Run exactly one cycle, waiting for it rather than timing it.
+
+        This slept a flat 0.5s and cancelled. That is a wall-clock budget on
+        work that grows: the cycle loads every platform's fleet before it
+        scrapes, and the fleet is now 132,865 slugs across eighteen platforms
+        against the six it was written for. It went from passing to failing
+        with no code change, which is the worst way for a test to break --
+        it reads as the scrape losing a platform.
+
+        So wait for the observable end of the cycle, with the timeout only as
+        a backstop. Fast when the machine is fast, and it does not rot.
+        """
         task = asyncio.create_task(manager._run_ats_scrape_loop())
-        await asyncio.sleep(0.5)  # let the first (immediate, no-gating) cycle finish
+        deadline = asyncio.get_running_loop().time() + 30.0
+        while asyncio.get_running_loop().time() < deadline:
+            with calls_lock:
+                done = len(calls) >= len(fake_platforms)
+            # The health record is written after the gather, so it -- not the
+            # call list -- is what says the cycle finished rather than merely
+            # started every platform.
+            if done and len(health.get_ats_health().per_platform) >= len(fake_platforms):
+                break
+            await asyncio.sleep(0.02)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
