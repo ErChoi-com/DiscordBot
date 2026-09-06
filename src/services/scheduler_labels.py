@@ -22,6 +22,9 @@ ATS_SCRAPE = "ats_scrape"
 # the estimate the scheduler arbitrates on.
 ATS_COMPANY_SYNC = "ats_company_sync"
 GEONAMES_SYNC = "geonames_sync"
+# Rebuilding the country index reads every archive zip, which is nothing like
+# the git fetch above or the scrape below; its own bucket for the same reason.
+GEO_INDEX_REFRESH = "geo_index_refresh"
 REDDIT_SCRAPE = "reddit_scrape"
 
 # -- Resume commands --

@@ -885,6 +885,42 @@ class WatcherManager:
             # scrape that was about to run.
             print(f"[ats-scrape] could not refresh company lists ({exc})")
 
+    async def _refresh_geo_index(self) -> None:
+        """Rebuild the country index that decides which boards go first.
+
+        `_ordered_slugs` asks `geo_priority.slugs_for` which boards are known to
+        post in a wanted country, and that reads a cache only
+        `geo_priority.refresh` ever writes -- which nothing called. So the
+        ordering ran against whatever snapshot happened to be on disk: on this
+        machine one built by hand months after the archives it described, and
+        on a fresh checkout none at all, where `slugs_for` returns an empty set
+        and the prioritisation quietly does nothing while still looking wired.
+
+        It has to recur rather than be built once, because the thing it indexes
+        is the archive, and every scrape cycle adds to that. A one-time build is
+        a cache that is already wrong tomorrow.
+
+        Daily, next to the company-list refresh, and cheap when nothing changed:
+        refresh compares each source's size and mtime first and returns the
+        cached counts without reopening a single zip. On a thread because the
+        rebuild that does happen reads all of them.
+        """
+        try:
+            from services.jba import geo_priority
+
+            counts = await self._tracked_to_thread(
+                geo_priority.refresh, label=scheduler_labels.GEO_INDEX_REFRESH
+            )
+            top = ", ".join(
+                f"{code} {n:,}"
+                for code, n in sorted(counts.items(), key=lambda kv: -kv[1])[:4]
+            )
+            print(f"[ats-scrape] geo index refreshed: {len(counts)} countries"
+                  + (f" ({top})" if top else ""))
+        except Exception as exc:
+            # Ordering is an optimisation; losing it must not cost the scrape.
+            print(f"[ats-scrape] could not refresh the geo index ({exc})")
+
     async def _run_ats_scrape_loop(self) -> None:
         ATS_PLATFORMS, BAMBOOHR, scrape_ats_platform = _ATS_PLATFORMS, _BAMBOOHR, _scrape_ats_platform
         from services.jba.merge_data import commit_archives_daily, log_jobs
@@ -904,6 +940,9 @@ class WatcherManager:
                 scrapes_today = 0
                 if rolled_over:
                     await self._refresh_company_lists()
+                    # After the sync, not before: a company discovered upstream
+                    # today should be orderable today.
+                    await self._refresh_geo_index()
 
             now_ts = datetime.now(timezone.utc).timestamp()
             wait = ATS_SCRAPE_INTERVAL - (now_ts - last_scrape_ts)
