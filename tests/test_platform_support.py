@@ -334,12 +334,25 @@ def test_kill_processes_reports_when_nothing_holds_the_profile(monkeypatch):
 # Detached spawn (.reset)
 # ---------------------------------------------------------------------------
 
+class _StillRunning:
+    """A Popen stand-in for a child that is alive and stays alive.
+
+    wait() raising TimeoutExpired is what a real detached child does inside the
+    settle window, and it is the whole point of the check: a bare object() with
+    no wait() at all tests nothing about liveness and quietly exercised the
+    "could not confirm" path instead.
+    """
+
+    def wait(self, timeout=None):
+        raise ps.subprocess.TimeoutExpired(cmd="child", timeout=timeout)
+
+
 def test_spawn_detached_uses_windows_detached_creationflags(monkeypatch):
     calls: list[tuple[list[str], dict]] = []
 
     def fake_popen(args, **kwargs):
         calls.append((list(args), kwargs))
-        return object()
+        return _StillRunning()
 
     monkeypatch.setattr(ps.subprocess, "Popen", fake_popen)
 
@@ -360,7 +373,7 @@ def test_spawn_detached_uses_posix_new_session(monkeypatch):
 
     def fake_popen(args, **kwargs):
         calls.append((list(args), kwargs))
-        return object()
+        return _StillRunning()
 
     monkeypatch.setattr(ps.subprocess, "Popen", fake_popen)
 

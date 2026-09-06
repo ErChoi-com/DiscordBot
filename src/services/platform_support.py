@@ -541,10 +541,22 @@ def terminate_process(
     return True, "required SIGKILL"
 
 
+#: How long spawn_detached waits to see whether the child is still alive.
+#:
+#: Long enough for an interpreter to fail on the things that actually fail at
+#: startup -- a missing venv, an ImportError, a syntax error in a module
+#: imported at the top of run.py -- and short enough to sit inside a Discord
+#: command without the caller noticing. A child that is still running after
+#: this has reached its own code; nothing here can promise more than that.
+SPAWN_SETTLE_SECONDS = 1.5
+
+
 def spawn_detached(
     args: list[str],
     cwd: Path | str | None = None,
     system: str | None = None,
+    log_path: Path | str | None = None,
+    settle_seconds: float = SPAWN_SETTLE_SECONDS,
 ) -> tuple[bool, str]:
     """Launch `args` as a fully independent process: no inherited stdio, and no
     process-group / job-object membership that would pull it down if the
@@ -554,12 +566,43 @@ def spawn_detached(
     `run.py --forcerun` before that invocation terminates this very process,
     so the child must keep running after its parent is gone -- a plain
     subprocess.Popen() child is not guaranteed to survive that on Windows.
+
+    Reports whether the child is still alive after `settle_seconds`, not merely
+    whether Popen returned. Those are different claims and the gap between them
+    is where the restart command was losing. A child that dies immediately --
+    the venv moved, a module fails to import, run.py has a syntax error -- made
+    Popen succeed, so `.reset` answered "Restarting..." and latched
+    _restart_spawned, and the bot then neither restarted nor accepted another
+    reset for the rest of its life. The failure looked exactly like success and
+    disabled the one command that could have retried it.
+
+    `log_path` is the other half. The child's output went to DEVNULL, so the
+    one process that knew why the restart failed wrote its reason nowhere.
+    Point this at a file and the traceback survives the parent that is about to
+    be killed. It is opened in append mode -- a restart loop should leave a
+    history, not overwrite the evidence each time round.
+
+    settle_seconds=0 skips the wait for a caller that genuinely only wants the
+    process created.
     """
+    sink = subprocess.DEVNULL
+    handle = None
+    if log_path is not None:
+        try:
+            Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+            handle = open(log_path, "a", encoding="utf-8", errors="replace")
+        except OSError:
+            # An unwritable log must not stop the restart; losing the record is
+            # far cheaper than refusing to start the process it describes.
+            handle = None
+        else:
+            sink = handle
+
     kwargs: dict = {
         "cwd": str(cwd) if cwd is not None else None,
         "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
+        "stdout": sink,
+        "stderr": subprocess.STDOUT if handle is not None else sink,
     }
     if is_windows(system):
         kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
@@ -567,10 +610,37 @@ def spawn_detached(
         kwargs["start_new_session"] = True
 
     try:
-        subprocess.Popen(args, **kwargs)
+        proc = subprocess.Popen(args, **kwargs)
     except OSError as exc:
         return False, str(exc)
-    return True, ""
+    finally:
+        # This process's copy of the handle; the child holds its own.
+        if handle is not None:
+            handle.close()
+
+    if settle_seconds <= 0:
+        return True, ""
+
+    try:
+        code = proc.wait(timeout=settle_seconds)
+    except subprocess.TimeoutExpired:
+        return True, ""  # still running, which is what "started" means here
+    except Exception:  # noqa: BLE001 -- a Popen without wait() must not fail a spawn
+        # The process was created; that much is certain. Only the liveness
+        # check is unavailable, and reporting a spawn as failed because the
+        # confirmation could not run would be a worse lie than not confirming.
+        return True, ""
+
+    # Exiting zero is a short task that finished, not a failure -- callers use
+    # this for fire-and-forget work too. A non-zero exit inside the settle
+    # window is the case worth catching: the interpreter never reached the
+    # program, which for `.reset` means the bot did not restart.
+    if code == 0:
+        return True, ""
+    detail = f"exited immediately with code {code}"
+    if log_path is not None:
+        detail += f"; see {Path(log_path).name}"
+    return False, detail
 
 
 def kill_processes_using_profile(
