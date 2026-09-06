@@ -123,6 +123,20 @@ models/**/*.gguf
 # Nested ATS company list repo (has its own git history)
 data/ats_companies/
 
+# Common Crawl harvest, republished weekly to the ats-harvest orphan branch by
+# .github/workflows/ats-harvest.yml and pulled by sync_ats_companies.py. Same
+# reasoning as data/ats_companies: regenerable, rewritten on a schedule, and
+# committing it would put a full-list diff in main every week.
+data/ats_harvest/
+# The same harvest as published by .github/workflows/ats-harvest.yml,
+# pulled by sync_ats_companies.py. Derived, rewritten every sync.
+data/ats_harvest_ci/
+
+# Which harvested slugs were last confirmed live, written by
+# scripts/validate_ats_slugs.py. Regenerable runtime state, same as the harvest
+# it annotates.
+data/ats_checked/
+
 # GeoNames sources. Published weekly to the `geonames-data` branch by
 # .github/workflows/geonames-sync.yml and pulled by sync_geonames.py,
 # so main does not carry them -- cities500.txt is 40MB and would otherwise add

@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from services import capacity
+from services import job_level
 
 # ---------------------------------------------------------------------------
 # Tunables
@@ -641,6 +642,11 @@ class ArchivedJob:
     site_label: str
     date_posted: str
     description: str = ""
+    #: Stamped by the ATS scrape, where the platform's own employment-type field
+    #: was available. Empty for records written before that, and for the watcher
+    #: send path -- score_level falls back to classifying the title.
+    level: str = ""
+    employment_type: str = ""
 
     def match_text(self) -> str:
         return " ".join(
@@ -662,6 +668,11 @@ def _normalize_record(record: dict[str, Any]) -> ArchivedJob | None:
     # stored as "dA©veloppement"), which would reach both the judge prompt and
     # the user's screen.
     title = fix_text_encoding(record.get("title") or "").strip()
+    # Collapse runs of whitespace here rather than in either producer: the send
+    # path already normalizes, the ATS scraper does not, so 74 of the real
+    # archive's titles render as "Associate Medical Editor  - US Students".
+    # Doing it at read time fixes the rows already stored too.
+    title = " ".join(title.split())
     if not title:
         return None
 
@@ -671,17 +682,32 @@ def _normalize_record(record: dict[str, Any]) -> ArchivedJob | None:
     site_label = str(
         record.get("site_label") or record.get("_source_site") or record.get("site") or ""
     ).strip()
+    # The send path stores a presentation label ("LinkedIn"); the ATS scraper
+    # stores the raw site key, so the same report listed "LinkedIn" next to
+    # "lever" and "icims". Map the key back to its label at read time.
+    from services.job_service import JOBSPY_SITE_LABELS, _readable_company
+
+    site_label = JOBSPY_SITE_LABELS.get(site_label.lower(), site_label)
     description = str(
         record.get("description") or record.get("snippet") or record.get("summary") or ""
     ).strip()
     return ArchivedJob(
         title=title,
-        company=fix_text_encoding(record.get("company") or "").strip(),
+        # ATS records carry the board's slug ("abnormalsecurity", "2k") where the
+        # send path carries a real name ("General Motors"); _readable_company
+        # opens the slug up and leaves an already-readable name untouched.
+        company=_readable_company(fix_text_encoding(record.get("company") or "").strip()),
         location=fix_text_encoding(record.get("location") or "").strip(),
         link=link,
         site_label=site_label or "unknown",
         date_posted=str(record.get("date_posted") or record.get("scraped_at") or "")[:10],
         description=description[:2000],
+        # Carried through rather than re-derived: the scrape had the platform's
+        # own employment-type field, which the title alone cannot replace.
+        # Absent on older rows and on the send path, and score_level falls back
+        # to classifying the title when it is.
+        level=str(record.get("level") or "").strip(),
+        employment_type=str(record.get("employment_type") or "").strip(),
     )
 
 
@@ -880,6 +906,61 @@ def _job_country(job: ArchivedJob) -> str | None:
         if head and "," in inner:
             location = inner.partition(",")[2].strip()
     return _country_from_location(location)
+
+
+def _matches_channel_region(job: ArchivedJob, allow_north_america: bool | None) -> bool:
+    """Same policy as job_service.filter_rows_by_region: Canada is always
+    kept, the US only when the channel allows North America broadly, and a
+    location the geo parser could not place is kept regardless.
+
+    That last rule diverges from filter_rows_by_region, which keeps an
+    unresolved location only for ATS-sourced rows. Deliberate, but not because
+    the archive is ATS-only -- it is not (_normalize_record reads two
+    producers). It holds because both producers already passed the live region
+    gate before reaching the archive.
+
+    ``None`` means no channel context was given at all (e.g. a caller outside
+    the Discord command path) and skips the gate entirely, as opposed to
+    ``False`` which is a channel actively scoped to Canada only.
+    """
+    if allow_north_america is None:
+        return True
+    country = _job_country(job)
+    if country == "CA":
+        return True
+    if country == "US":
+        return allow_north_america
+    return country is None
+
+
+def _matches_channel_scope(
+    job: ArchivedJob,
+    role_filters: Iterable[str],
+    exclusion_terms: Iterable[str],
+    allow_north_america: bool | None,
+) -> bool:
+    """Whether ``job`` is something this channel's job-watcher settings would
+    actually surface -- otherwise .bestjobs ranks the entire cross-channel
+    archive, including postings for a completely different search than the
+    channel invoking the command cares about.
+
+    Deliberately does not filter on the channel's free-text ``keywords``: a
+    single-word match ("developer") is too loose (an unrelated "Frontend
+    Developer" posting would pass a "Python Developer" channel) and requiring
+    every word is too strict (a genuine "Python Software Engineer" match would
+    be silently dropped for lacking the literal word "developer"). Domain
+    relevance is left to the resume-fit scoring below, which matches against
+    the profile's own terms instead of a coarse channel setting.
+    """
+    from services import job_service
+
+    if not job_service.matches_role_filters(job.title, list(role_filters)):
+        return False
+    if job_service.matches_exclusion_terms(
+        {"title": job.title, "company": job.company}, list(exclusion_terms)
+    ):
+        return False
+    return _matches_channel_region(job, allow_north_america)
 
 
 def _seen_before(
@@ -1110,21 +1191,45 @@ def score_entry(
     return fit, tuple(matched), matched_roles
 
 
-def score_level(title: str, signal: ProfileSignal) -> float:
+def score_level(title: str, signal: ProfileSignal, description: str = "",
+                employment_type: str = "", level: str = "") -> float:
     """How well the posting's seniority matches the profile's.
 
     Neutral is 0.5: most titles say nothing about level, and an unlabelled
     posting should neither be rewarded nor punished. A title carrying both
-    signals ("Senior Intern Program Lead") also lands neutral.
+    signals ("Senior Intern Program Lead") also lands neutral -- job_level
+    reports that as `conflict`, which is checked before the level itself so the
+    contract is preserved exactly.
+
+    Backed by job_level rather than a junior/senior regex pair, because that
+    pair got two whole classes wrong, both silently and both against a student:
+
+      * "Campus Recruiter" scored **1.0**, a perfect match. It is a staff job
+        whose subject happens to be students. job_level's program-role override
+        exists for exactly this.
+      * "Software Developer (Winter 2027)" scored 0.5, neutral. It is a student
+        posting, and the term is the only thing that says so -- no level word
+        appears in the title at all.
+
+    *level* is the value stamped at scrape time, where the platform's own
+    employment-type field was available; it is trusted when present rather than
+    re-derived from the title alone.
     """
-    lowered = title.lower()
-    junior = bool(_JUNIOR_RE.search(lowered))
-    senior = bool(_SENIOR_RE.search(lowered))
-    if junior == senior:
+    verdict = None
+    name = str(level or "").strip()
+    if name not in job_level.LEVELS:
+        verdict = job_level.classify(title, description, employment_type)
+        name = verdict.level
+        # A title pulling both ways is not evidence either way.
+        if verdict.conflict:
+            return 0.5
+
+    early = name in job_level.EARLY_CAREER or name == job_level.JUNIOR
+    if name == job_level.MID:
         return 0.5
     if signal.seniority == "student":
-        return 1.0 if junior else 0.1
-    return 0.2 if junior else 1.0
+        return 1.0 if early else 0.1
+    return 0.2 if early else 1.0
 
 
 def score_location(location: str, signal: ProfileSignal) -> float:
@@ -1164,7 +1269,8 @@ def score_job(job: ArchivedJob, signal: ProfileSignal) -> JobScore:
     exactly what decides whether a tailored resume can be assembled at all.
     """
     text = job.match_text()
-    level = score_level(job.title, signal)
+    level = score_level(job.title, signal, job.description,
+                        job.employment_type, job.level)
     location = score_location(job.location, signal)
 
     if signal.entries:
@@ -1736,8 +1842,20 @@ def best_jobs(
     enrich: bool = True,
     llm_candidates: int | None = None,
     enrich_candidates: int | None = None,
+    role_filters: Iterable[str] = (),
+    exclusion_terms: Iterable[str] = (),
+    allow_north_america: bool | None = None,
 ) -> MatchReport:
     """Top-``limit`` archived jobs for ``profile_key`` over ``window``.
+
+    ``role_filters``/``exclusion_terms``/``allow_north_america`` scope the
+    archive to one channel's job-watcher settings first -- without them this
+    ranks the entire cross-channel archive, so a channel searching for one
+    thing would see its best matches diluted by postings for whatever every
+    other channel on the bot searches for. The channel's free-text
+    ``keywords`` setting is deliberately not used for this -- see
+    _matches_channel_scope for why a lexical match on it is worse than no
+    filter at all.
 
     Blocking (archive reads plus one LLM call) -- call it through the priority
     scheduler, not straight off the event loop.
@@ -1746,6 +1864,10 @@ def best_jobs(
     profile_dir = resolve_profile_dir(profile_key, cache_root)
     signal = build_profile_signal(profile_dir, profile_key=str(profile_key or profile_dir.name))
     jobs, dates = load_window_jobs(days, end_date=end_date)
+    jobs = [
+        job for job in jobs
+        if _matches_channel_scope(job, role_filters, exclusion_terms, allow_north_america)
+    ]
     return rank_jobs(
         signal,
         jobs,
@@ -1762,6 +1884,11 @@ def best_jobs(
 # Rendering
 # ---------------------------------------------------------------------------
 
+# orphan-ok: format_match_report deliberately stopped printing this line (see
+# the note above its listing loop) -- five-line entries buried the links the
+# command exists to surface. The plan is still computed and still on the
+# JobScore; this is the agreed rendering for any surface that wants it, kept
+# next to _reason_text so the two stay consistent.
 def plan_text(score: JobScore) -> str:
     """The "which parts would I use" line, when there is a real answer.
 
@@ -1818,8 +1945,19 @@ def _display_fields(job: ArchivedJob) -> tuple[str, str, str]:
     "(Co-op/Intern)" is left alone rather than read as a company.
     """
     if job.company:
+        # Strip the trailing parenthetical only when it is exactly the location,
+        # so a send-path record keys the same as the older shape of the same job
+        # and an ATS title's own "(Cantonese/Mandarin)" is left alone.
+        head, inner = _split_trailing_paren(job.title)
+        if head and job.location and inner.strip().casefold() == job.location.strip().casefold():
+            return head, job.company, job.location
         return job.title, job.company, job.location
     head, inner = _split_trailing_paren(job.title)
+    # A record with a known location and no company has nothing to recover: the
+    # parenthetical is the location, and splitting it would report the city as
+    # the company ("Data Intern (Toronto, ON)" -> company "Toronto").
+    if head and job.location and inner.strip().casefold() == job.location.strip().casefold():
+        return head, "", job.location
     if head and "," in inner:
         company, _, location = inner.partition(",")
         if company.strip():

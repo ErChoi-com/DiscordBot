@@ -7,6 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import commands.handlers as handlers_module
 from commands.handlers import (
+    CMD_BEST_JOBS,
+    CMD_BEST_JOBS_ALIAS,
     CMD_COMMANDS,
     CMD_JOB_SETTINGS,
     CMD_JOB_SETTINGS_ALIAS,
@@ -19,6 +21,9 @@ from commands.handlers import (
     _expand_command_aliases,
     _extract_aggressiveness_flags,
     _extract_command_payload,
+    _extract_llm_directive,
+    MAX_LLM_DIRECTIVE_CHARS,
+    parse_best_jobs_payload,
 )
 
 
@@ -135,6 +140,96 @@ def test_strong_aggressive_preserves_target() -> None:
     assert content == ".resumebuild ricky"
 
 
+def test_extract_llm_directive_captures_and_strips_parenthesised_span() -> None:
+    content, directive = _extract_llm_directive(
+        ".resumebuild (lead with the embedded work)"
+    )
+    assert directive == "lead with the embedded work"
+    assert content.strip() == ".resumebuild"
+
+
+def test_extract_llm_directive_absent_leaves_content_untouched() -> None:
+    content, directive = _extract_llm_directive(".resumebuild ricky disappoints")
+    assert directive == ""
+    assert content == ".resumebuild ricky disappoints"
+
+
+def test_extract_llm_directive_preserves_target_on_either_side() -> None:
+    """The remaining text is read as a username, so it must survive intact."""
+    for raw in (
+        ".resumebuild ricky (emphasise the tutoring)",
+        ".resumebuild (emphasise the tutoring) ricky",
+    ):
+        content, directive = _extract_llm_directive(raw)
+        assert directive == "emphasise the tutoring"
+        assert _extract_command_payload(content, ".resumebuild") == "ricky"
+
+
+def test_extract_llm_directive_composes_with_aggressiveness_flags() -> None:
+    content, aggressive, strong = _extract_aggressiveness_flags(
+        ".resumebuild ricky --strongaggressive (keep it to one page)"
+    )
+    content, directive = _extract_llm_directive(content)
+    assert (aggressive, strong) == (True, True)
+    assert directive == "keep it to one page"
+    assert _extract_command_payload(content, ".resumebuild") == "ricky"
+
+
+def test_extract_llm_directive_collapses_whitespace_across_newlines() -> None:
+    content, directive = _extract_llm_directive(".resumebuild (first  steer\nhere)")
+    assert directive == "first steer here"
+    assert content.strip() == ".resumebuild"
+
+
+def test_extract_llm_directive_consumes_nested_parens_whole() -> None:
+    """A parenthesised URL must not leave residue that becomes a username.
+
+    `\\(([^()]*)\\)` would capture just "bar" here and leave the rest of the
+    span behind, which then fails target resolution.
+    """
+    raw = ".resumebuild (see https://en.wikipedia.org/wiki/Foo_(bar) for tone)"
+    content, directive = _extract_llm_directive(raw)
+    assert directive == "see https://en.wikipedia.org/wiki/Foo_(bar) for tone"
+    assert _extract_command_payload(content, ".resumebuild") == ""
+
+
+def test_extract_llm_directive_takes_every_group_and_keeps_the_target() -> None:
+    content, directive = _extract_llm_directive(".resumebuild (emphasis) ricky (extra)")
+    assert directive == "emphasis; extra"
+    assert _extract_command_payload(content, ".resumebuild") == "ricky"
+
+
+def test_extract_llm_directive_treats_unclosed_paren_as_directive() -> None:
+    """Silently ignoring an unclosed "(" left the whole span as a username."""
+    content, directive = _extract_llm_directive(".resumebuild (lead with embedded")
+    assert directive == "lead with embedded"
+    assert _extract_command_payload(content, ".resumebuild") == ""
+
+
+def test_directive_extraction_runs_before_flag_stripping() -> None:
+    """A flag written INSIDE the steer must not switch the mode on.
+
+    The flag parser is a whole-message regex, so extraction order is the whole
+    guard here.
+    """
+    raw = ".resumebuild (avoid sounding --aggressive in the summary)"
+    content, directive = _extract_llm_directive(raw)
+    content, aggressive, strong = _extract_aggressiveness_flags(content)
+    assert directive == "avoid sounding --aggressive in the summary"
+    assert (aggressive, strong) == (False, False)
+
+
+def test_extract_llm_directive_is_length_bounded() -> None:
+    content, directive = _extract_llm_directive(f".resumebuild ({'x' * 5000})")
+    assert len(directive) == MAX_LLM_DIRECTIVE_CHARS
+
+
+def test_extract_llm_directive_handles_empty_group() -> None:
+    content, directive = _extract_llm_directive(".resumebuild ()")
+    assert directive == ""
+    assert content.strip() == ".resumebuild"
+
+
 def test_content_override_message_reports_new_content_and_delegates_rest() -> None:
     class _FakeMessage:
         def __init__(self) -> None:
@@ -217,3 +312,59 @@ def test_resumecoverbuild_does_not_shadow_resumebuild() -> None:
     assert not _command_matches(".resumecoverbuild", CMD_RESUME, normalize=True)
     assert not _command_matches(".resumebuild", CMD_RESUME_COVER, normalize=True)
     assert _extract_command_payload(".resumecoverbuild", CMD_RESUME) == ""
+
+
+# ---------------------------------------------------------------------------
+# .bestjobs argument parsing
+# ---------------------------------------------------------------------------
+
+def test_best_jobs_aliases_are_registered() -> None:
+    aliases = _expand_command_aliases((CMD_BEST_JOBS, CMD_BEST_JOBS_ALIAS))
+
+    assert ".bestjobs" in aliases
+    assert ".best" in aliases
+    assert "/bestjobs" in aliases
+    assert "/best" in aliases
+
+
+def test_best_jobs_payload_defaults_to_a_day_of_the_owner_profile() -> None:
+    assert parse_best_jobs_payload("") == ("day", 10, None, True, None)
+
+
+def test_best_jobs_payload_reads_window_count_and_profile_in_any_order() -> None:
+    """Tokens are identified by shape, so the user need not remember an order."""
+    assert parse_best_jobs_payload("week 15") == ("week", 15, None, True, None)
+    assert parse_best_jobs_payload("15 week") == ("week", 15, None, True, None)
+    assert parse_best_jobs_payload("week 15 ricky") == ("week", 15, "ricky", True, None)
+    assert parse_best_jobs_payload("ricky 15 week") == ("week", 15, "ricky", True, None)
+
+
+def test_best_jobs_payload_accepts_window_synonyms() -> None:
+    for token in ("day", "today", "d", "24h"):
+        assert parse_best_jobs_payload(token)[0] == "day"
+    for token in ("week", "weekly", "w", "7d"):
+        assert parse_best_jobs_payload(token)[0] == "week"
+
+
+def test_best_jobs_payload_rejects_an_out_of_range_count() -> None:
+    *_, error = parse_best_jobs_payload("999")
+    assert error is not None and "between 1 and" in error
+
+    *_, zero_error = parse_best_jobs_payload("0")
+    assert zero_error is not None
+
+
+def test_best_jobs_payload_rejects_multiple_unknown_tokens() -> None:
+    """Two leftover words is a typo, not a profile name -- guessing which one
+    was meant would silently rank the wrong profile."""
+    _, _, profile, _, error = parse_best_jobs_payload("week ricky shane")
+    assert profile is None
+    assert error is not None and "Unrecognized options" in error
+
+
+def test_best_jobs_fast_flag_disables_description_fetching() -> None:
+    """Enrichment is the slow stage, so it needs an explicit escape hatch."""
+    assert parse_best_jobs_payload("week --fast") == ("week", 10, None, False, None)
+    # The flag must not be mistaken for a profile name.
+    assert parse_best_jobs_payload("--fast ricky") == ("day", 10, "ricky", False, None)
+    assert parse_best_jobs_payload("week")[3] is True

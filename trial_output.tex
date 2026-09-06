@@ -1,0 +1,108 @@
+\documentclass[11pt]{article}
+\usepackage[letterpaper,
+top=0.5in,
+bottom=0.5in,
+left=0.5in,
+right=0.5in]{geometry}
+
+\usepackage{XCharter}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}
+\usepackage{comment}
+\raggedright
+\pagestyle{empty}
+
+\input{glyphtounicode}
+\pdfgentounicode=1
+
+% Section heading: bold, rule underneath, controlled spacing above/below
+\titleformat{\section}{\bfseries\large}{}{0pt}{}[\vspace{1pt}\titlerule]
+\titlespacing*{\section}{0pt}{8pt}{2pt}
+
+\renewcommand\labelitemi{$\vcenter{\hbox{\small$\bullet$}}$}
+% topsep: gap between entry title line and bullet list
+% itemsep: gap between individual bullets
+% parsep/partopsep: suppress extra paragraph padding
+\setlist[itemize]{itemsep=-2pt, leftmargin=12pt, topsep=2pt, parsep=0pt, partopsep=0pt}
+
+\begin{document}
+
+% ---------- NAME ----------
+\centerline{\Huge Ernest Choi}
+\vspace{3pt}
+
+% ---------- CONTACT ----------
+\centerline{%
+  \href{mailto:ernestljchoi@gmail.com}{ernestljchoi@gmail.com} |
+  \href{https://www.github.com/ErChoi-com}{github.com/ErChoi-com} |
+  \href{https://www.linkedin.com/in/ernest-choi-lj}{linkedin.com/in/ernest-choi-lj} |
+  647-713-8997
+}
+
+% ---------- PROJECTS ----------
+
+\section*{Projects}
+
+% [backend, ai]
+\textbf{AI Resume \& Job-Search Automation Bot} | \textit{Python, LLM APIs, SQLite} \hfill \href{https://github.com/ErChoi-com/DiscordBot}{github.com/ErChoi-com/DiscordBot} \\
+\begin{itemize}
+  \item Developed a \textbf{Python} automation bot that uses \textbf{asyncio} to schedule concurrent scraping tasks and \textbf{REST APIs} for job posting deduplication.
+  \item Implemented a structured pipeline for \textbf{LLM}-driven content generation with automated \textbf{pytest} suites and \textbf{SQLite} storage.
+\end{itemize}
+
+% [fullstack]
+\textbf{Web Messaging App} | \textit{JavaScript, Node.js, SQL} \hfill \href{https://www.ernestchoi.com/terminalcards/roomEnter.html}{ernestchoi.com/terminalcards} \\
+\begin{itemize}
+  \item Implemented in-browser \textbf{Python} execution and secure credential handling for user authentication.
+  \item Hosted backend infrastructure on \textbf{Ubuntu Linux} and managed data with a secured \textbf{PostgreSQL} database.
+  \item Built a fullstack collaborative platform using \textbf{JavaScript} and \textbf{Node.js} with \textbf{WebRTC} for real-time messaging.
+\end{itemize}
+% ---------- EXPERIENCE ----------
+
+\section*{Experience}
+
+\smallskip
+% [frontend]
+\textbf{Frontend Development Intern,} {MCG3D} -- Remote \hfill January 2026 -- March 2026 \\
+\begin{itemize}
+  \item Deployed and tested containerized applications in \textbf{Docker} to support reliable deployment workflows within a remote team.
+  \item Built scalable web interfaces in \textbf{React} and \textbf{TypeScript} using user-centric component architectures.
+  \item Integrated frontend applications with \textbf{Python} \textbf{Flask} backends over \textbf{RESTful APIs} to support AI-driven user workflows.
+\end{itemize}
+
+\smallskip
+% [ml]
+\textbf{Machine Learning Intern,} {Goopter Commerce Solutions} -- Remote \hfill September 2025 -- December 2025 \\
+\begin{itemize}
+  \item Engineered a distributed, low-latency data pipeline in \textbf{Python} that integrated \textbf{Kafka} data streams into automated \textbf{FastAPI} services.
+  \item Implemented high-frequency reinforcement learning models in \textbf{TensorFlow} to automate adaptive signal generation.
+  \item Deployed analytics dashboards to surface predictive insights from models trained with \textbf{PyTorch Lightning} and \textbf{NumPy}.
+\end{itemize}
+
+\smallskip
+% [electrical]
+\textbf{Electrical Team Member,} {Metropolitan Aerospace Rocket Society (MARS)} -- Toronto, ON \hfill September 2023 -- Present \\
+\vspace{-9pt}
+\begin{itemize}
+  \item Enhanced power efficiency by 23\% through the optimization of \textbf{power distribution} and component selection across regulated voltage rails.
+  \item Designed and fabricated \textbf{PCB} circuits for \textbf{STM32}-based avionics systems using \textbf{Altium} and \textbf{KiCad}.
+  \item Developed embedded firmware for avionics flight computers using \textbf{C} and \textbf{C++} while automating testing workflows via \textbf{Bash} \textbf{scripting}.
+  \item Performed \textbf{board bring-up} and debugging with \textbf{oscilloscopes} and \textbf{logic analyzers} to validate hardware functionality under strict safety standards.
+\end{itemize}
+% ---------- SKILLS ----------
+
+\section*{Skills}
+\textbf{Languages:} Python, JavaScript/Node.js, Java, C++, C, SQL, HTML, CSS \\
+\textbf{Frameworks/Libraries:} OpenGL, WebRTC, JavaFX, React, TypeScript, Flask, FastAPI, TensorFlow \\
+\textbf{Tools:} Git, Docker, PostgreSQL, Ubuntu Linux, Kafka, Tableau, Power BI, FPGA \\
+\textbf{Platforms:} GitHub, GitLab, Raspberry Pi, Arduino \\
+\textbf{Relevant Courses:} Object Oriented Eng Analysis and Design, Digital Systems, Electronic Circuits I, Microprocessor Systems
+
+% ---------- EDUCATION ----------
+\section*{Education}
+\textbf{Toronto Metropolitan University} -- Bachelor of Engineering in Computer Engineering \hfill 2023--2027
+
+\end{document}

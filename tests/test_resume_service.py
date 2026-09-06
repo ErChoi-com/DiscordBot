@@ -10,6 +10,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from config import load_config
+from services.resumes import resume as resume_service
 from services.resumes.cache import ResumeExplicitCacheManager, load_resume_source_bundle
 from services.resumes.configkey import DEFAULT_GEMINI_MODEL, GeminiSettings, load_gemini_settings
 from services.resumes.listing import (
@@ -653,7 +654,14 @@ def test_compile_latex_to_pdf_handles_runner_timeout(monkeypatch, tmp_path: Path
     assert result.log_path == tmp_path / "template.log"
 
 
-def test_compile_latex_to_pdf_falls_back_to_xelatex_when_pdflatex_fails(monkeypatch, tmp_path: Path) -> None:
+def test_compile_latex_to_pdf_refuses_cross_family_fallback_to_xelatex(monkeypatch, tmp_path: Path) -> None:
+    """A pdfTeX-family template must never be retried under xelatex.
+
+    xelatex compiles such a template "successfully" but renders it with Type 3
+    bitmap fonts carrying no ToUnicode map, so the text extracts as glyph names
+    and the resume is unreadable to an ATS while looking perfect to a human.
+    Failing loudly is strictly better than shipping that.
+    """
     template_path = tmp_path / "template.tex"
     template_path.write_text("\\documentclass{article}\n", encoding="utf-8")
 
@@ -678,7 +686,55 @@ def test_compile_latex_to_pdf_falls_back_to_xelatex_when_pdflatex_fails(monkeypa
         return subprocess.CompletedProcess(command, 0, "ok", "")
 
     result = compile_latex_to_pdf(
-        latex_document="\\documentclass{article}\\begin{document}Hi\\end{document}",
+        latex_document=(
+            "\\documentclass{article}\n"
+            "\\usepackage{XCharter}\n"
+            "\\usepackage[T1]{fontenc}\n"
+            "\\begin{document}Hi\\end{document}"
+        ),
+        job_title="Python Developer",
+        template_path=template_path,
+        log_path=tmp_path / "template.log",
+        command_runner=_runner,
+    )
+
+    assert result.status == "error"
+    assert not any("xelatex" in call for call in calls)
+    assert all("pdflatex" in call for call in calls)
+
+
+def test_compile_latex_to_pdf_uses_xelatex_for_fontspec_template(monkeypatch, tmp_path: Path) -> None:
+    """A fontspec template goes straight to xelatex and never touches pdflatex.
+
+    pdflatex cannot compile fontspec at all -- it aborts with a fatal package
+    error -- so trying it first would only burn a compile attempt.
+    """
+    template_path = tmp_path / "template.tex"
+    template_path.write_text("\\documentclass{article}\n", encoding="utf-8")
+
+    class _ReadyEnvironment:
+        ready = True
+        pdflatex_path = "C:/tex/pdflatex.exe"
+        xelatex_path = "C:/tex/xelatex.exe"
+        lualatex_path = None
+
+    monkeypatch.setattr("services.resumes.resume.check_template_compile_environment", lambda path: _ReadyEnvironment())
+
+    calls: list[str] = []
+
+    def _runner(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        calls.append(command[0])
+        pdf_path = cwd / Path(command[-1]).with_suffix(".pdf")
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    result = compile_latex_to_pdf(
+        latex_document=(
+            "\\documentclass{article}\n"
+            "\\usepackage{fontspec}\n"
+            "\\setmainfont{Calibri}\n"
+            "\\begin{document}Hi\\end{document}"
+        ),
         job_title="Python Developer",
         template_path=template_path,
         log_path=tmp_path / "template.log",
@@ -686,8 +742,7 @@ def test_compile_latex_to_pdf_falls_back_to_xelatex_when_pdflatex_fails(monkeypa
     )
 
     assert result.status == "ok"
-    assert "xelatex" in result.message.lower()
-    assert calls[:2] == ["C:/tex/pdflatex.exe", "C:/tex/xelatex.exe"]
+    assert calls == ["C:/tex/xelatex.exe"]
 
 
 def test_compile_latex_to_pdf_stops_after_engine_timeout(monkeypatch, tmp_path: Path) -> None:
@@ -813,7 +868,12 @@ def test_compile_latex_to_pdf_strips_pdflatex_only_unicode_directives_for_xelate
 
     result = compile_latex_to_pdf(
         latex_document=(
+            # fontspec puts this template in the Unicode family, so xelatex is
+            # the correct engine -- and the pdfTeX-only directives below must be
+            # stripped rather than crashing it.
             "\\documentclass{article}\n"
+            "\\usepackage{fontspec}\n"
+            "\\setmainfont{Calibri}\n"
             "\\input{glyphtounicode}\n"
             "\\pdfgentounicode=1\n"
             "\\pdfglyphtounicode{A}{0041}\n"

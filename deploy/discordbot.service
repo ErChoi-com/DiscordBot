@@ -62,11 +62,17 @@ Environment=LANG=C.UTF-8
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONFAULTHANDLER=1
 
-# Playwright installs browsers under the *installing* user's ~/.cache by
-# default, which a service account cannot see. Pin a shared path and install
-# with the same value set:
-#   PLAYWRIGHT_BROWSERS_PATH=/opt/discordbot/.playwright playwright install chromium
-Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/discordbot/.playwright
+# Deliberately NOT installing Playwright's own browsers, and deliberately no
+# PLAYWRIGHT_BROWSERS_PATH. browser_service never downloads a browser: its only
+# launch site passes executable_path=platform_support.find_chrome(), and
+# _do_start returns False ("Chrome not found -- skipping Chrome layer") when
+# that is None rather than falling back to a bundled Chromium. So
+# `playwright install chromium` produces a browser nothing ever opens.
+#
+# What the Chrome layer actually needs is a *system* browser:
+#   sudo apt install google-chrome-stable    # or: sudo apt install chromium
+# Set CHROME_EXECUTABLE below if it lands somewhere find_chrome() does not
+# probe.
 
 # Point at a non-standard browser install if needed.
 # Environment=CHROME_EXECUTABLE=/usr/bin/google-chrome-stable

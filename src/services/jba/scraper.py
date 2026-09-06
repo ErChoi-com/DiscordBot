@@ -18,6 +18,13 @@ except ImportError:  # standalone script run with jba/ on sys.path, not src/
     def retry_backoff_delay(attempt: int) -> float:
         return (2 ** attempt) + random.uniform(0.5, 1.5)
 
+try:
+    from services import capacity
+except ImportError:  # standalone script run with jba/ on sys.path, not src/
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    from services import capacity
+
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -96,7 +103,7 @@ USER_AGENTS = [
 def load_companies(filepath):
     """Load companies from JSON file."""
     try:
-        with open(filepath, "r") as f:
+        with open(filepath, "r", encoding="utf-8") as f:
             companies = set(json.load(f))
         print(f"Loaded {len(companies):,} companies from {filepath}")
         return companies
@@ -575,7 +582,8 @@ def fetch_all_jobs(companies, fetcher, platform="ATS"):
         "icims": 30,
     }
 
-    max_workers = MAX_WORKERS.get(platform_lower, 30)
+    # Politeness ceilings per vendor -- scaled down on small hardware, never up.
+    max_workers = capacity.workers(MAX_WORKERS.get(platform_lower, 30), minimum=2)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(fetcher, slug): slug for slug in live_companies}
@@ -731,7 +739,7 @@ def load_dead_slugs(platform):
     if not os.path.exists(filepath):
         return set()
     try:
-        with open(filepath, "r") as f:
+        with open(filepath, "r", encoding="utf-8") as f:
             return set(json.load(f))
     except (json.JSONDecodeError, IOError):
         return set()
@@ -740,7 +748,7 @@ def load_dead_slugs(platform):
 def save_dead_slugs(platform, slugs):
     """Save dead slugs for a platform."""
     filepath = os.path.join(DEAD_SLUG_DIR, f"{platform}.json")
-    with open(filepath, "w") as f:
+    with open(filepath, "w", encoding="utf-8") as f:
         json.dump(sorted(slugs), f, indent=2)
     print(f"  Cached {len(slugs):,} dead slugs for {platform}")
 
@@ -763,13 +771,13 @@ def save_results(all_companies, active_companies, all_jobs):
 
     # Save all companies list
     companies_file = os.path.join(OUTPUT_DIR, "all_companies.json")
-    with open(companies_file, "w") as f:
+    with open(companies_file, "w", encoding="utf-8") as f:
         json.dump(sorted(list(all_companies)), f, indent=2)
     print(f"All companies: {companies_file}")
 
     # Save active companies with job counts
     active_file = os.path.join(OUTPUT_DIR, "active_companies.json")
-    with open(active_file, "w") as f:
+    with open(active_file, "w", encoding="utf-8") as f:
         json.dump(active_companies, f, indent=2, sort_keys=True)
     print(f"Active companies: {active_file}")
     
@@ -778,7 +786,7 @@ def save_results(all_companies, active_companies, all_jobs):
     salary_lookup = {}
     salary_fallback = {}
     if os.path.exists(salary_lookup_path):
-        with open(salary_lookup_path) as f:
+        with open(salary_lookup_path, encoding="utf-8") as f:
             data = json.load(f)
             salary_lookup = data.get("primary", {})
             salary_fallback = data.get("fallback", {})
@@ -800,7 +808,7 @@ def save_results(all_companies, active_companies, all_jobs):
 
     # Save all jobs
     all_jobs_file = os.path.join(OUTPUT_DIR, "all_jobs.json")
-    with open(all_jobs_file, "w") as f:
+    with open(all_jobs_file, "w", encoding="utf-8") as f:
         json.dump(all_jobs, f, indent=2)
     print(f"All jobs: {all_jobs_file} ({len(all_jobs):,} jobs)")
 
@@ -861,7 +869,7 @@ def save_results(all_companies, active_companies, all_jobs):
         "last_updated": timestamp,
     }
     manifest_file = os.path.join(chunks_dir, "jobs_manifest.json")
-    with open(manifest_file, "w") as f:
+    with open(manifest_file, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
     recruiter_jobs = sum(1 for job in all_jobs if job.get("is_recruiter"))
@@ -878,7 +886,7 @@ def save_results(all_companies, active_companies, all_jobs):
     }
 
     metadata_file = os.path.join(OUTPUT_DIR, "metadata.json")
-    with open(metadata_file, "w") as f:
+    with open(metadata_file, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
     print(f"Metadata: {metadata_file}")
 
@@ -924,7 +932,10 @@ def main():
     all_active_companies = {}
     all_jobs = []
 
-    with ThreadPoolExecutor(max_workers=len(platforms)) as platform_executor:
+    # Bounded, not len(platforms): each of these threads opens its own nested
+    # per-platform pool above, so 6 x 50 was up to 300 concurrent threads.
+    platform_pool = min(capacity.workers(len(platforms), minimum=2), len(platforms))
+    with ThreadPoolExecutor(max_workers=platform_pool) as platform_executor:
         futures = {
             platform_executor.submit(fetch_all_jobs, companies, fetcher, name): name
             for companies, fetcher, name in platforms

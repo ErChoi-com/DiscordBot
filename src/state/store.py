@@ -27,10 +27,9 @@ JOB_DEFAULTS: dict[str, Any] = {
     "exclusion_terms": [],
     "hours_old": 72,
     "results_wanted": 50,
-    "refresh_seconds": 300,
+    "refresh_seconds": 900,
     "country_indeed": "AUTO",
     "allow_north_america": False,
-    "jobbank_native_query": "",
     "semantic_threshold": 0.30,
     "ats_semantic_threshold": 0.20,
     "enabled": False,
@@ -102,6 +101,9 @@ class RuntimeStore:
         self.channel_reddit_settings: dict[int, dict[str, Any]] = {}
         self.channel_job_seen: dict[int, dict[str, None]] = {}
         self.channel_cheatsheet_ids: dict[str, int] = {}
+        # Guild-scoped rather than channel-scoped: a member's share of the
+        # expensive commands should not change with the channel they type in.
+        self.guild_quotas: dict[int, dict[str, Any]] = {}
 
     def get_cheatsheet_message_id(self, channel_id: int, sheet_kind: str) -> int | None:
         return self.channel_cheatsheet_ids.get(f"{channel_id}:{sheet_kind}")
@@ -112,6 +114,18 @@ class RuntimeStore:
 
     def clear_cheatsheet_message_id(self, channel_id: int, sheet_kind: str) -> None:
         self.channel_cheatsheet_ids.pop(f"{channel_id}:{sheet_kind}", None)
+        self.save()
+
+    def get_quota_policy(self, guild_id: int | None):
+        """The guild's QuotaPolicy, defaults when nothing has been set."""
+        from services.quota import QuotaPolicy
+
+        if guild_id is None:
+            return QuotaPolicy()
+        return QuotaPolicy.from_dict(self.guild_quotas.get(int(guild_id), {}))
+
+    def set_quota_policy(self, guild_id: int, policy) -> None:
+        self.guild_quotas[int(guild_id)] = policy.to_dict()
         self.save()
 
     def get_mode(self, channel_id: int) -> str:
@@ -138,7 +152,6 @@ class RuntimeStore:
         merged["sites"] = list(current.get("sites", JOB_DEFAULTS["sites"]))
         merged["role_filters"] = list(current.get("role_filters", JOB_DEFAULTS["role_filters"]))
         merged["exclusion_terms"] = list(current.get("exclusion_terms", JOB_DEFAULTS["exclusion_terms"]))
-        merged["jobbank_native_query"] = str(current.get("jobbank_native_query", JOB_DEFAULTS["jobbank_native_query"]))
         return merged
 
     def update_job_setting(self, channel_id: int, key: str, value: Any) -> None:
@@ -175,6 +188,7 @@ class RuntimeStore:
             "channel_reddit_settings": {str(k): v for k, v in self.channel_reddit_settings.items()},
             "channel_job_seen": {str(k): list(v) for k, v in self.channel_job_seen.items()},
             "channel_cheatsheet_ids": dict(self.channel_cheatsheet_ids),
+            "guild_quotas": {str(k): v for k, v in self.guild_quotas.items()},
         }
         try:
             self.state_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
@@ -190,6 +204,15 @@ class RuntimeStore:
             return
 
         self.channel_modes = {int(k): str(v) for k, v in payload.get("channel_modes", {}).items()}
+        self.guild_quotas = {}
+        for key, value in (payload.get("guild_quotas") or {}).items():
+            # A malformed entry costs that guild its quota settings, not the
+            # whole state file: this is read at startup, before anything else
+            # the bot needs can run.
+            try:
+                self.guild_quotas[int(key)] = dict(value)
+            except (TypeError, ValueError):
+                continue
         self.channel_scrape_settings = {int(k): dict(v) for k, v in payload.get("channel_scrape_settings", {}).items()}
         self.channel_job_settings = {int(k): dict(v) for k, v in payload.get("channel_job_settings", {}).items()}
         reddit_raw = payload.get("channel_reddit_settings", {})

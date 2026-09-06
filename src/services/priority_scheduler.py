@@ -16,15 +16,21 @@ from services import capacity
 
 _T = TypeVar("_T")
 
-# Two priority tiers: interactive (user-triggered Discord commands like
-# .resumebuild) always preempts background (job/reddit/ATS watcher work),
-# except when aging has promoted a long-waiting background task.
+# Three priority tiers. Interactive (user-triggered Discord commands like
+# .resumebuild) outranks background (job/reddit/ATS watcher work). PROMOTED
+# sits between them and exists solely as aging's destination.
+#
+# Aging used to promote straight to INTERACTIVE, which erased the distinction
+# the reserved workers below depend on: a flooded queue meant every background
+# task became "interactive" within 20s, and a real command then had no
+# priority left to exercise. Aging still lifts a starved task above its peers;
+# it just can no longer disguise it as user-facing work.
 INTERACTIVE = 0
-BACKGROUND = 1
+PROMOTED = 1
+BACKGROUND = 2
 
-# A background task that has waited this long gets promoted to the
-# interactive tier so a steady stream of interactive submissions can't
-# starve it forever.
+# A background task that has waited this long is lifted to the PROMOTED tier
+# so a steady stream of interactive submissions can't starve it forever.
 _AGING_THRESHOLD_SECONDS = 20.0
 _AGING_SWEEP_INTERVAL_SECONDS = 1.0
 
@@ -112,12 +118,22 @@ class PriorityWorkScheduler:
     same queue.
     """
 
-    def __init__(self, max_workers: int | None = None) -> None:
+    def __init__(self, max_workers: int | None = None, reserved_interactive: int | None = None) -> None:
         # cpu_count() reports the HOST's cores inside a cgroup-limited container,
         # so capacity.cpu_limit() is what actually reflects available CPU there.
         # Capped: these are Python threads, so past a couple of dozen the GIL
         # means extra workers buy queue depth rather than throughput.
         self._max_workers = max_workers or max(2, min(32, round(capacity.cpu_limit())))
+        # Workers that accept INTERACTIVE tasks only. Ordering alone could not
+        # keep a command responsive: priority decides who goes next, not who
+        # gets a thread, so a pool fully occupied by hours-long scrapes left
+        # .resumebuild waiting on work that had no deadline it could enforce.
+        # A floor of dedicated workers is what makes the guarantee real. It is
+        # a floor and not a partition -- interactive work still spills into
+        # idle general workers when there is more of it than the floor holds.
+        if reserved_interactive is None:
+            reserved_interactive = max(1, self._max_workers // 6)
+        self._reserved_interactive = max(0, min(reserved_interactive, self._max_workers - 1))
         self._cv = threading.Condition()
         self._heap: list[_QueuedTask] = []
         self._seq_counter = itertools.count()
@@ -131,10 +147,28 @@ class PriorityWorkScheduler:
         self._active_count = 0
         self._completed_count = 0
         self._promoted_count = 0
+        # A task whose caller cancelled it while it sat queued is discarded on
+        # pickup. That path used to increment nothing at all, so the discards
+        # were invisible and the counters read as self-contradictory: work
+        # demonstrably submitted, nothing completed, nothing failed.
+        self._dropped_count = 0
+        # seq -> (label, started_at). What is holding a worker right now, which
+        # `active` alone cannot answer -- and the first question worth asking
+        # when the pool is full.
+        self._in_flight: dict[int, tuple[str | None, float]] = {}
         self._history: dict[str, _DurationHistory] = {}
         self._history_lock = threading.Lock()
         self._workers: list[threading.Thread] = [
-            threading.Thread(target=self._worker_loop, name=f"priority-work-{i}", daemon=True)
+            threading.Thread(
+                target=self._worker_loop,
+                args=(i < self._reserved_interactive,),
+                name=(
+                    f"priority-work-{i}-interactive"
+                    if i < self._reserved_interactive
+                    else f"priority-work-{i}"
+                ),
+                daemon=True,
+            )
             for i in range(self._max_workers)
         ]
         for worker in self._workers:
@@ -142,12 +176,23 @@ class PriorityWorkScheduler:
         self._aging_thread = threading.Thread(target=self._aging_loop, name="priority-work-aging", daemon=True)
         self._aging_thread.start()
 
-    def _worker_loop(self) -> None:
+    def _claimable(self, reserved: bool) -> bool:
+        """Whether this worker may take the task currently at the queue head.
+
+        Called with `self._cv` held. The heap is ordered by (tier, cost, seq),
+        so the best INTERACTIVE task is at the head whenever one exists at all
+        -- a reserved worker only has to inspect the head, never scan.
+        """
+        if not self._heap:
+            return False
+        return not reserved or self._heap[0].tier == INTERACTIVE
+
+    def _worker_loop(self, reserved: bool = False) -> None:
         while True:
             with self._cv:
-                while not self._heap and not self._shutdown:
+                while not self._claimable(reserved) and not self._shutdown:
                     self._cv.wait()
-                if self._shutdown and not self._heap:
+                if self._shutdown and not self._claimable(reserved):
                     return
                 task = heapq.heappop(self._heap)
                 self._active_count += 1
@@ -164,9 +209,12 @@ class PriorityWorkScheduler:
             if not task.future.set_running_or_notify_cancel():
                 with self._cv:
                     self._active_count -= 1
+                    self._dropped_count += 1
                 continue
 
             started = time.monotonic()
+            with self._cv:
+                self._in_flight[task.seq] = (task.label, started)
             try:
                 result = task.fn(*task.args, **task.kwargs)
             except BaseException as exc:  # noqa: BLE001 - propagate to the awaiting caller
@@ -177,6 +225,7 @@ class PriorityWorkScheduler:
                 if task.label is not None:
                     self._history_for(task.label).record(time.monotonic() - started)
                 with self._cv:
+                    self._in_flight.pop(task.seq, None)
                     self._active_count -= 1
                     self._completed_count += 1
 
@@ -206,9 +255,9 @@ class PriorityWorkScheduler:
                 now = time.monotonic()
                 promoted = False
                 for task in self._heap:
-                    if task.tier != INTERACTIVE and (now - task.submitted_at) >= _AGING_THRESHOLD_SECONDS:
-                        task.tier = INTERACTIVE
-                        task.sort_key = (INTERACTIVE, task.cost, task.seq)
+                    if task.tier == BACKGROUND and (now - task.submitted_at) >= _AGING_THRESHOLD_SECONDS:
+                        task.tier = PROMOTED
+                        task.sort_key = (PROMOTED, task.cost, task.seq)
                         promoted = True
                         self._promoted_count += 1
                 if promoted:
@@ -259,7 +308,11 @@ class PriorityWorkScheduler:
             if self._shutdown:
                 raise RuntimeError("PriorityWorkScheduler is shut down")
             heapq.heappush(self._heap, task)
-            self._cv.notify()
+            # notify_all, not notify: a lone wakeup can land on a reserved
+            # worker that is not allowed to take this task, which would then
+            # go back to waiting and leave the task sitting there while
+            # general workers sat idle.
+            self._cv.notify_all()
         return future
 
     async def run(
@@ -275,17 +328,33 @@ class PriorityWorkScheduler:
         return await asyncio.wrap_future(future)
 
     def stats(self) -> dict[str, Any]:
+        now = time.monotonic()
         with self._cv:
             queued = len(self._heap)
             queued_interactive = sum(1 for t in self._heap if t.tier == INTERACTIVE)
+            queued_promoted = sum(1 for t in self._heap if t.tier == PROMOTED)
+            in_flight = sorted(
+                (
+                    {"label": label, "age_seconds": round(now - started, 1)}
+                    for label, started in self._in_flight.values()
+                ),
+                key=lambda entry: entry["age_seconds"],
+                reverse=True,
+            )
             result = {
                 "workers": self._max_workers,
+                "reserved_interactive": self._reserved_interactive,
                 "active": self._active_count,
                 "completed": self._completed_count,
+                "dropped": self._dropped_count,
                 "promoted": self._promoted_count,
                 "queued": queued,
                 "queued_interactive": queued_interactive,
-                "queued_background": queued - queued_interactive,
+                "queued_promoted": queued_promoted,
+                # Anything not interactive or promoted is still plain
+                # background; keeping the old key's meaning intact.
+                "queued_background": queued - queued_interactive - queued_promoted,
+                "in_flight": in_flight,
             }
         with self._history_lock:
             labels = list(self._history.items())

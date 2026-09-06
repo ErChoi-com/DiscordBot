@@ -1,0 +1,108 @@
+\documentclass[11pt]{article}
+\usepackage[letterpaper,
+top=0.5in,
+bottom=0.5in,
+left=0.5in,
+right=0.5in]{geometry}
+
+\usepackage{XCharter}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}
+\usepackage{comment}
+\raggedright
+\pagestyle{empty}
+
+\input{glyphtounicode}
+\pdfgentounicode=1
+
+% Section heading: bold, rule underneath, controlled spacing above/below
+\titleformat{\section}{\bfseries\large}{}{0pt}{}[\vspace{1pt}\titlerule]
+\titlespacing*{\section}{0pt}{8pt}{2pt}
+
+\renewcommand\labelitemi{$\vcenter{\hbox{\small$\bullet$}}$}
+% topsep: gap between entry title line and bullet list
+% itemsep: gap between individual bullets
+% parsep/partopsep: suppress extra paragraph padding
+\setlist[itemize]{itemsep=-2pt, leftmargin=12pt, topsep=2pt, parsep=0pt, partopsep=0pt}
+
+\begin{document}
+
+% ---------- NAME ----------
+\centerline{\Huge Ernest Choi}
+\vspace{3pt}
+
+% ---------- CONTACT ----------
+\centerline{%
+  \href{mailto:ernestljchoi@gmail.com}{ernestljchoi@gmail.com} |
+  \href{https://www.github.com/ErChoi-com}{github.com/ErChoi-com} |
+  \href{https://www.linkedin.com/in/ernest-choi-lj}{linkedin.com/in/ernest-choi-lj} |
+  647-713-8997
+}
+
+% ---------- PROJECTS ----------
+
+\section*{Projects}
+
+% [hardware, fpga]
+\textbf{General-Purpose Processor (ALU)} | \textit{VHDL, FPGA, Quartus II} \\ % no public repository
+\begin{itemize}
+  \item Designed and implemented a modular Arithmetic and Logic Unit (ALU) in \textbf{VHDL} on an \textbf{Altera FPGA}, integrating registers, a finite state machine, a $4\times16$ decoder, and a microcode-driven ALU core.
+  \item Verified the design through \textbf{Quartus II} simulation, waveform analysis, and static timing verification, driving results out to 7-segment displays.
+  \item Applied \textbf{RTL} design practice — timing analysis, modular integration, bitwise operations — to build and test digital logic at the register-transfer level.
+\end{itemize}
+
+% [systems, gpu]
+\textbf{Particle Fluid Simulation} | \textit{C++, OpenGL, GLSL, GitHub} \hfill \href{https://github.com/ErChoi-com/Particle-Fluid-Simulation}{github.com/ErChoi-com/Particle-Fluid-Simulation} \\
+\begin{itemize}
+  \item Developed a real-time fluid simulation in \textbf{C++} and \textbf{OpenGL}, writing \textbf{GLSL} shaders for particle rendering, physics-driven interaction, and GPU-accelerated parallel computation.
+  \item Managed windowing, input, and render contexts with \textbf{GLFW} and \textbf{GLUT}, and trimmed graphics-pipeline memory allocation by 12\% for smoother frames and better GPU utilization.
+\end{itemize}
+% ---------- EXPERIENCE ----------
+
+\section*{Experience}
+
+\smallskip
+% [general]
+\textbf{Technical Development Intern,} {City of Markham} -- Markham, Ontario \hfill July 2022 -- August 2024 \\
+\begin{itemize}
+  \item Maintained clear \textbf{LaTeX} documentation of website workflows and operating processes, helping cut website downtime by 41\%.
+  \item Tracked \textit{project deliverables} and reported progress to management, reducing coordination delays by 14\%.
+  \item Validated and tested system changes against quality standards and functional requirements, reducing reported errors by 20\%.
+\end{itemize}
+
+\smallskip
+% [electrical]
+\textbf{Electrical Team Member,} {Metropolitan Aerospace Rocket Society (MARS)} -- Toronto, ON \hfill September 2023 -- Present \\
+\vspace{-9pt}
+\begin{itemize}
+  \item Designed and fabricated complex \textbf{PCB} circuits using \textbf{Altium} and \textbf{KiCad}, integrating custom systems for aerospace \textit{designs} from conceptualization through \textit{construction}.
+  \item Enhanced power efficiency by 23\% through optimization of circuit configurations, component selection, and \textbf{power distribution} across regulated voltage rails
+  \item Performed board bring-up and debugging with \textbf{oscilloscopes}, logic analyzers, and electrical measurements to validate hardware functionality under strict performance and safety standards
+  \item Developed embedded firmware for microcontroller-based avionics using \textbf{C/C++} and \textbf{Python}; automated testing workflows via scripting
+\end{itemize}
+
+\smallskip
+% [teaching]
+\textbf{Engineering Instructor,} {Obotz Robotics} -- Markham, Ontario \hfill September 2022 -- Present \\
+\begin{itemize}
+  \item Taught digital logic and embedded \textbf{C} programming, raising students' robotics problem-completion scores by 35\% and fostering critical thinking for \textit{Engineering} challenges.
+  \item Coached students to excel in robotics competitions with custom \textbf{Arduino} hardware, emphasizing problem-solving and the \textit{design} of functional systems.
+  \item Explained students' technical progress to parents in clear, non-technical terms.
+\end{itemize}
+% ---------- SKILLS ----------
+
+\section*{Skills}
+\textbf{Languages:} JavaScript/Node.js, Java, Python, C++, C, SQL, HTML, CSS \\
+\textbf{Frameworks/Libraries:} OpenGL, WebRTC, JavaFX, React, TypeScript, Flask, FastAPI, TensorFlow \\
+\textbf{Tools:} Git, PostgreSQL, Ubuntu Linux, Docker, Kafka, Tableau, Power BI, FPGA \\
+\textbf{Platforms:} GitHub, GitLab, Raspberry Pi, Arduino \\
+\textbf{Relevant Courses:} Digital Systems, Microprocessor Systems, Object Oriented Eng Analysis and Design, Electronic Circuits I
+
+% ---------- EDUCATION ----------
+\section*{Education}
+\textbf{Toronto Metropolitan University} -- Bachelor of Engineering in Computer Engineering \hfill 2023--2027
+
+\end{document}

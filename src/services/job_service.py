@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import bisect
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import hashlib
@@ -13,24 +15,15 @@ from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
 
-from services.net_util import parse_proxy_pool, pick_proxy
+from services import capacity, platform_support
+from services.net_util import parse_proxy_pool, pick_proxy, retry_backoff_delay
 
 DEFAULT_JOBSPY_EXE = Path(sys.executable)
-JOBBANK_CANADA_SITE = "jobbank_canada"
-JOBBANK_BASE_URL = "https://www.jobbank.gc.ca"
-JOBBANK_SEARCH_URL = f"{JOBBANK_BASE_URL}/jobsearch/jobsearch"
-JOBBANK_USER_AGENT = "Mozilla/5.0 (compatible; RebuiltJobWatcher/1.0)"
-JOBBANK_DEFAULT_NATIVE_QUERY = (
-    "flg=E&fgeo=27234&fgeo=6363&fgeo=9219&fn21=20012&fn21=21103&fn21=21109&fn21=21211&"
-    "fn21=21220&fn21=21222&fn21=21223&fn21=21230&fn21=21231&fn21=21232&fn21=21233&fn21=21234&"
-    "fn21=21311&fn21=21322&fn21=21330&fn21=22101&fn21=22111&fn21=22212&fn21=22214&fn21=22220&"
-    "fn21=22221&fn21=22222&fn21=22230&fn21=22312&fn21=22313&page=1&sort=M&fsrc=21"
-)
 FALLBACK_JOBSPY_SITES = [
     "bayt",
     "bdjobs",
@@ -40,10 +33,9 @@ FALLBACK_JOBSPY_SITES = [
     "naukri",
     "zip_recruiter",
 ]
-CUSTOM_SCRAPER_SITES = {"jobbank_canada", "glassdoor", "zip_recruiter", "greenhouse", "lever", "ashby", "workday", "icims", "bamboohr"}
+CUSTOM_SCRAPER_SITES = {"glassdoor", "zip_recruiter", "greenhouse", "lever", "ashby", "workday", "icims", "bamboohr"}
 JOBSPY_SITE_LABELS = {
     "all": "All supported sites",
-    JOBBANK_CANADA_SITE: "Job Bank Canada",
     "bayt": "Bayt",
     "bdjobs": "BDJobs",
     "glassdoor": "Glassdoor",
@@ -60,7 +52,6 @@ JOBSPY_SITE_LABELS = {
 }
 DISTANCE_UNSUPPORTED_SITES = {"bayt"}
 JOB_BOARD_HOST_PATTERNS = {
-    JOBBANK_CANADA_SITE: ("jobbank.gc.ca",),
     "bayt": ("bayt.",),
     "bdjobs": ("bdjobs.",),
     "glassdoor": ("glassdoor.",),
@@ -89,20 +80,6 @@ TRACKING_QUERY_KEYS = {
 SPACE_PATTERN = re.compile(r"\s+")
 NON_ALNUM_PATTERN = re.compile(r"[^a-z0-9]+")
 _TITLE_CHUNK_RE = re.compile(r"\s+[-–/]\s+")
-JOBBANK_POSTING_LINK_PATTERN = re.compile(r"/jobsearch/jobposting/[^\"'\s<>]+", re.IGNORECASE)
-JOBBANK_POSTING_ID_PATTERN = re.compile(r"/jobsearch/jobposting/(\d+)", re.IGNORECASE)
-JOBBANK_EMAIL_PATTERN = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
-JOBBANK_PHONE_PATTERN = re.compile(
-    r"(?:\+?1[-.\s]?)?(?:\(\d{3}\)\s*|\d{3}[-.\s])\d{3}[-.\s]\d{4}",
-    re.IGNORECASE,
-)
-JOBBANK_LOCATION_STOP_WORDS = {
-    "work location",
-    "salary",
-    "to be negotiated",
-    "job requirements",
-    "overview",
-}
 CANADIAN_PROVINCE_NAMES = {
     "alberta": "AB",
     "british columbia": "BC",
@@ -119,12 +96,31 @@ CANADIAN_PROVINCE_NAMES = {
     "yukon": "YT",
 }
 CANADIAN_PROVINCE_CODES = {value: value for value in CANADIAN_PROVINCE_NAMES.values()}
+PROVINCE_ABBR_TO_FULL = {
+    "AB": "Alberta",
+    "BC": "British Columbia",
+    "MB": "Manitoba",
+    "NB": "New Brunswick",
+    "NL": "Newfoundland and Labrador",
+    "NS": "Nova Scotia",
+    "ON": "Ontario",
+    "PE": "Prince Edward Island",
+    "QC": "Quebec",
+    "SK": "Saskatchewan",
+    "NT": "Northwest Territories",
+    "NU": "Nunavut",
+    "YT": "Yukon",
+}
+COUNTRY_CODE_TO_NAME = {
+    "CA": "Canada",
+    "US": "United States",
+    "GB": "United Kingdom",
+    "UK": "United Kingdom",
+}
 GLASSDOOR_LOCATION_LOCALITY_PATTERN = re.compile(r'"addressLocality"\s*:\s*"([^"]+)"', re.IGNORECASE)
 GLASSDOOR_LOCATION_REGION_PATTERN = re.compile(r'"addressRegion"\s*:\s*"([^"]+)"', re.IGNORECASE)
+GLASSDOOR_LOCATION_COUNTRY_PATTERN = re.compile(r'"addressCountry"\s*:\s*"([^"]+)"', re.IGNORECASE)
 GLASSDOOR_CARD_AGE_PATTERN = re.compile(r'(?<!\d)(\d+)\s*([hd])\+?(?!\d)', re.IGNORECASE)
-JOBBANK_MAX_SEARCH_PAGES: int = 5
-JOBBANK_USER_AGENT_OVERRIDE: str | None = None  # set via configure_job_service
-
 # ── Semantic plugin (overridden at startup from settings.toml via configure_job_service) ──
 SEMANTIC_PLUGIN_ENABLED: bool = True
 SEMANTIC_PLUGIN_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"
@@ -135,7 +131,7 @@ SEMANTIC_DESCRIPTION_CHAR_LIMIT: int = 2200
 # ── Dedup FIFO constants (overridden at startup) ──────────────────────────────
 DEDUP_MAX_FIFO_FILES: int = 6
 DEDUP_MAX_ENTRIES_PER_FILE: int = 500
-DEDUP_MONTHS_THRESHOLD: int = 2
+DEDUP_MONTHS_THRESHOLD: int = 1
 DEDUP_SEEN_LINKS_CAP: int = 80_000
 
 # ── Network timeouts (overridden at startup) ──────────────────────────────────
@@ -491,7 +487,7 @@ def normalize_dedup_storage_for_listing_file(listing_file: Path) -> bool:
     return changed
 
 
-def is_message_duplicate(message_content: str, listing_file: Path, months_threshold: int = 2) -> bool:
+def is_message_duplicate(message_content: str, listing_file: Path, months_threshold: int = 1) -> bool:
     """Check whether message title exists inside threshold in watcher-scoped dedup storage."""
     ascii_sig = dedup_signature_for_message(message_content, listing_file)
     if not ascii_sig:
@@ -588,7 +584,13 @@ def record_message_for_dedup(message_content: str, listing_file: Path) -> bool:
     return True
 
 
-def check_and_record_message(message_content: str, listing_file: Path, months_threshold: int = 2) -> bool:
+# orphan-ok: deliberately unwired, and DO NOT wire it into the send path.
+# Recording is a separate step there on purpose -- manager._send_watcher_message
+# checks first, sends, and records only once the send succeeded. Folding the two
+# together means a job whose send raises is still marked seen, so it is silently
+# never posted. The two halves it composes (is_message_duplicate,
+# record_message_for_dedup) are what callers use.
+def check_and_record_message(message_content: str, listing_file: Path, months_threshold: int = 1) -> bool:
     """Check if job title is a duplicate and record it in FIFO rotating files.
     
     Args:
@@ -677,7 +679,7 @@ def supported_jobspy_sites(configured_exe: str | None = None) -> list[str]:
 
 
 def jobspy_site_options() -> list[tuple[str, str]]:
-    site_values = ["all", JOBBANK_CANADA_SITE, *supported_jobspy_sites()]
+    site_values = ["all", *supported_jobspy_sites()]
     seen: set[str] = set()
     options: list[tuple[str, str]] = []
     for site in site_values:
@@ -786,16 +788,26 @@ def jobspy_python_executable(configured_exe: str | None = None) -> Path | None:
         candidates.append(Path(env_override).expanduser())
     candidates.append(DEFAULT_JOBSPY_EXE)
     candidates.append(Path(sys.executable))
-    for minor in ("3.11", "3.12", "3.13", "3.14"):
-        try:
-            proc = subprocess.run(
-                ["py", f"-{minor}", "-c", "import sys; print(sys.executable)"],
-                capture_output=True, text=True, timeout=10, check=False,
-            )
-            if proc.returncode == 0 and proc.stdout.strip():
-                candidates.append(Path(proc.stdout.strip()))
-        except Exception:
-            pass
+    # `py` is the Windows Python launcher. On Linux this spawned four doomed
+    # processes per call, and worse: an unrelated `py` binary (the
+    # python-launcher package) would be handed a -3.x flag it does not
+    # understand and could return the wrong interpreter.
+    if platform_support.is_windows():
+        for minor in ("3.11", "3.12", "3.13", "3.14"):
+            try:
+                proc = subprocess.run(
+                    ["py", f"-{minor}", "-c", "import sys; print(sys.executable)"],
+                    capture_output=True, text=True, timeout=10, check=False,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    candidates.append(Path(proc.stdout.strip()))
+            except Exception:
+                pass
+    else:
+        for name in ("python3.14", "python3.13", "python3.12", "python3.11", "python3"):
+            resolved = shutil.which(name)
+            if resolved:
+                candidates.append(Path(resolved))
 
     seen: set[Path] = set()
     for candidate in candidates:
@@ -907,10 +919,21 @@ def normalize_canadian_province(value: Any) -> str:
     normalized = SPACE_PATTERN.sub(" ", text).strip().rstrip(".")
     lowered = normalized.lower()
     if lowered in CANADIAN_PROVINCE_NAMES:
-        return CANADIAN_PROVINCE_NAMES[lowered]
+        return PROVINCE_ABBR_TO_FULL[CANADIAN_PROVINCE_NAMES[lowered]]
     upper = lowered.upper()
-    if upper in CANADIAN_PROVINCE_CODES:
-        return upper
+    if upper in PROVINCE_ABBR_TO_FULL:
+        return PROVINCE_ABBR_TO_FULL[upper]
+    return normalized
+
+
+def normalize_country_name(value: Any) -> str:
+    text = fix_text_encoding(value).strip()
+    if not text:
+        return ""
+    normalized = SPACE_PATTERN.sub(" ", text).strip().rstrip(".")
+    upper = normalized.upper()
+    if upper in COUNTRY_CODE_TO_NAME:
+        return COUNTRY_CODE_TO_NAME[upper]
     return normalized
 
 
@@ -928,9 +951,12 @@ def glassdoor_location_from_detail_page(session: requests.Session, job_url: str,
     if resp.status_code != 200:
         return fallback
 
-    text = resp.text or ""
+    # Glassdoor sometimes embeds this JSON-LD as an escaped string inside another
+    # JSON blob (\"addressLocality\":\"...\"), so unescape before matching.
+    text = (resp.text or "").replace('\\"', '"')
     city = ""
     region = ""
+    country = ""
 
     match = GLASSDOOR_LOCATION_LOCALITY_PATTERN.search(text)
     if match:
@@ -940,10 +966,13 @@ def glassdoor_location_from_detail_page(session: requests.Session, job_url: str,
     if match:
         region = normalize_canadian_province(match.group(1))
 
-    if city and region:
-        return f"{city}, {region}"
-    if city:
-        return city
+    match = GLASSDOOR_LOCATION_COUNTRY_PATTERN.search(text)
+    if match:
+        country = normalize_country_name(match.group(1))
+
+    parts = [part for part in (city, region, country) if part]
+    if parts:
+        return ", ".join(parts)
     return fallback
 
 
@@ -1096,109 +1125,6 @@ def first_query_value(query: dict[str, list[str]], *keys: str, default: str = ""
     return default
 
 
-def normalize_jobbank_search_params(
-    keywords: str,
-    location: str,
-    search_query: dict[str, list[str]] | None = None,
-) -> dict[str, Any]:
-    params: dict[str, Any] = {
-        "searchstring": str(keywords or "jobs").strip() or "jobs",
-        "locationstring": str(location or "Canada").strip() or "Canada",
-    }
-    if not search_query:
-        return params
-
-    for key, values in search_query.items():
-        query_key = str(key or "").strip()
-        if not query_key:
-            continue
-        lowered = query_key.lower()
-        if lowered in {"searchstring", "locationstring", "q", "keywords", "l", "location"}:
-            continue
-
-        cleaned_values = [str(value).strip() for value in values if str(value).strip()]
-        if not cleaned_values:
-            continue
-
-        # Preserve native Job Bank filters. Keep all provided values for repeated keys.
-        params[query_key] = cleaned_values if len(cleaned_values) > 1 else cleaned_values[0]
-
-    return params
-
-
-def parse_jobbank_native_query(raw_query: str) -> dict[str, list[str]]:
-    raw = str(raw_query or "").strip()
-    if not raw:
-        return {}
-    normalized = raw[1:] if raw.startswith("?") else raw
-    parsed = parse_qs(normalized, keep_blank_values=False)
-    return {
-        str(key): [str(value).strip() for value in values if str(value).strip()]
-        for key, values in parsed.items()
-        if str(key).strip()
-    }
-
-
-def effective_jobbank_native_query(custom_query: str) -> dict[str, list[str]]:
-    defaults = parse_jobbank_native_query(JOBBANK_DEFAULT_NATIVE_QUERY)
-    custom = parse_jobbank_native_query(custom_query)
-    merged: dict[str, list[str]] = {key: list(values) for key, values in defaults.items()}
-
-    for key, values in custom.items():
-        existing = merged.setdefault(key, [])
-        for value in values:
-            if value not in existing:
-                existing.append(value)
-
-    return merged
-
-
-def paginate_jobbank_posting_links(
-    session: requests.Session,
-    base_params: dict[str, Any],
-    target_links: int,
-) -> list[str]:
-    links: list[str] = []
-    seen: set[str] = set()
-
-    start_page_raw = str(base_params.get("page") or "").strip()
-    try:
-        start_page = max(1, int(start_page_raw)) if start_page_raw else 1
-    except ValueError:
-        start_page = 1
-
-    for page_offset in range(JOBBANK_MAX_SEARCH_PAGES):
-        page_params = dict(base_params)
-        page_params["page"] = str(start_page + page_offset)
-        try:
-            search_response = session.get(JOBBANK_SEARCH_URL, params=page_params, timeout=20)
-            search_response.raise_for_status()
-        except Exception:
-            if page_offset == 0:
-                return []
-            break
-
-        remaining = max(1, target_links - len(links))
-        page_links = extract_jobbank_posting_links(search_response.text, max_links=remaining)
-        if not page_links:
-            break
-
-        added_this_page = 0
-        for detail_url in page_links:
-            if detail_url in seen:
-                continue
-            seen.add(detail_url)
-            links.append(detail_url)
-            added_this_page += 1
-            if len(links) >= target_links:
-                return links
-
-        if added_this_page == 0:
-            break
-
-    return links
-
-
 def normalize_requested_sites(site_names: list[str], configured_python_exe: str | None = None) -> list[str]:
     normalized_sites: list[str] = []
     for site in site_names:
@@ -1218,7 +1144,7 @@ def normalize_requested_sites(site_names: list[str], configured_python_exe: str 
 
 def all_supported_job_sites(configured_python_exe: str | None = None) -> list[str]:
     """Return every scraper site this runtime can query, ensuring Indeed is present."""
-    ordered: list[str] = [JOBBANK_CANADA_SITE, "glassdoor", "zip_recruiter"]
+    ordered: list[str] = ["glassdoor", "zip_recruiter"]
     for site in supported_jobspy_sites(configured_python_exe):
         candidate = str(site).strip().lower()
         if candidate and candidate not in ordered:
@@ -1233,130 +1159,6 @@ def all_supported_job_sites(configured_python_exe: str | None = None) -> list[st
             ordered.append(ats_site)
 
     return ordered
-
-
-def normalize_jobbank_posting_url(raw_url: str) -> str:
-    url = str(raw_url or "").strip()
-    if not url:
-        return ""
-    match = JOBBANK_POSTING_ID_PATTERN.search(url)
-    if not match:
-        return ""
-    return f"{JOBBANK_BASE_URL}/jobsearch/jobposting/{match.group(1)}"
-
-
-def extract_jobbank_posting_links(search_html: str, max_links: int) -> list[str]:
-    links: list[str] = []
-    seen: set[str] = set()
-    for match in JOBBANK_POSTING_LINK_PATTERN.findall(search_html or ""):
-        clean_url = normalize_jobbank_posting_url(match)
-        if not clean_url or clean_url in seen:
-            continue
-        seen.add(clean_url)
-        links.append(clean_url)
-        if len(links) >= max(1, max_links):
-            break
-    return links
-
-
-def lines_from_html(html: str) -> list[str]:
-    text = BeautifulSoup(html or "", "html.parser").get_text("\n", strip=True)
-    return [line.strip() for line in text.splitlines() if line.strip()]
-
-
-def value_after_label(lines: list[str], label: str, lookahead: int = 5) -> str:
-    target = str(label or "").strip().lower()
-    if not target:
-        return ""
-    for index, line in enumerate(lines):
-        if line.strip().lower() != target:
-            continue
-        for candidate in lines[index + 1 : index + 1 + max(1, lookahead)]:
-            cleaned = candidate.strip()
-            if cleaned and cleaned.lower() != target and cleaned != ",":
-                return cleaned
-    return ""
-
-
-def jobbank_location_from_lines(lines: list[str]) -> str:
-    for index, line in enumerate(lines):
-        if line.strip().lower() != "location":
-            continue
-
-        parts: list[str] = []
-        for token in lines[index + 1 : index + 8]:
-            cleaned = token.strip()
-            lowered = cleaned.lower()
-            if not cleaned:
-                continue
-            if lowered in JOBBANK_LOCATION_STOP_WORDS:
-                break
-            parts.append(cleaned)
-            if len(parts) >= 3:
-                break
-
-        if parts:
-            return " ".join(parts).replace(" , ", ", ")
-    return ""
-
-
-def extract_jobbank_contacts(html: str) -> tuple[list[str], list[str]]:
-    soup = BeautifulSoup(html or "", "html.parser")
-    lines = lines_from_html(html)
-    text = "\n".join(lines)
-
-    emails: set[str] = set()
-    phones: set[str] = set()
-
-    for anchor in soup.find_all("a", href=True):
-        href = str(anchor.get("href") or "").strip()
-        lowered = href.lower()
-        if lowered.startswith("mailto:"):
-            email = unquote(href[7:].split("?", 1)[0]).strip()
-            if email and "jobbank" not in email.lower() and "example" not in email.lower():
-                emails.add(email)
-        elif lowered.startswith("tel:"):
-            phone = unquote(href[4:].split("?", 1)[0]).strip()
-            if phone:
-                phones.add(phone)
-
-    emails.update(
-        {
-            value
-            for value in JOBBANK_EMAIL_PATTERN.findall(text)
-            if "jobbank" not in value.lower() and "example" not in value.lower()
-        }
-    )
-    phones.update({value.strip() for value in JOBBANK_PHONE_PATTERN.findall(text)})
-
-    return sorted({value.strip() for value in emails if value.strip()}), sorted(
-        {value.strip() for value in phones if value.strip()}
-    )
-
-
-def extract_jobbank_apply_link(*html_docs: str) -> str:
-    selectors = (
-        "a#externalJobLink[href]",
-        "#externalJobLink[href]",
-        "a[data-exturl]",
-        "a[href*='apply']",
-    )
-    for html in html_docs:
-        soup = BeautifulSoup(html or "", "html.parser")
-        for selector in selectors:
-            for anchor in soup.select(selector):
-                href = str(anchor.get("href") or "").strip()
-                if href.startswith("http"):
-                    return href
-                data_ext = str(anchor.get("data-exturl") or "").strip()
-                if data_ext.startswith("http"):
-                    return data_ext
-
-        for anchor in soup.select("a[href]"):
-            href = str(anchor.get("href") or "").strip()
-            if href.startswith("http") and "jobbank.gc.ca" not in href.lower():
-                return href
-    return ""
 
 
 def normalize_description_text(raw_value: Any, max_chars: int = SEMANTIC_DESCRIPTION_CHAR_LIMIT) -> str:
@@ -1440,122 +1242,6 @@ def compact_job_description(
     if len(compact) <= safe_limit:
         return compact
     return compact[:safe_limit].rstrip()
-
-
-def extract_jobbank_description(detail_html: str) -> str:
-    soup = BeautifulSoup(detail_html or "", "html.parser")
-    selectors = (
-        "section#jobdetails",
-        "div#job-details",
-        "div.jobposting-details",
-        "main",
-    )
-    for selector in selectors:
-        block = soup.select_one(selector)
-        if block is None:
-            continue
-        cleaned = normalize_description_text(block.get_text(" ", strip=True))
-        if len(cleaned) >= 80:
-            return cleaned
-
-    return normalize_description_text("\n".join(lines_from_html(detail_html)))
-
-
-def build_jobbank_posting_row(session: requests.Session, detail_url: str, detail_html: str) -> dict[str, Any]:
-    detail_lines = lines_from_html(detail_html)
-    title = BeautifulSoup(detail_html, "html.parser").select_one("h1")
-    company = value_after_label(detail_lines, "Employer details")
-    location_text = jobbank_location_from_lines(detail_lines)
-
-    apply_html = fetch_jobbank_apply_html(session, detail_url, detail_html)
-    contact_emails, contact_phones = extract_jobbank_contacts(apply_html)
-    apply_link = extract_jobbank_apply_link(detail_html, apply_html)
-    description = extract_jobbank_description(detail_html)
-
-    row: dict[str, Any] = {
-        "title": title.get_text(" ", strip=True) if title else "(job)",
-        "company": company,
-        "location": location_text,
-        "job_url": normalize_jobbank_posting_url(detail_url) or detail_url,
-        "_source_site": JOBBANK_CANADA_SITE,
-        "_source_sites": [JOBBANK_CANADA_SITE],
-    }
-    if contact_emails:
-        row["contact_emails"] = contact_emails
-    if contact_phones:
-        row["contact_phones"] = contact_phones
-    if apply_link:
-        row["apply_link"] = apply_link
-    if description:
-        row["description"] = description
-    return row
-
-
-def fetch_jobbank_apply_html(session: requests.Session, detail_url: str, detail_html: str) -> str:
-    soup = BeautifulSoup(detail_html or "", "html.parser")
-    form = soup.select_one("form#externallinkactivity")
-    if form is None:
-        return detail_html
-
-    action = str(form.get("action") or "/jobsearch/pers/jobposting.xhtml").strip()
-    job_link = soup.select_one("#externalJobLink")
-    js_job_id = str(job_link.get("data-jsjobid") or "").strip() if job_link else ""
-
-    payload = {
-        str(input_tag.get("name")): str(input_tag.get("value") or "")
-        for input_tag in form.select("input[name]")
-        if input_tag.get("name")
-    }
-    payload.update({"jsJobId": js_job_id, "action": "applynowbutton", "jobid": js_job_id})
-
-    post_url = requests.compat.urljoin(detail_url, action)
-    try:
-        response = session.post(post_url, data=payload, timeout=20)
-        response.raise_for_status()
-        return response.text
-    except Exception:
-        return detail_html
-
-
-def scrape_jobbank_canada_postings(
-    keywords: str,
-    location: str,
-    results_wanted: int,
-    search_query: dict[str, list[str]] | None = None,
-) -> list[dict[str, Any]]:
-    session = requests.Session()
-    session.headers.update({"User-Agent": JOBBANK_USER_AGENT_OVERRIDE or JOBBANK_USER_AGENT})
-
-    params = normalize_jobbank_search_params(keywords, location, search_query)
-    posting_links = paginate_jobbank_posting_links(session, params, target_links=max(5, results_wanted * 3))
-    if not posting_links:
-        return []
-
-    rows: list[dict[str, Any]] = []
-    for detail_url in posting_links:
-        if len(rows) >= max(1, results_wanted):
-            break
-        try:
-            detail_response = session.get(detail_url, timeout=20)
-            detail_response.raise_for_status()
-        except Exception:
-            continue
-
-        rows.append(build_jobbank_posting_row(session, detail_response.url, detail_response.text))
-
-    return rows
-
-
-def scrape_jobbank_canada_posting(detail_url: str) -> list[dict[str, Any]]:
-    session = requests.Session()
-    session.headers.update({"User-Agent": JOBBANK_USER_AGENT_OVERRIDE or JOBBANK_USER_AGENT})
-    try:
-        detail_response = session.get(detail_url, timeout=HTTP_REQUEST_TIMEOUT)
-        detail_response.raise_for_status()
-    except Exception:
-        return []
-
-    return [build_jobbank_posting_row(session, detail_response.url, detail_response.text)]
 
 
 def build_site_scrape_code(
@@ -1688,19 +1374,48 @@ def run_site_scrape_subprocess(python_executable: Path, site: str, code: str) ->
     return [row for row in rows if isinstance(row, dict)]
 
 
+def _readable_company(company: str) -> str:
+    """Company name for the "Site/Company" label.
+
+    ATS boards give slugs ("trench-group"), which need the hyphens opened up and
+    titlecasing to read as a name. A name that already reads as one must be left
+    exactly alone: blanket .replace("-", " ").title() turned
+    "CaptiveAire - Region 114 Western PA" into "Captiveaire   Region 114 Western
+    Pa" -- three spaces where the dash was, and the casing of both "CaptiveAire"
+    and "PA" destroyed. A slug has no whitespace and no capitals of its own, so
+    that is the only shape that gets rewritten.
+    """
+    if company.strip() and not any(ch.isspace() for ch in company) and company.islower():
+        return company.replace("-", " ").replace("_", " ").title()
+    return company
+
+
 def shape_job_item(row: dict[str, Any], source: str) -> dict[str, Any]:
     title = fix_text_encoding(row.get("title") or "(job)")
     company = fix_text_encoding(row.get("company") or "").strip()
     location_text = fix_text_encoding(row.get("location") or "").strip()
     source_sites = collect_job_sites(row)
     source_label = site_labels_for_sites(source_sites)
-    from services.ats_service import ATS_PLATFORMS as _ats_platforms
-    _ats_set = set(_ats_platforms)
     _company_lower = company.lower().replace("-", " ").replace("_", " ").strip()
-    _is_job_board_name = _company_lower in JOBSPY_SITE_LABELS or _company_lower in {s.replace("_", " ") for s in JOBSPY_SITE_LABELS}
-    if company and source_sites and source_sites[0] in _ats_set and not _is_job_board_name:
-        source_label = f"{source_label}/{company.replace('-', ' ').title()}"
-    suffix = ", ".join(part for part in [company, location_text] if part)
+    # A placeholder company is one naming the board this row actually came from
+    # ("LinkedIn" on a LinkedIn posting). Testing against every known board
+    # instead treats real employers as placeholders -- Google, Lever, Greenhouse,
+    # Ashby and Workday are all job boards AND companies that post their own
+    # jobs, and a Google internship listed on LinkedIn lost its name entirely.
+    _own_sites = {s.lower().replace("_", " ") for s in source_sites}
+    _own_sites |= {JOBSPY_SITE_LABELS.get(s, "").lower() for s in source_sites}
+    _is_job_board_name = bool(_company_lower) and _company_lower in _own_sites
+    # Every source -- ATS boards and JobSpy sites alike -- labels as "Site/Company"
+    # so listings read the same regardless of where they came from.
+    _company_in_label = bool(company and source_sites and not _is_job_board_name)
+    if _company_in_label:
+        source_label = f"{source_label}/{_readable_company(company)}"
+    # The parenthetical is the location; the company belongs in the label. It
+    # stays here only when the label could not carry it, and a "company" that is
+    # just the board's own name is dropped rather than repeated next to the city.
+    _keep_company = bool(company) and not _company_in_label and not _is_job_board_name
+    _suffix_parts = [company, location_text] if _keep_company else [location_text]
+    suffix = ", ".join(part for part in _suffix_parts if part)
     if suffix:
         title = f"{title} ({suffix})"
 
@@ -1718,6 +1433,26 @@ def shape_job_item(row: dict[str, Any], source: str) -> dict[str, Any]:
         "sites": source_sites,
         "site_label": source_label,
     }
+    # Real fields, not only folded into the title: the archive stores this dict
+    # verbatim, and job_match._display_fields had to recover them by splitting
+    # the title at the first comma only because they were missing.
+    # Not _is_job_board_name: "LinkedIn" as the company would reach the archive
+    # and let job_match._job_identity collapse unrelated postings that share it.
+    if company and not _is_job_board_name:
+        item["company"] = company
+    if location_text:
+        item["location"] = location_text
+    # Carry the posting date the scraper extracted. Without this the watcher
+    # path stamps today's date on archive (manager.py: `if not
+    # _item.get("date_posted")`), so a listing Lever says was created in March
+    # is archived as posted today. The background ATS loop archives raw rows and
+    # keeps the real date, so the archive ends up holding two populations with
+    # different date semantics -- and merge_data._collides keys repost detection
+    # on exactly this field, so a genuine repost and a first sighting become
+    # indistinguishable.
+    posted = str(row.get("date_posted") or "").strip()
+    if posted:
+        item["date_posted"] = posted
     description = normalize_description_text(
         row.get("description") or row.get("snippet") or row.get("summary") or row.get("job_description")
     )
@@ -1863,140 +1598,225 @@ def scrape_glassdoor_postings(
     return results
 
 
+# ZipRecruiter sits behind a Cloudflare WAF that fingerprints the TLS/JA3
+# handshake, not just headers or JS behaviour. Playwright-driven Chromium was
+# refused with a 403 "Just a moment..." interstitial on EVERY configuration
+# tried -- headless and headful, with and without webdriver/UA stealth patches
+# -- so the browser implementation that used to live here could not return a
+# row under any circumstance. curl_cffi replays a real browser's TLS
+# fingerprint and clears the WAF without launching a browser at all, which
+# also takes this scraper back out of browser_service's dispatch gate.
+ZIPRECRUITER_HOME_URL = "https://www.ziprecruiter.com/"
+ZIPRECRUITER_SEARCH_URL = "https://www.ziprecruiter.com/jobs-search"
+# Verified against the live WAF, 3 consecutive requests each. Note that the
+# bare "chrome" alias tracks curl_cffi's NEWEST fingerprint and that is exactly
+# the one Cloudflare refuses (0/3 success, vs 3/3 for each target below).
+# Do not "modernize" these to the bare alias. Rotating across three engines
+# also absorbs the occasional single-fingerprint block.
+ZIPRECRUITER_IMPERSONATIONS = ("chrome124", "firefox133", "safari")
+ZIPRECRUITER_RESULTS_PER_PAGE = 20
+ZIPRECRUITER_MAX_PAGES = 5
+_ZIPRECRUITER_LD_JSON_RE = re.compile(
+    r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', re.S
+)
+_ZIPRECRUITER_JID_RE = re.compile(r"jid=([0-9a-f]+)")
+_ZIPRECRUITER_SEAT_RE = re.compile(r'"openSeatId":"([0-9a-f]+)"')
+_ZIPRECRUITER_POSTED_RE = re.compile(r'"rollingPostedAtUtc":"([^"]+)"')
+
+
+def _ziprecruiter_ld_json_items(html: str) -> list[dict[str, str]]:
+    """Ordered title/URL pairs from the search page's ld+json ItemList.
+
+    The two-pane layout no longer puts the posting URL on any card anchor --
+    those now point at company profiles (/co/...) and refine-search links --
+    so the ItemList block is the only place the real posting links survive.
+    """
+    for match in _ZIPRECRUITER_LD_JSON_RE.finditer(html):
+        try:
+            data = json.loads(match.group(1).strip())
+        except Exception:
+            continue
+        if not isinstance(data, dict) or data.get("@type") != "ItemList":
+            continue
+        items: list[dict[str, str]] = []
+        for entry in data.get("itemListElement") or []:
+            if not isinstance(entry, dict):
+                continue
+            title = str(entry.get("name") or "").strip()
+            job_url = str(entry.get("url") or "").strip()
+            if title and job_url:
+                items.append({"title": title, "job_url": job_url})
+        if items:
+            return items
+    return []
+
+
+def _ziprecruiter_card_details(html: str) -> list[dict[str, str]]:
+    """Per-card company/location in the same order as the ItemList entries."""
+    soup = BeautifulSoup(html, "html.parser")
+    details: list[dict[str, str]] = []
+    for card in soup.select("div.job_result_two_pane_v2"):
+        # Each card is rendered twice (mobile + desktop panes) with identical
+        # values, so the first node of each kind is the one to read.
+        company = card.select_one('[data-testid="job-card-company"]')
+        card_location = card.select_one('[data-testid="job-card-location"]')
+        details.append({
+            "company": company.get_text(" ", strip=True) if company else "",
+            "location": card_location.get_text(" ", strip=True) if card_location else "",
+        })
+    return details
+
+
+def _ziprecruiter_posted_dates(html: str) -> dict[str, str]:
+    """Map a posting's `jid` to its exact UTC post timestamp.
+
+    ZipRecruiter's own date filter is day-granular (`days=N`), but the page
+    embeds per-job metadata carrying `rollingPostedAtUtc` to the second, which
+    lets callers apply an exact hours_old window client-side.
+
+    The metadata is JSON escaped inside a JS string, and its objects contain
+    nested `listingKey` fields, so splitting on those to group each job's
+    values does NOT work. What is stable is the ordering: every job emits its
+    timestamp before the `openSeatId` that matches the ld+json `jid`, so each
+    seat id pairs with the nearest preceding timestamp.
+    """
+    unescaped = html.replace('\\"', '"')
+    stamps = [(m.start(), m.group(1)) for m in _ZIPRECRUITER_POSTED_RE.finditer(unescaped)]
+    if not stamps:
+        return {}
+    offsets = [offset for offset, _ in stamps]
+    dates: dict[str, str] = {}
+    for match in _ZIPRECRUITER_SEAT_RE.finditer(unescaped):
+        index = bisect.bisect_left(offsets, match.start()) - 1
+        if index >= 0:
+            dates.setdefault(match.group(1), stamps[index][1])
+    return dates
+
+
+def parse_ziprecruiter_search_html(html: str, fallback_location: str = "") -> list[dict[str, Any]]:
+    """Turn one ZipRecruiter search page into job rows."""
+    items = _ziprecruiter_ld_json_items(html)
+    if not items:
+        return []
+    details = _ziprecruiter_card_details(html)
+    posted_dates = _ziprecruiter_posted_dates(html)
+    # Enrichment is positional, so it is only trustworthy when every ItemList
+    # entry has exactly one card. A mismatch (sponsored slots, partial render)
+    # would silently attach the wrong company to a job, which is worse than
+    # shipping the row without one.
+    aligned = details if len(details) == len(items) else []
+
+    rows: list[dict[str, Any]] = []
+    for index, item in enumerate(items):
+        detail = aligned[index] if index < len(aligned) else {}
+        row = {
+            "title": fix_text_encoding(item["title"]),
+            "company": fix_text_encoding(detail.get("company") or ""),
+            "location": fix_text_encoding(detail.get("location") or "") or fallback_location,
+            "job_url": item["job_url"],
+            "_source_site": "zip_recruiter",
+            "_source_sites": ["zip_recruiter"],
+        }
+        jid = _ZIPRECRUITER_JID_RE.search(item["job_url"])
+        if jid and jid.group(1) in posted_dates:
+            row["date_posted"] = posted_dates[jid.group(1)]
+        rows.append(row)
+    return rows
+
+
+def _ziprecruiter_fetch_page(
+    params: dict[str, Any],
+    proxy_pool: list[str],
+    cursor: int,
+) -> str | None:
+    """Fetch one search page, rotating TLS fingerprints until one clears."""
+    from curl_cffi import requests as curl_requests
+
+    last_attempt = len(ZIPRECRUITER_IMPERSONATIONS) - 1
+    for attempt, impersonate in enumerate(ZIPRECRUITER_IMPERSONATIONS):
+        proxy = pick_proxy(proxy_pool, cursor + attempt)
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+        try:
+            session = curl_requests.Session(impersonate=impersonate)
+            # The homepage hands out the __cf_bm clearance cookie that the
+            # search route expects; without it the first search request is
+            # noticeably more likely to draw a challenge.
+            try:
+                session.get(ZIPRECRUITER_HOME_URL, timeout=20, proxies=proxies)
+            except Exception:
+                pass
+            response = session.get(
+                ZIPRECRUITER_SEARCH_URL, params=params, timeout=30, proxies=proxies
+            )
+            if response.status_code == 200:
+                return response.content.decode("utf-8", "replace")
+            print(f"[ziprecruiter] {impersonate} -> HTTP {response.status_code}")
+        except Exception as exc:
+            print(f"[ziprecruiter] {impersonate} request failed: {exc}")
+        if attempt < last_attempt:
+            time.sleep(retry_backoff_delay(attempt))
+    return None
+
+
 def scrape_ziprecruiter_postings(
     keywords: str,
     location: str,
     results_wanted: int = 20,
+    hours_old: int = 168,
+    radius_miles: int = 25,
 ) -> list[dict[str, Any]]:
-    """Scrape ZipRecruiter using Playwright to bypass JS/Cloudflare protections.
+    """Scrape ZipRecruiter search results over its Cloudflare-fronted HTML.
 
-    Falls back to returning [] if Playwright is not available, or if the
-    app-wide browser dispatch slot (browser_service) can't be acquired in
-    time — this launch used to be invisible to that gate, so a second
-    Chromium process could spin up while a priority resume scrape waited.
+    Returns [] when curl_cffi is unavailable or every fingerprint is refused.
     """
     try:
-        from playwright.sync_api import sync_playwright
+        import curl_cffi  # noqa: F401
     except Exception:
+        print("[ziprecruiter] curl_cffi is not installed; skipping")
         return []
 
-    from services import browser_service
+    proxy_pool = parse_proxy_pool(os.getenv("JOBSPY_PROXIES"))
+    target = max(1, int(results_wanted or 1))
+    max_pages = min(
+        ZIPRECRUITER_MAX_PAGES,
+        -(-target // ZIPRECRUITER_RESULTS_PER_PAGE),
+    )
 
-    if not browser_service.acquire_browser_work_slot(
-        "ziprecruiter", 20.0, f"search {keywords!r}"
-    ):
-        return []
-    try:
-        return _scrape_ziprecruiter_with_playwright(
-            sync_playwright, keywords, location, results_wanted
-        )
-    finally:
-        browser_service.release_browser_work_slot()
+    base_params: dict[str, Any] = {"search": keywords, "location": location}
+    if radius_miles:
+        base_params["radius"] = max(1, int(radius_miles))
+    if hours_old:
+        # ZipRecruiter's filter is day-granular, so hours are converted UP to
+        # whole days: a 30h window must ask for 2 days or the 24-30h postings
+        # never arrive. The requested window is then narrowed back to the exact
+        # hour below, against each posting's real timestamp.
+        base_params["days"] = max(1, min(30, -(-int(hours_old) // 24)))
 
-
-def _scrape_ziprecruiter_with_playwright(
-    sync_playwright: Any,
-    keywords: str,
-    location: str,
-    results_wanted: int,
-) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    try:
-        search_url = (
-            "https://www.ziprecruiter.com/candidate/search?" +
-            f"search={urlencode({'': keywords})[1:]}&location={urlencode({'': location})[1:]}"
-        )
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
-            # Navigate without waiting for networkidle (Cloudflare may block that); wait for DOM
-            # Visit homepage first to establish cookies and bypass challenge
-            try:
-                page.goto('https://www.ziprecruiter.com/', wait_until='domcontentloaded', timeout=30000)
-                page.wait_for_timeout(1500)
-            except Exception:
-                pass
-            page.goto(search_url, wait_until='domcontentloaded', timeout=45000)
-
-            # Try several selectors; job link anchors are preferred
-            selectors = ['a[data-qa="job-link"]', 'a.job_link', 'article.job_result', 'div.justified-job-card']
-            elements = []
-            for sel in selectors:
-                try:
-                    page.wait_for_selector(sel, timeout=10000)
-                    elements = page.query_selector_all(sel)
-                except Exception:
-                    elements = []
-                if elements:
-                    break
-
-            # If nothing found yet, try scrolling to trigger lazy load
-            if not elements:
-                try:
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(2000)
-                except Exception:
-                    pass
-                for sel in selectors:
-                    try:
-                        page.wait_for_selector(sel, timeout=5000)
-                        elements = page.query_selector_all(sel)
-                    except Exception:
-                        elements = []
-                    if elements:
-                        break
-
-            for el in (elements[:results_wanted] if elements else []):
-                try:
-                    href = el.get_attribute('href') or ''
-                    title = el.inner_text().strip() or ''
-                    title = fix_text_encoding(title)
-                    # If anchor is nested, try to extract title from child
-                    if not title:
-                        child = el.query_selector('h3') or el.query_selector('h2')
-                        title = child.inner_text().strip() if child else ''
-
-                    # If we got an article/div, try to find nested link
-                    if href and not href.startswith('http'):
-                        href = 'https://www.ziprecruiter.com' + href
-
-                    company = ''
-                    try:
-                        comp = el.query_selector('[data-qa="company-name"]') or el.query_selector('.company')
-                        if comp:
-                            company = comp.inner_text().strip()
-                            company = fix_text_encoding(company)
-                    except Exception:
-                        company = ''
-
-                    location_text = ''
-                    try:
-                        loc = el.query_selector('[data-qa="location"]') or el.query_selector('.location')
-                        if loc:
-                            location_text = loc.inner_text().strip()
-                            location_text = fix_text_encoding(location_text)
-                    except Exception:
-                        location_text = location
-
-                    if title and href:
-                        results.append({
-                            'title': title,
-                            'company': company,
-                            'location': location_text or location,
-                            'job_url': href,
-                            '_source_site': 'zip_recruiter',
-                            '_source_sites': ['zip_recruiter'],
-                        })
-                except Exception:
-                    continue
-            try:
-                browser.close()
-            except Exception:
-                pass
-    except Exception:
-        return []
-    return results
+    rows: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for page in range(1, max_pages + 1):
+        params = dict(base_params)
+        if page > 1:
+            params["page"] = page
+        html = _ziprecruiter_fetch_page(params, proxy_pool, page)
+        if not html:
+            break
+        page_rows = parse_ziprecruiter_search_html(html, location)
+        if not page_rows:
+            break
+        for row in page_rows:
+            if row["job_url"] in seen_urls:
+                continue
+            seen_urls.add(row["job_url"])
+            # Exact-hour trim of the day-granular window. Rows whose timestamp
+            # could not be recovered carry no date_posted and are kept, matching
+            # _posting_age_ok's treatment of dateless rows elsewhere.
+            if hours_old and not _posting_age_ok(row, int(hours_old)):
+                continue
+            rows.append(row)
+            if len(rows) >= target:
+                return rows
+    return rows
 
 
 # Cross-channel scrape dedup: two channels watching the SAME criteria used to
@@ -2006,12 +1826,19 @@ def _scrape_ziprecruiter_with_playwright(
 # applied after the cache — for just under the 60s minimum refresh interval.
 # A per-key in-flight lock makes a simultaneous second caller wait for the
 # first scrape's result instead of duplicating it.
-JOB_SCRAPE_CACHE_TTL_SECONDS = 55.0
+# Stretched with the scrape budget above: if a scrape takes longer than this
+# TTL the cache can never hit, and every channel re-runs the identical scrape --
+# exactly the duplication this cache exists to prevent. On slow hardware a
+# fixed 55s is the cliff that triggers it.
+JOB_SCRAPE_CACHE_TTL_SECONDS = capacity.timeout(55.0)
 _scrape_cache: dict[tuple, tuple[float, list[dict[str, Any]]]] = {}
 _scrape_cache_lock = threading.Lock()
 _scrape_key_locks: dict[tuple, threading.Lock] = {}
 
 
+# orphan-ok: test-isolation reset for module-global state, like
+# ats_service.clear_dead_slugs. Production has a TTL for this
+# (JOB_SCRAPE_CACHE_TTL_SECONDS) and never needs to drop the cache wholesale.
 def clear_job_scrape_cache() -> None:
     with _scrape_cache_lock:
         _scrape_cache.clear()
@@ -2029,7 +1856,6 @@ def scrape_job_postings(
     country_indeed: str = "USA",
     source_url: str | None = None,
     allow_north_america: bool = False,
-    jobbank_search_query: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
     if site_names:
         normalized_sites = normalize_requested_sites(site_names, configured_python_exe)
@@ -2048,7 +1874,6 @@ def scrape_job_postings(
         radius_miles,
         country_indeed,
         allow_north_america,
-        json.dumps(jobbank_search_query, sort_keys=True) if jobbank_search_query else None,
     )
     with _scrape_cache_lock:
         key_lock = _scrape_key_locks.setdefault(cache_key, threading.Lock())
@@ -2069,7 +1894,6 @@ def scrape_job_postings(
                 radius_miles,
                 country_indeed,
                 allow_north_america,
-                jobbank_search_query,
             )
             with _scrape_cache_lock:
                 _scrape_cache[cache_key] = (time.monotonic(), [dict(row) for row in filtered_rows])
@@ -2103,7 +1927,6 @@ def _scrape_filtered_rows_uncached(
     radius_miles: int,
     country_indeed: str,
     allow_north_america: bool,
-    jobbank_search_query: dict[str, list[str]] | None,
 ) -> list[dict[str, Any]]:
 
     raw: list[dict[str, Any]] = []
@@ -2112,18 +1935,6 @@ def _scrape_filtered_rows_uncached(
     from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 
     scrape_tasks: list[Any] = []
-
-    if JOBBANK_CANADA_SITE in normalized_sites:
-        def _jobbank_task():
-            with _site_scrape_slot(JOBBANK_CANADA_SITE) as acquired:
-                if not acquired:
-                    print(f"Skipping {JOBBANK_CANADA_SITE}: concurrency limit reached")
-                    return []
-                return scrape_jobbank_canada_postings(
-                    keywords=keywords, location=location,
-                    results_wanted=target_count, search_query=jobbank_search_query,
-                )
-        scrape_tasks.append(_jobbank_task)
 
     if "glassdoor" in normalized_sites:
         def _glassdoor_task():
@@ -2144,7 +1955,10 @@ def _scrape_filtered_rows_uncached(
                 if not acquired:
                     print("Skipping zip_recruiter: concurrency limit reached")
                     return []
-                return scrape_ziprecruiter_postings(keywords, location, target_count)
+                return scrape_ziprecruiter_postings(
+                    keywords, location, target_count,
+                    hours_old=hours_old, radius_miles=radius_miles,
+                )
         scrape_tasks.append(_ziprec_task)
 
     from services.ats_service import ATS_PLATFORMS as _ATS_PLATFORMS, _matches_keywords, _matches_location
@@ -2156,7 +1970,15 @@ def _scrape_filtered_rows_uncached(
             today = date.today()
             seen_keys: set[str] = set()
             cached: list[dict[str, Any]] = []
-            for delta in (0, 1):
+            # Read enough archive days to cover the channel's own freshness
+            # window. A hardcoded (0, 1) capped every channel at 48h no matter
+            # what it asked for -- hours_old=72 silently became 48, and the
+            # rows were dropped before _posting_age_ok ever saw them, so the
+            # setting looked honoured while two thirds of its range was
+            # unreachable. The extra day covers the lag between a job being
+            # posted and the cycle that scrapes it writing that day's log.
+            span = max(2, -(-int(hours_old or 0) // 24) + 1)
+            for delta in range(span):
                 d = (today - timedelta(days=delta)).strftime("%Y-%m-%d")
                 for row in load_daily_log(d):
                     key = row.get("job_url") or row.get("_dedup_key") or ""
@@ -2173,7 +1995,7 @@ def _scrape_filtered_rows_uncached(
                 ]
                 if cached_rows:
                     raw.extend(cached_rows)
-                    print(f"[jba-log] {len(cached_rows)} ATS jobs from 2-day window ({len(cached)} total)")
+                    print(f"[jba-log] {len(cached_rows)} ATS jobs from {span}-day window ({len(cached)} total)")
         except Exception as exc:
             print(f"[jba-log] Failed to read daily log: {exc}")
 
@@ -2219,7 +2041,11 @@ def _scrape_filtered_rows_uncached(
         # subprocess). This nested pool is invisible to PriorityWorkScheduler's
         # worker accounting (the caller occupies ONE scheduler slot), so the
         # cap is what keeps the hidden concurrency honest.
-        with ThreadPoolExecutor(max_workers=min(6, len(scrape_tasks))) as executor:
+        # Each task is a DIFFERENT site, so widening this adds parallel sites
+        # rather than more requests per site -- a local resource cost, hence an
+        # explicit `maximum` that lets it grow on bigger hardware.
+        pool_size = min(capacity.workers(6, minimum=2, maximum=12), len(scrape_tasks))
+        with ThreadPoolExecutor(max_workers=pool_size) as executor:
             futures = [executor.submit(t) for t in scrape_tasks]
             for future in _as_completed(futures):
                 try:
@@ -2245,7 +2071,6 @@ def scrape_job_descriptions_from_all_sites(
     radius_miles: int = 25,
     country_indeed: str = "AUTO",
     allow_north_america: bool = False,
-    jobbank_search_query: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Scrape job descriptions across all supported sites, including Indeed.
 
@@ -2275,7 +2100,6 @@ def scrape_job_descriptions_from_all_sites(
             radius_miles=radius_miles,
             country_indeed=country_indeed,
             allow_north_america=allow_north_america,
-            jobbank_search_query=jobbank_search_query,
         )
 
         for item in site_items:
@@ -2321,16 +2145,6 @@ def scrape_jobs_from_board_url(url: str, configured_python_exe: str | None = Non
     if not site:
         return []
 
-    if site == JOBBANK_CANADA_SITE:
-        parsed = urlparse(url)
-        if "/jobsearch/jobposting/" in parsed.path.lower():
-            return scrape_jobbank_canada_posting(url)
-
-        query = parse_qs(parsed.query)
-        term = first_query_value(query, "searchstring", "q", "keywords", default="jobs")
-        location = first_query_value(query, "locationstring", "l", "location", default="Canada")
-        return scrape_jobbank_canada_postings(term, location, max_items, search_query=query)
-
     query = parse_qs(urlparse(url).query)
     term = first_query_value(query, "q", "keywords", default="python developer")
     location = first_query_value(query, "l", "location", default="United States")
@@ -2350,9 +2164,35 @@ def scrape_jobs_from_board_url(url: str, configured_python_exe: str | None = Non
     )
 
 
-def matches_role_filters(title: str, role_filters: list[str]) -> bool:
+def matches_role_filters(
+    title: str, role_filters: list[str], description: str = "", employment_type: str = ""
+) -> bool:
+    """Does this posting satisfy the channel's role filter?
+
+    Two passes, unioned. The keyword pass below is the original: a substring
+    search over the title. The level pass asks job_level.classify, which reads
+    the term ("Winter 2027") and the platform's own employment_type -- the only
+    signals on a posting whose title carries no level word at all. "Software
+    Developer (Winter 2027)" is a student posting that the keyword pass can
+    never see, and it is the shape this whole classifier was built for.
+
+    Unioned rather than replaced on purpose: every title that matched before
+    still matches, so this can only add results. The keyword pass also stays
+    the authority on filter names the level mapping does not know.
+    """
     if not role_filters:
         return True
+
+    try:
+        from services import job_level
+
+        if job_level.matches_role_filter(title, role_filters, description, employment_type):
+            return True
+    except Exception:
+        # The keyword pass below is a complete implementation on its own, so a
+        # failure here costs recall, never correctness.
+        pass
+
     import re as _re
     normalized = title.lower()
     keyword_map = {
@@ -2406,7 +2246,7 @@ def configure_job_service(config: Any) -> None:
     Call once from app.py after load_config().
     """
     global SEMANTIC_PLUGIN_ENABLED, SEMANTIC_PLUGIN_MODEL_NAME, SEMANTIC_PLUGIN_THRESHOLD, SEMANTIC_MATCH_TARGET
-    global SEMANTIC_DESCRIPTION_CHAR_LIMIT, JOBBANK_MAX_SEARCH_PAGES, JOBBANK_USER_AGENT_OVERRIDE
+    global SEMANTIC_DESCRIPTION_CHAR_LIMIT
     global DEDUP_MAX_FIFO_FILES, DEDUP_MAX_ENTRIES_PER_FILE, DEDUP_MONTHS_THRESHOLD, DEDUP_SEEN_LINKS_CAP
     global HTTP_REQUEST_TIMEOUT, SUBPROCESS_SCRAPE_TIMEOUT
     global SITE_CONCURRENCY_LIMIT, SITE_SEMAPHORE_TIMEOUT
@@ -2416,14 +2256,23 @@ def configure_job_service(config: Any) -> None:
     SEMANTIC_PLUGIN_THRESHOLD = float(getattr(config, "semantic_threshold", SEMANTIC_PLUGIN_THRESHOLD))
     SEMANTIC_MATCH_TARGET = str(getattr(config, "semantic_match_target", SEMANTIC_MATCH_TARGET)).strip().lower()
     SEMANTIC_DESCRIPTION_CHAR_LIMIT = int(getattr(config, "semantic_description_char_limit", SEMANTIC_DESCRIPTION_CHAR_LIMIT))
-    JOBBANK_MAX_SEARCH_PAGES = int(getattr(config, "jobbank_max_search_pages", JOBBANK_MAX_SEARCH_PAGES))
-    JOBBANK_USER_AGENT_OVERRIDE = str(getattr(config, "jobbank_user_agent", JOBBANK_USER_AGENT))
     DEDUP_MAX_FIFO_FILES = int(getattr(config, "dedup_max_fifo_files", DEDUP_MAX_FIFO_FILES))
     DEDUP_MAX_ENTRIES_PER_FILE = int(getattr(config, "dedup_max_entries_per_file", DEDUP_MAX_ENTRIES_PER_FILE))
     DEDUP_MONTHS_THRESHOLD = int(getattr(config, "dedup_months_threshold", DEDUP_MONTHS_THRESHOLD))
-    DEDUP_SEEN_LINKS_CAP = int(getattr(config, "dedup_seen_links_cap", DEDUP_SEEN_LINKS_CAP))
+    # Scaled down on small hosts: this set is held per watched channel, and the
+    # send path builds a second canonicalized copy each cycle, so the configured
+    # value is really "memory per channel". Down-only -- a bigger box gains
+    # nothing user-visible from remembering more links.
+    DEDUP_SEEN_LINKS_CAP = capacity.scaled_cap(
+        int(getattr(config, "dedup_seen_links_cap", DEDUP_SEEN_LINKS_CAP)), minimum=5_000
+    )
     HTTP_REQUEST_TIMEOUT = int(getattr(config, "http_timeout_seconds", HTTP_REQUEST_TIMEOUT))
-    SUBPROCESS_SCRAPE_TIMEOUT = int(getattr(config, "subprocess_scrape_timeout_seconds", SUBPROCESS_SCRAPE_TIMEOUT))
+    # Stretched on slow hardware: this kills a JobSpy subprocess mid-flight, so
+    # a budget that is generous on the reference box loses ALL results from a
+    # site on a Pi rather than merely some.
+    SUBPROCESS_SCRAPE_TIMEOUT = int(capacity.timeout(
+        int(getattr(config, "subprocess_scrape_timeout_seconds", SUBPROCESS_SCRAPE_TIMEOUT))
+    ))
     SITE_CONCURRENCY_LIMIT = int(getattr(config, "site_concurrency_limit", SITE_CONCURRENCY_LIMIT))
     SITE_SEMAPHORE_TIMEOUT = int(getattr(config, "site_semaphore_timeout_seconds", SITE_SEMAPHORE_TIMEOUT))
     with _site_semaphores_lock:
@@ -2433,9 +2282,22 @@ def configure_job_service(config: Any) -> None:
     semantic_plugin_available.cache_clear()
 
 
+# The MiniLM weights are ~90 MB, but the torch runtime around them pushes real
+# RSS to several hundred MB. On a 1 GB VPS that is the difference between the
+# bot running and the OOM killer taking it, so below this the semantic path
+# stays off and matching falls back to keywords.
+SEMANTIC_MIN_MEMORY_GB: float = 2.0
+
+
 @lru_cache(maxsize=1)
 def semantic_plugin_available() -> bool:
     if not SEMANTIC_PLUGIN_ENABLED:
+        return False
+    if not capacity.can_afford(SEMANTIC_MIN_MEMORY_GB):
+        print(
+            f"Semantic matching disabled: needs ~{SEMANTIC_MIN_MEMORY_GB:g}GB, "
+            f"host has {capacity.describe()}. Falling back to keyword matching."
+        )
         return False
     try:
         import sentence_transformers  # noqa: F401

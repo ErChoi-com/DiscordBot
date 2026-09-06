@@ -1,11 +1,16 @@
 """e2e pipeline: read jobs-goon channel settings -> scrape listing -> resume -> PDF + listing txt.
 
 Usage:
-  python .e2e_pipeline.py              # auto-picks first enabled job channel
-  python .e2e_pipeline.py <channel_id> # targets a specific channel's saved settings
+  python .e2e_pipeline.py                    # auto-picks first enabled job channel
+  python .e2e_pipeline.py <channel_id>       # targets a specific channel's saved settings
+  python .e2e_pipeline.py "(use the ABB one)"  # steers listing choice AND the model
+
+Args are order-free: an integer is a channel id, a "(...)" span is a free-form
+directive, anything else is a profile key.
 """
 from __future__ import annotations
 
+import re
 import sys
 import time
 from pathlib import Path
@@ -46,10 +51,61 @@ def pick_channel_settings(store: RuntimeStore, target_channel_id: int | None) ->
     return None, dict(JOB_DEFAULTS)
 
 
+def pick_listing(items: list[dict], directive: str) -> dict:
+    """Choose the listing to tailor against, honouring a ``(...)`` directive.
+
+    Without a directive the first item carrying a description wins (the LLM
+    needs real content). With one, prefer a listing whose title/company/site
+    matches the directive's words — this is what makes
+    ``python .e2e_pipeline.py "(use the ABB listing)"`` select ABB instead of
+    whatever the scraper happened to return first.
+    """
+    if not items:
+        raise ValueError("no listings to choose from")
+    with_description = [i for i in items if i.get("description")]
+    pool = with_description or items
+    words = [w for w in re.findall(r"[a-z0-9.+#-]{3,}", directive.lower()) if w not in _PICK_STOPWORDS]
+    if words:
+        # Score across ALL items, not just the described ones: a directive
+        # naming a listing that happens to lack a description would otherwise
+        # score zero and be silently ignored while the run still prints the
+        # directive as if it had been applied. Ties break toward a listing that
+        # has a description, since the model needs real content.
+        best, best_hits = None, 0
+        for item in items:
+            haystack = " ".join(
+                str(item.get(key) or "") for key in ("title", "site", "site_label", "link")
+            ).lower()
+            hits = sum(1 for w in words if w in haystack)
+            if hits > best_hits or (
+                hits == best_hits > 0
+                and item.get("description")
+                and best is not None
+                and not best.get("description")
+            ):
+                best, best_hits = item, hits
+        if best is not None:
+            if not best.get("description"):
+                print(f"  NOTE: directive matched a listing with no description: {best.get('title')!r}")
+            return best
+        print(f"  NOTE: directive matched no listing; falling back to {pool[0].get('title')!r}")
+    return pool[0]
+
+
+_PICK_STOPWORDS = frozenset({
+    "use", "the", "this", "that", "listing", "posting", "job", "role", "instead",
+    "please", "one", "pick", "choose", "prefer", "and", "for", "with", "from",
+})
+
+
 def main() -> None:
     target_channel_id: int | None = None
     profile_key_override: str | None = None
+    directive = ""
     for arg in sys.argv[1:]:
+        if arg.startswith("(") and arg.endswith(")"):
+            directive = " ".join(arg[1:-1].split())
+            continue
         try:
             target_channel_id = int(arg)
         except ValueError:
@@ -109,12 +165,11 @@ def main() -> None:
     # ── STEP 1: Scrape one listing ────────────────────────────────────────────
     raw_sites = job_settings.get("sites") or ["all"]
     if "all" in raw_sites:
-        expanded = job_service.all_supported_job_sites(config.jobspy_python_exe)
-        site_names = [s for s in expanded if s != job_service.JOBBANK_CANADA_SITE]
+        site_names = job_service.all_supported_job_sites(config.jobspy_python_exe)
     else:
-        site_names = [s for s in raw_sites if s != job_service.JOBBANK_CANADA_SITE]
+        site_names = list(raw_sites)
     if not site_names:
-        site_names = [s for s in job_service.FALLBACK_JOBSPY_SITES if s != job_service.JOBBANK_CANADA_SITE]
+        site_names = list(job_service.FALLBACK_JOBSPY_SITES)
 
     print(f"\n{SEP}")
     print(f"STEP 1  Scraping listing from: {', '.join(site_names)}...")
@@ -132,8 +187,9 @@ def main() -> None:
         print(f"ERROR: No listings returned from {', '.join(site_names)}.")
         sys.exit(1)
 
-    # Prefer items with a description so the LLM has real content to tailor against.
-    item = next((i for i in items if i.get("description")), items[0])
+    item = pick_listing(items, directive)
+    if directive:
+        print(f"\n  Directive      : {directive}")
     print(f"\n--- listing ---")
     for key, value in item.items():
         print(f"  {key}: {value}")
@@ -161,6 +217,7 @@ def main() -> None:
         [profile_dir / "baseinfo.txt"],
         [profile_dir / "instructions.txt"],
         template_path,
+        user_directive=directive,
     )
     elapsed_llm = time.monotonic() - t0
 

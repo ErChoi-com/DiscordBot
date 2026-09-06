@@ -168,8 +168,135 @@ def test_all_health_embed_reports_real_queue_depth_from_scheduler():
             scheduler_stats=scheduler.stats(),
         )
         queue_field = next(f for f in embed.fields if f.name == "Work Queue")
-        assert "Queued: **2** (1 interactive / 1 background)" in queue_field.value
-        assert "Active: **1**/1 workers" in queue_field.value
+        assert "1 running · 0 idle · 2 waiting · 1 workers" in queue_field.value
+        assert "Waiting: 1 interactive · 0 boosted · 1 background" in queue_field.value
+        # Full pool with work still waiting is the state that hung interactive
+        # commands, so it must read as an alert rather than as ordinary load.
+        assert queue_field.value.startswith("🔴")
+        assert "**Saturated**" in queue_field.value
+        assert "Running:" in queue_field.value
+        # Internal tier names must not leak into the readout; the conventional
+        # term stands in for them.
+        assert "PROMOTED" not in queue_field.value
+        assert "aged" not in queue_field.value
+        # Nothing was cancelled here, so the warning line stays absent -- but
+        # the zero is still reported in the totals.
+        assert "0 cancelled" in queue_field.value
     finally:
         release.set()
         scheduler.shutdown()
+
+
+def test_all_health_embed_surfaces_work_abandoned_before_it_ran():
+    """Dropped work has no caller left to report it, so the embed is the only
+    place it can surface. Driven through a real scheduler and a real
+    cancellation rather than a hand-written stats dict."""
+    scheduler = PriorityWorkScheduler(max_workers=1, reserved_interactive=0)
+    try:
+        started = threading.Event()
+        release = threading.Event()
+
+        def _blocker():
+            started.set()
+            release.wait(timeout=5)
+
+        blocker = scheduler.submit(_blocker, tier=BACKGROUND)
+        assert started.wait(timeout=5)
+
+        doomed = scheduler.submit(time.sleep, 0, tier=BACKGROUND)
+        assert doomed.cancel() is True
+
+        release.set()
+        blocker.result(timeout=5)
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and scheduler.stats()["dropped"] == 0:
+            time.sleep(0.01)
+
+        tracker = WatcherHealthTracker()
+        embed = build_all_health_embed(
+            tracker,
+            channel_job_tasks={},
+            channel_names={},
+            active_job_watchers=0,
+            active_reddit_watchers=0,
+            scheduler_stats=scheduler.stats(),
+        )
+        queue_field = next(f for f in embed.fields if f.name == "Work Queue")
+        assert "**1 cancelled**" in queue_field.value
+    finally:
+        release.set()
+        scheduler.shutdown()
+
+
+def test_queue_field_reports_every_scheduler_number():
+    """The readout is a status surface, not a summary: every counter
+    scheduler.stats() exposes has to appear somewhere, including the zeros.
+    An earlier pass hid empty categories for brevity, which made the visible
+    numbers stop adding up to the stated totals."""
+    from services.health import _format_queue_field
+
+    stats = {
+        "queued": 3, "queued_interactive": 1, "queued_promoted": 2,
+        "queued_background": 0, "active": 5, "workers": 12,
+        "reserved_interactive": 2, "completed": 776, "dropped": 4,
+        "promoted": 117,
+        "in_flight": [{"label": "ats_scrape:lever", "age_seconds": 90}],
+    }
+    value = _format_queue_field(stats)
+
+    assert "5 running" in value
+    assert "7 idle" in value          # workers - active, derived but stated
+    assert "3 waiting" in value
+    assert "12 workers (2 reserved)" in value
+    assert "ats_scrape:lever" in value
+    # Zero categories are printed, so the split visibly sums to the total.
+    assert "1 interactive · 2 boosted · 0 background" in value
+    assert "776 completed" in value
+    assert "4 cancelled" in value
+    assert "117 boosted" in value
+    # Compact: the whole readout stays inside a handful of short lines.
+    assert len(value.splitlines()) <= 5, value
+
+
+def test_queue_field_names_tiers_in_conventional_terms():
+    """The scheduler's PROMOTED tier is priority aging -- a task whose priority
+    was raised because it had waited too long. "aged-up" named the mechanism
+    and meant nothing without the source; "priority-boosted" is the standard
+    term and describes what happened to the task."""
+    from services.health import _format_queue_field
+
+    stats = {
+        "queued": 3, "queued_interactive": 1, "queued_promoted": 2,
+        "queued_background": 0, "active": 4, "workers": 12,
+        "reserved_interactive": 2, "completed": 10, "dropped": 0,
+        "promoted": 99, "in_flight": [],
+    }
+    value = _format_queue_field(stats)
+    assert "boosted" in value
+    assert "aged" not in value
+    assert "bumped" not in value
+    # Internal tier constants never reach the reader.
+    assert "PROMOTED" not in value
+    assert "INTERACTIVE" not in value
+
+
+def test_queue_field_reports_long_running_ages_in_readable_units():
+    """The runaway scrapes this surface exists for sit in the tens of
+    thousands of seconds, where the raw number means nothing at a glance."""
+    from services.health import compact_age, _format_queue_field
+
+    assert compact_age(42) == "42s"
+    assert compact_age(312) == "5m"
+    assert compact_age(24956) == "6.9h"
+
+    saturated = {
+        "queued": 2, "queued_interactive": 1, "queued_promoted": 1,
+        "queued_background": 0, "active": 12, "workers": 12,
+        "reserved_interactive": 2, "completed": 776, "dropped": 0,
+        "promoted": 117,
+        "in_flight": [{"label": "ats_scrape:workable", "age_seconds": 24956}],
+    }
+    value = _format_queue_field(saturated)
+    assert "`ats_scrape:workable` 6.9h" in value
+    assert "24956" not in value

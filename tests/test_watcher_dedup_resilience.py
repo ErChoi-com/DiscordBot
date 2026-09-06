@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,8 +17,83 @@ from state.store import RuntimeStore
 from watchers.manager import WatcherManager
 
 
+@pytest.fixture(autouse=True)
+def _isolate_job_archive(monkeypatch):
+    """Keep the watcher send path out of the real job archive.
+
+    The send path calls services.jba.merge_data.log_jobs, whose storage is a
+    module-level absolute path to data/jba/jobs -- the real, git-committed
+    archive the bot pushes. Without this, these tests wrote their synthetic
+    postings (example.invalid links) into production data AND became
+    order-dependent: log_jobs dedups, so once a fixture job was logged for
+    today, the next run found it already archived, sent nothing, and failed
+    the "expected watcher to send at least one message" assertion.
+
+    Archiving is not what these tests are about, so it is stubbed rather than
+    redirected; the calls are still recorded in case a test wants them.
+    """
+    logged: list[list[dict]] = []
+    monkeypatch.setattr(
+        "services.jba.merge_data.log_jobs",
+        lambda jobs, date_str=None: (logged.append(list(jobs)), len(jobs))[1],
+    )
+    return logged
+
+
 def _health() -> WatcherHealthTracker:
     return WatcherHealthTracker()
+
+
+async def _drive_one_job_watcher_iteration(
+    manager: WatcherManager,
+    store: RuntimeStore,
+    channel_id: int,
+    *,
+    timeout: float = 10.0,
+) -> None:
+    """Run exactly one job-watcher iteration, then stop the watcher.
+
+    Deliberately not a fixed number of ``await asyncio.sleep(0)`` ticks. The
+    iteration hands both the scrape and the semantic filter to a
+    PriorityWorkScheduler thread (``manager._tracked_to_thread``), so how many
+    event-loop ticks it needs is decided by when a worker thread gets scheduled
+    -- not by anything the test controls. A ``for _ in range(10)`` spin
+    therefore passes on an idle machine and fails under a loaded full-suite
+    run, where the whole suite's scheduler threads are competing. That was a
+    real intermittent failure, not a theoretical one.
+
+    Wait on the iteration's own completion signal instead: the health tracker
+    records the scrape once every send has been attempted, and it does so on
+    the error path as well as the success path -- which matters, because one
+    caller here asserts that *nothing* was sent.
+
+    The watcher cannot be awaited to completion: its loop ends with
+    ``asyncio.sleep(max(60, refresh_seconds))`` before it re-reads ``enabled``,
+    so it is still cancelled, just after the work is observably done.
+    """
+    task = asyncio.create_task(manager._run_job_watcher(channel_id))
+    await asyncio.sleep(0)
+    store.channel_job_settings[channel_id]["enabled"] = False
+
+    def _iteration_recorded() -> bool:
+        health = manager.health.get_job_health(channel_id)
+        return health is not None and health.total_scrapes >= 1
+
+    deadline = time.monotonic() + timeout
+    while not _iteration_recorded() and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+
+    finished = _iteration_recorded()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Asserted after the cancel so a timeout still tears the task down rather
+    # than leaking a live watcher into the rest of the suite.
+    assert finished, (
+        f"job watcher did not complete an iteration within {timeout}s; "
+        "the assertions below would be reading state that was never written"
+    )
 
 
 class _DummyClient:
@@ -515,7 +591,6 @@ def test_job_watcher_records_seen_and_dedup_only_after_successful_send(tmp_path:
             "semantic_threshold": 0.1,
             "refresh_seconds": 60,
             "allow_north_america": False,
-            "jobbank_native_query": "",
         }
     }
 
@@ -539,17 +614,7 @@ def test_job_watcher_records_seen_and_dedup_only_after_successful_send(tmp_path:
     monkeypatch.setattr(job_service, "scrape_job_postings", _fake_scrape)
     monkeypatch.setattr(job_service, "matches_search_parameters_semantic", lambda *args, **kwargs: True)
 
-    async def _run_once() -> None:
-        task = asyncio.create_task(manager._run_job_watcher(channel_id))
-        await asyncio.sleep(0)
-        store.channel_job_settings[channel_id]["enabled"] = False
-        for _ in range(10):
-            await asyncio.sleep(0)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    asyncio.run(_run_once())
+    asyncio.run(_drive_one_job_watcher_iteration(manager, store, channel_id))
 
     assert channel.sent, "expected watcher to send at least one message"
     assert "https://example.invalid/job/1" in store.channel_job_seen.get(channel_id, set())
@@ -576,7 +641,6 @@ def test_job_watcher_does_not_record_seen_or_dedup_when_send_fails(tmp_path: Pat
             "semantic_threshold": 0.1,
             "refresh_seconds": 60,
             "allow_north_america": False,
-            "jobbank_native_query": "",
         }
     }
 
@@ -600,17 +664,7 @@ def test_job_watcher_does_not_record_seen_or_dedup_when_send_fails(tmp_path: Pat
     monkeypatch.setattr(job_service, "scrape_job_postings", _fake_scrape)
     monkeypatch.setattr(job_service, "matches_search_parameters_semantic", lambda *args, **kwargs: True)
 
-    async def _run_once() -> None:
-        task = asyncio.create_task(manager._run_job_watcher(channel_id))
-        await asyncio.sleep(0)
-        store.channel_job_settings[channel_id]["enabled"] = False
-        for _ in range(10):
-            await asyncio.sleep(0)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    asyncio.run(_run_once())
+    asyncio.run(_drive_one_job_watcher_iteration(manager, store, channel_id))
 
     assert channel.sent == []
     assert "https://example.invalid/job/lockheed" not in store.channel_job_seen.get(channel_id, set())
@@ -638,7 +692,6 @@ def test_job_watcher_dedupes_duplicate_links_within_single_scrape_batch(tmp_path
             "semantic_threshold": 0.1,
             "refresh_seconds": 60,
             "allow_north_america": False,
-            "jobbank_native_query": "",
         }
     }
 
@@ -669,17 +722,7 @@ def test_job_watcher_dedupes_duplicate_links_within_single_scrape_batch(tmp_path
     monkeypatch.setattr(job_service, "scrape_job_postings", _fake_scrape)
     monkeypatch.setattr(job_service, "matches_search_parameters_semantic", lambda *args, **kwargs: True)
 
-    async def _run_once() -> None:
-        task = asyncio.create_task(manager._run_job_watcher(channel_id))
-        await asyncio.sleep(0)
-        store.channel_job_settings[channel_id]["enabled"] = False
-        for _ in range(10):
-            await asyncio.sleep(0)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    asyncio.run(_run_once())
+    asyncio.run(_drive_one_job_watcher_iteration(manager, store, channel_id))
 
     assert len(channel.sent) == 1
     assert channel.sent[0].count("4425828853") == 1
@@ -704,7 +747,6 @@ def test_job_watcher_dedupes_canonical_link_variants_within_batch(tmp_path: Path
             "semantic_threshold": 0.1,
             "refresh_seconds": 60,
             "allow_north_america": False,
-            "jobbank_native_query": "",
         }
     }
 
@@ -734,17 +776,7 @@ def test_job_watcher_dedupes_canonical_link_variants_within_batch(tmp_path: Path
     monkeypatch.setattr(job_service, "scrape_job_postings", _fake_scrape)
     monkeypatch.setattr(job_service, "matches_search_parameters_semantic", lambda *args, **kwargs: True)
 
-    async def _run_once() -> None:
-        task = asyncio.create_task(manager._run_job_watcher(channel_id))
-        await asyncio.sleep(0)
-        store.channel_job_settings[channel_id]["enabled"] = False
-        for _ in range(10):
-            await asyncio.sleep(0)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    asyncio.run(_run_once())
+    asyncio.run(_drive_one_job_watcher_iteration(manager, store, channel_id))
 
     assert len(channel.sent) == 1
     assert "https://www.linkedin.com/jobs/view/4425828853" in store.channel_job_seen.get(channel_id, set())

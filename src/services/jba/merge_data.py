@@ -18,6 +18,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 _JOBS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "jba" / "jobs"
 _DB_PATH = _JOBS_DIR / "jobs.db"
@@ -88,6 +89,87 @@ def _init_tables(conn: sqlite3.Connection) -> None:
         DROP TABLE IF EXISTS seen_urls;
     """)
     conn.commit()
+    _migrate_dedup_keys(conn)
+
+
+# Bumped when _dedup_key starts producing different keys for the same job.
+# Stored in the DB file via PRAGMA user_version, so the migration runs once per
+# database rather than once per thread-local connection.
+_DEDUP_KEY_SCHEMA: int = 1
+
+
+def _migrate_dedup_keys(conn: sqlite3.Connection) -> None:
+    """Rewrite stored dedup_keys after a change to the keying rule.
+
+    Without this, the day _dedup_key starts returning an ATS id key every job
+    still open in the current week looks brand new -- its stored row is filed
+    under the old URL key and can never be matched again -- so the whole live
+    week would be logged a second time. The archive index self-heals via its own
+    schema version; this table does not, because it is not derived data.
+
+    Collisions are expected and are the point: several URL-keyed rows for one
+    job collapse onto a single id key. The earliest sighting survives, matching
+    the first-sighting-wins rule used everywhere else.
+    """
+    if conn.execute("PRAGMA user_version").fetchone()[0] >= _DEDUP_KEY_SCHEMA:
+        return
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except sqlite3.Error:
+        return
+    try:
+        # Re-check inside the write lock: another process may have just run it.
+        if conn.execute("PRAGMA user_version").fetchone()[0] >= _DEDUP_KEY_SCHEMA:
+            conn.execute("ROLLBACK")
+            return
+
+        winners: dict[tuple[str, str], tuple[str, int]] = {}
+        losers: list[int] = []
+        updates: list[tuple[str, int]] = []
+
+        for row_id, date_key, old_key, scraped_at, payload in conn.execute(
+            "SELECT id, date_key, dedup_key, scraped_at, data FROM jobs"
+        ).fetchall():
+            try:
+                record = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                record = None
+            # An unreadable payload keeps its existing key: it cannot be
+            # re-derived, and dropping it would lose the sighting entirely.
+            new_key = _dedup_key(record) if isinstance(record, dict) else ""
+            new_key = new_key or old_key
+
+            slot = (date_key, new_key)
+            best = winners.get(slot)
+            stamp = (str(scraped_at or "~"), row_id)
+            if best is None:
+                winners[slot] = (stamp, row_id)
+            elif stamp < best[0]:
+                losers.append(best[1])
+                winners[slot] = (stamp, row_id)
+            else:
+                losers.append(row_id)
+                continue
+            if new_key != old_key:
+                updates.append((new_key, row_id))
+
+        # Losers first: the UNIQUE(date_key, dedup_key) index would otherwise
+        # reject the very updates that create the collision.
+        if losers:
+            conn.executemany("DELETE FROM jobs WHERE id = ?", [(i,) for i in losers])
+        live = {row_id for _, row_id in winners.values()}
+        if updates:
+            conn.executemany(
+                "UPDATE jobs SET dedup_key = ? WHERE id = ?",
+                [(k, i) for k, i in updates if i in live],
+            )
+        conn.execute(f"PRAGMA user_version = {_DEDUP_KEY_SCHEMA}")
+        conn.execute("COMMIT")
+        if updates or losers:
+            print(f"[jba-log] dedup keys migrated: {len(updates)} rekeyed, {len(losers)} merged")
+    except Exception as exc:
+        conn.execute("ROLLBACK")
+        print(f"[jba-log] dedup key migration failed, left unchanged: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -499,8 +581,109 @@ def _git_commit_monthly(zip_path: Path, month: str, job_count: int) -> bool:
 # Dedup
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# ATS job identity
+# ---------------------------------------------------------------------------
+#
+# On an ATS board the URL is not the identity -- the provider's job id is. Two
+# things follow, and both were getting this wrong before:
+#
+#   * One posting appears under several URLs. Greenhouse serves the same job
+#     from boards.greenhouse.io, job-boards.greenhouse.io and the company's own
+#     domain; iCIMS puts the MUTABLE title slug in the path, so a retitled job
+#     changes URL. Measured on the stored archive: 5,282 iCIMS ids under two or
+#     more slugs, 353 Greenhouse ids under two or more URLs.
+#   * date_posted is not evidence of a re-post. Greenhouse reports updated_at,
+#     which bumps on any edit; a genuine re-post gets a NEW id and therefore a
+#     new key. Measured: 62,503 ids carrying multiple dates, all but one of them
+#     inside the dedup window.
+#
+# Each extractor returns None unless it is certain. None is the safe answer --
+# the caller falls back to the URL key and the record is treated exactly as it
+# was before.
+
+_RE_GH_HOST = re.compile(r"^(?:job-)?boards(?:\.eu)?\.greenhouse\.io$", re.I)
+_RE_GH_PATH = re.compile(r"/(?:embed/job_app|[^/]+/jobs)/(\d+)")
+_RE_ICIMS_HOST = re.compile(r"\.icims\.com$", re.I)
+_RE_ICIMS_PATH = re.compile(r"/jobs/(\d+)(?:/|$)")
+_RE_UUID_PATH = re.compile(
+    r"^/([^/]+)/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+)
+# Workday paths end in /job/{Location}/{Title-Slug}_{REQID}: JR10108, R-12345,
+# 100019283. Requiring >=3 digits stops a title ending in "_2" being read as one.
+_RE_WORKDAY_REQ = re.compile(r"_([A-Za-z]{0,4}-?\d{3,}[\w-]*)$")
+_RE_WORKDAY_NUMERIC = re.compile(r"/(\d{4,})(?:$|\?)")
+_RE_BAMBOO_PATH = re.compile(r"^/careers/(\d+)")
+
+
+def _ats_job_id(job: dict[str, Any]) -> str | None:
+    """Provider-assigned job id for an ATS listing, or None when not certain."""
+    url = str(job.get("job_url") or job.get("url") or job.get("link") or "").strip()
+    if not url:
+        return None
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
+    host = (parsed.netloc or "").lower()
+    path = parsed.path or ""
+
+    # Greenhouse: gh_jid is globally unique and appears on greenhouse-hosted
+    # boards AND company-hosted embeds, so it must NOT be host-qualified -- that
+    # is precisely what unifies the several URLs one posting is served under.
+    try:
+        gh_jid = (parse_qs(parsed.query).get("gh_jid") or [""])[0]
+    except ValueError:
+        gh_jid = ""
+    if gh_jid.isdigit():
+        return f"greenhouse:{gh_jid}"
+    if _RE_GH_HOST.match(host):
+        match = _RE_GH_PATH.search(path)
+        if match:
+            return f"greenhouse:{match.group(1)}"
+
+    # iCIMS ids are per-tenant (job 4801 exists on every board), so the host
+    # stays in the key. The mutable title slug after the id is dropped.
+    if _RE_ICIMS_HOST.search(host):
+        match = _RE_ICIMS_PATH.search(path)
+        if match:
+            return f"icims:{host}:{match.group(1)}"
+
+    if host.endswith("jobs.ashbyhq.com"):
+        match = _RE_UUID_PATH.match(path)
+        if match:
+            return f"ashby:{match.group(2).lower()}"
+
+    if host.endswith("jobs.lever.co"):
+        match = _RE_UUID_PATH.match(path)
+        if match:
+            return f"lever:{match.group(2).lower()}"
+
+    if host.endswith(".bamboohr.com"):
+        match = _RE_BAMBOO_PATH.match(path)
+        if match:
+            return f"bamboohr:{host}:{match.group(1)}"
+
+    if "myworkdayjobs.com" in host:
+        match = _RE_WORKDAY_REQ.search(path.rstrip("/").rsplit("/", 1)[-1])
+        if match:
+            return f"workday:{host}:{match.group(1).upper()}"
+        match = _RE_WORKDAY_NUMERIC.search(path)
+        if match:
+            return f"workday:{host}:{match.group(1)}"
+
+    return None
+
+
 def _dedup_key(job: dict[str, Any]) -> str:
+    ats_id = _ats_job_id(job)
+    if ats_id:
+        return f"ats:{ats_id}"
+
     url = job.get("job_url") or job.get("url") or job.get("link") or ""
+    # Fallback for records tagged Workday whose URL is not a myworkdayjobs host
+    # (proxied or shortened links). Kept verbatim so their existing keys stand.
     if job.get("_source_site") == "workday" or job.get("ats") == "Workday":
         match = re.search(r"/jobs/(\d+)", url)
         if match:
@@ -521,6 +704,9 @@ _DATELESS_PLATFORMS = frozenset({"bamboohr", "ashby"})
 # instead of a date. It means "seen, date unknown" -- never a real ordering.
 _MIGRATED_SENTINEL = "migrated"
 
+# Marks a key produced from a provider job id rather than a URL. See _identity.
+_ATS_KEY_PREFIX = "ats:"
+
 
 def _posted_key(value: Any) -> str:
     """Normalized date_posted. '' means the listing carried no usable date."""
@@ -529,8 +715,20 @@ def _posted_key(value: Any) -> str:
 
 
 def _identity(job: dict[str, Any]) -> tuple[str, str]:
-    """(base_key, date_posted) for a listing. date_posted is '' when absent."""
-    return _dedup_key(job) or "", _posted_key(job.get("date_posted"))
+    """(base_key, date_posted) for a listing. date_posted is '' when absent.
+
+    An ATS-keyed listing always reports '' for the date, which makes _collides
+    treat it as colliding with ANY prior sighting of the same id. That is not a
+    special case bolted on: '' means "carries no evidence of being a new
+    posting", and on an ATS board the date genuinely carries none, because a
+    real re-post is issued a new job id and therefore a different base_key. The
+    date rule below stays in force for every other source, where a URL really is
+    reused across postings.
+    """
+    key = _dedup_key(job) or ""
+    if key.startswith(_ATS_KEY_PREFIX):
+        return key, ""
+    return key, _posted_key(job.get("date_posted"))
 
 
 def _collides(posted: str, seen_dates: set[str]) -> bool:
@@ -590,7 +788,11 @@ def _already_logged(conn: sqlite3.Connection, keys: list[str]) -> dict[str, set[
                 record = json.loads(payload)
             except (json.JSONDecodeError, TypeError):
                 record = {}
-            posted = _posted_key(record.get("date_posted") if isinstance(record, dict) else "")
+            # Through _identity, not the raw date_posted field: an ATS-keyed
+            # row must report '' here too, or the stored date would come back
+            # and re-enable the date rule for exactly the rows it must not
+            # apply to.
+            posted = _identity(record)[1] if isinstance(record, dict) else ""
             found.setdefault(base, set()).add(posted)
     return found
 

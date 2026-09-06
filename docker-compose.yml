@@ -1,0 +1,129 @@
+services:
+  bot:
+    build:
+      context: .
+      args:
+        # 0 drops the TeX trees and with them resume PDF builds. Measured:
+        # 5.71GB built at 1, 2.14GB at 0.
+        WITH_LATEX: "1"
+        # 1 pulls torch (~2GB) for semantic job matching.
+        WITH_SEMANTIC: "0"
+        # Must match the host user that owns this checkout, or the container
+        # cannot write into the bind mount below. Docker Desktop maps ownership
+        # for you; on a Linux host whose uid is not 1000, build with:
+        #   UID=$(id -u) GID=$(id -g) docker compose build
+        UID: "${UID:-1000}"
+        GID: "${GID:-1000}"
+    image: discordbot:latest
+    container_name: discordbot
+    # on-failure, NOT unless-stopped/always -- the same reasoning the systemd
+    # unit spells out. app.py exits 0 when another instance already holds the
+    # runtime lock (app.py:451) and 1 on a missing token (app.py:443). Under
+    # `unless-stopped` both become a silent forever-loop: measured at 8 restarts
+    # in 14 seconds, container permanently "restarting", nothing in `docker ps`
+    # saying the config is wrong.
+    #
+    # With on-failure:5, exit 0 does not restart at all (0 restarts, exited) and
+    # a config error is bounded (5 attempts, then exited) so it fails visibly.
+    # Docker has no equivalent of systemd's RestartPreventExitStatus=1; a bounded
+    # count is the closest expressible thing.
+    #
+    # Trade-off: `always`/`unless-stopped` also bring containers back when the
+    # daemon restarts. With on-failure, run `docker compose up -d` after a host
+    # or daemon restart -- deliberate, because silently resurrecting a
+    # misconfigured bot is what this is avoiding.
+    restart: on-failure:5
+
+    # Chromium leaves zombies when a page crashes; PID 1 has to reap them.
+    init: true
+
+    # The systemd unit sets NoNewPrivileges=true but warns it can break Chrome's
+    # SUID sandbox helper on hosts where unprivileged user namespaces are
+    # restricted. That trade-off does not exist here: CHROME_NO_SANDBOX makes
+    # Chromium launch with --no-sandbox, so there is no setuid helper to break.
+    # Verified by running the smoke test with this set -- Chromium still
+    # launches and renders.
+    security_opt:
+      - no-new-privileges:true
+
+    # Chromium's default /dev/shm is 64MB in a container. --disable-dev-shm-usage
+    # (set via CHROME_NO_SANDBOX) covers the worst of it; this covers the rest.
+    shm_size: "1gb"
+
+    # required: false, because a fresh clone has no .env yet -- it is gitignored.
+    # With the short form (`- .env`) Compose refuses to do ANYTHING without it:
+    # `docker compose build` and every `docker compose run` documented for first
+    # setup fail with "env file .env not found", so you could not even build the
+    # image before creating one. Needs Compose v2.24+.
+    #
+    # Nothing is lost by making it optional: the entrypoint still refuses to
+    # start the *bot* without a token, and says so clearly. Build and one-off
+    # commands, which need no token, now work on a bare checkout.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Set TZ to match the host this checkout's history was built on. It does
+      # NOT affect archive keying -- merge_data keys those with
+      # datetime.now(timezone.utc) (merge_data.py:696) and is timezone-proof.
+      # What it does affect is the date_posted backfill for postings that arrive
+      # without one: manager.py:516 uses date.today(), which is local. Run the
+      # container in a different zone from the host and that backfill shifts by
+      # a day for part of each day, which feeds dedup and freshness filters.
+      # Log timestamps follow it too.
+      #
+      # Scale, measured against the existing archive: of 1903 rows carrying a
+      # date_posted, 316 sit one day off their archive key -- but almost all of
+      # those are legitimate (posted yesterday, archived today). Restricting to
+      # rows scraped in the 00:00-04:00 UTC window, the only window where
+      # Toronto's local date can still read as yesterday, leaves 90 (4.73%) as
+      # an upper bound. Worth keeping TZ aligned with the host; not worth
+      # rewriting published data over.
+      TZ: "${TZ:-America/Toronto}"
+      PYTHONUNBUFFERED: "1"
+      # Keep Chromium's working profile OFF the bind mount. It is LevelDB, a
+      # cookie SQLite and SingletonLock -- all of which depend on file locking
+      # that Docker Desktop's virtiofs/9p only emulates, which is how you get
+      # "Failed to create a ProcessSingleton". This profile is throwaway state
+      # (browser_service re-primes it from chrome_profile/ on every start), so
+      # putting it on the ext4 named volume below costs nothing. The *source*
+      # profile, chrome_profile/, stays on the bind mount: it holds the Reddit
+      # session you log into on the host, and it is only ever copied from.
+      REDDIT_CHROME_RUNTIME_PROFILE: /home/bot/chrome_profile_runtime
+
+    # The bot resolves every writable path from its install directory: state,
+    # logs, dedup listings, the Chrome profile, and the job archives it commits
+    # into this very working tree. Mounting the repo keeps all of that on the
+    # host and survives image rebuilds -- and it is what makes
+    # JBA_ARCHIVE_GIT_COMMIT/PUSH work, since .git must be writable.
+    volumes:
+      - .:/app
+      # /home/bot on a named volume, not the bind mount: it holds Chromium's
+      # runtime profile, which is thousands of small files and lock files.
+      # Measured, small-file writes are ~23x slower over the Windows bind mount
+      # than on native storage. Persisting it across container recreation also
+      # saves re-priming the profile every start.
+      - bot-home:/home/bot
+
+    # Chromium plus a per-core worker pool plus aiohttp pass the default soft
+    # limit. Measured in a bare container: soft=1024, hard=1048576 -- so the
+    # soft limit is the real constraint and the only one worth raising.
+    #
+    # hard stays at the daemon's own default rather than being pulled down to
+    # 65536: nothing here raises its own limit, so lowering the ceiling buys
+    # nothing and only removes headroom.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 1048576
+
+    stop_grace_period: 300s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  bot-home:

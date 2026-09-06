@@ -9,6 +9,7 @@ with only the network hop replaced.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 import threading
@@ -299,7 +300,10 @@ def test_load_window_reads_both_archive_record_shapes(monkeypatch):
     assert dates == ["2026-08-25"]
     assert {job.title for job in jobs} == {"ATS Row", "Watcher Row"}
     assert {job.link for job in jobs} == {"https://ats.example/1", "https://w.example/2"}
-    assert {job.site_label for job in jobs} == {"greenhouse", "LinkedIn"}
+    # Both producers render through one label vocabulary: the ATS scraper stores
+    # the raw site key ("greenhouse"), the send path a presentation label, and a
+    # report listing "LinkedIn" beside "greenhouse" was the inconsistency.
+    assert {job.site_label for job in jobs} == {"Greenhouse", "LinkedIn"}
 
 
 def test_same_posting_on_several_days_is_returned_once(monkeypatch):
@@ -380,6 +384,117 @@ def test_mojibake_in_archived_titles_is_repaired(monkeypatch):
     })
     jobs, _ = job_match.load_window_jobs(1, end_date=date(2026, 8, 25))
     assert "développement" in jobs[0].title
+
+
+# ---------------------------------------------------------------------------
+# Channel scoping (.bestjobs only ranks what this channel's job settings
+# would actually surface, not the whole cross-channel archive)
+# ---------------------------------------------------------------------------
+
+def test_region_filter_always_keeps_canada():
+    job = _job("Dev", location="Toronto, ON")
+    assert job_match._matches_channel_region(job, allow_north_america=False)
+    assert job_match._matches_channel_region(job, allow_north_america=True)
+
+
+def test_region_filter_drops_us_unless_north_america_is_allowed():
+    job = _job("Dev", location="Boston, MA")
+    assert not job_match._matches_channel_region(job, allow_north_america=False)
+    assert job_match._matches_channel_region(job, allow_north_america=True)
+
+
+def test_region_filter_keeps_a_location_the_geo_parser_cannot_place():
+    """The archive is entirely ATS-sourced -- fail open, same as the live
+    scrape's filter_rows_by_region policy for unresolved ATS postings."""
+    job = _job("Dev", location="Somewhereville")
+    assert job_match._matches_channel_region(job, allow_north_america=False)
+
+
+def test_region_filter_is_skipped_entirely_with_no_channel_context():
+    """None (no channel at all) must not be treated as 'Canada only'."""
+    job = _job("Dev", location="Boston, MA")
+    assert job_match._matches_channel_region(job, allow_north_america=None)
+
+
+def test_channel_scope_applies_role_and_exclusion_filters_too():
+    job = _job("Senior Backend Engineer")
+    assert not job_match._matches_channel_scope(
+        job, role_filters=["internship"], exclusion_terms=(), allow_north_america=None,
+    )
+    excluded = _job("Backend Developer", company="Cognizant")
+    assert not job_match._matches_channel_scope(
+        excluded, role_filters=[], exclusion_terms=["cognizant"], allow_north_america=None,
+    )
+
+
+def test_channel_scope_does_not_filter_on_the_free_text_keywords_setting():
+    """Regression guard: a lexical keyword filter was tried and dropped --
+    matching on any one word ("engineering") let an unrelated discipline
+    through a channel scoped to "electrical engineering intern", and matching
+    on every word would have silently hidden a real "Electrical Engineer
+    Co-op" for lacking the literal word "intern". Neither direction is safe,
+    so channel scope must never depend on the keywords string at all -- only
+    role_filters/exclusion_terms/region, and best_jobs() has no keywords
+    parameter to accidentally wire back up.
+    """
+    mechanical = _job("Mechanical Engineering Intern")
+    assert job_match._matches_channel_scope(
+        mechanical, role_filters=[], exclusion_terms=[], allow_north_america=None,
+    )
+    assert "keywords" not in inspect.signature(job_match.best_jobs).parameters
+
+
+def test_best_jobs_scopes_the_archive_to_the_channel_before_ranking(tmp_path, monkeypatch):
+    """The actual entry point handlers.py calls: a job outside this channel's
+    role_filters/exclusion_terms/region must not reach the report at all."""
+    _seed_profile(tmp_path, "candidate", baseinfo=BASEINFO)
+    _patch_archive(monkeypatch, {
+        "2026-08-25": [
+            {"title": "Electrical Engineering Intern", "company": "InScope",
+             "location": "Toronto, ON", "link": "https://example.com/inscope"},
+            {"title": "Senior Electrical Engineer", "company": "TooSenior",
+             "location": "Toronto, ON", "link": "https://example.com/senior"},
+            {"title": "Electrical Engineering Intern", "company": "BlockedCo",
+             "location": "Toronto, ON", "link": "https://example.com/blocked"},
+            {"title": "Electrical Engineering Intern", "company": "OutOfScope",
+             "location": "Boston, MA", "link": "https://example.com/outofscope"},
+        ],
+    })
+
+    report = job_match.best_jobs(
+        "candidate",
+        window="day",
+        end_date=date(2026, 8, 25),
+        cache_root=tmp_path,
+        enrich=False,
+        role_filters=["internship"],
+        exclusion_terms=["BlockedCo"],
+        allow_north_america=False,
+    )
+
+    kept = [(match.job.title, match.job.company) for match in report.matches]
+    assert ("Electrical Engineering Intern", "InScope") in kept
+    assert not any(company == "TooSenior" for _, company in kept)       # wrong seniority
+    assert not any(company == "BlockedCo" for _, company in kept)       # excluded company
+    assert not any(company == "OutOfScope" for _, company in kept)      # wrong region
+
+
+def test_best_jobs_with_no_channel_settings_keeps_the_full_archive(tmp_path, monkeypatch):
+    """Backward compatible: a caller outside the Discord command path (the
+    defaults) must not silently lose jobs to a Canada-only gate."""
+    _seed_profile(tmp_path, "candidate", baseinfo=BASEINFO)
+    _patch_archive(monkeypatch, {
+        "2026-08-25": [
+            {"title": "Marketing Coordinator", "company": "Anywhere",
+             "location": "Boston, MA", "link": "https://example.com/x"},
+        ],
+    })
+
+    report = job_match.best_jobs(
+        "candidate", window="day", end_date=date(2026, 8, 25), cache_root=tmp_path, enrich=False,
+    )
+
+    assert [match.job.title for match in report.matches] == ["Marketing Coordinator"]
 
 
 # ---------------------------------------------------------------------------
@@ -2394,3 +2509,202 @@ def test_a_missing_database_file_rebuilds_the_table_empty(tmp_path, monkeypatch)
     assert description_cache.lookup(["https://example.com/a"]) == {}
     assert description_cache.store("https://example.com/a", "body") is True
     assert description_cache.stats() == {description_cache.STATUS_OK: 1}
+
+
+def test_the_same_job_dedupes_across_both_archive_record_shapes():
+    """The watcher used to fold "(Company, City...)" into the archived title and
+    store no company field; it now stores real company/location fields and folds
+    only the location. Both shapes are in the archive at once, so one job logged
+    under each must still collapse to a single identity -- otherwise every job
+    spanning the change reappears twice in .bestjobs.
+    """
+    from services.job_service import shape_job_item
+
+    new_shape = job_match._normalize_record(
+        shape_job_item(
+            {
+                "title": "AI & ML Intern",
+                "company": "Trench Group",
+                "location": "Scarborough, Ontario, Canada",
+                "job_url": "https://www.linkedin.com/jobs/view/4434008080",
+                "_source_site": "linkedin",
+            },
+            "linkedin",
+        )
+    )
+    old_shape = job_match._normalize_record(
+        {
+            "title": "AI & ML Intern (Trench Group, Scarborough, Ontario, Canada)",
+            "link": "https://www.linkedin.com/jobs/view/4434008080",
+            "site_label": "LinkedIn/Trench Group",
+        }
+    )
+
+    assert job_match._display_fields(new_shape) == job_match._display_fields(old_shape)
+    assert job_match._job_identity(new_shape)[1:] == job_match._job_identity(old_shape)[1:]
+
+
+def test_an_ats_titles_own_parenthetical_is_not_mistaken_for_a_location():
+    """"Outreach Coordinator (Cantonese/Mandarin)" is the role, not a location.
+    Only a parenthetical that is exactly the location field gets stripped.
+    """
+    ats = job_match._normalize_record(
+        {
+            "title": "Outreach Coordinator (Cantonese/Mandarin)",
+            "company": "Acme",
+            "location": "Toronto, ON",
+            "job_url": "https://example.com/2",
+            "_source_site": "greenhouse",
+        }
+    )
+    title, company, location = job_match._display_fields(ats)
+    assert title == "Outreach Coordinator (Cantonese/Mandarin)"
+    assert (company, location) == ("Acme", "Toronto, ON")
+
+
+def test_a_record_without_a_company_does_not_invent_one_from_the_city():
+    """"Data Intern (Toronto, ON)" with no company field was split at the first
+    comma and reported Toronto as the company. A known location says the
+    parenthetical is a location, so there is nothing to recover.
+    """
+    from services.job_service import shape_job_item
+
+    job = job_match._normalize_record(
+        shape_job_item(
+            {"title": "Data Intern", "company": "", "location": "Toronto, ON",
+             "job_url": "https://example.com/1", "_source_site": "linkedin"},
+            "linkedin",
+        )
+    )
+    assert job_match._display_fields(job) == ("Data Intern", "", "Toronto, ON")
+
+
+def test_archived_titles_render_with_single_spaces_whichever_producer_wrote_them():
+    """The send path collapses whitespace, the ATS scraper does not -- 74 titles
+    in the real archive read as "Associate Medical Editor  - US Students".
+    Normalizing at read time fixes the rows already stored, too.
+    """
+    ats = job_match._normalize_record(
+        {"title": "Associate Medical Editor  - US Students (MD/DO)",
+         "company": "Acme", "location": "Toronto, ON",
+         "job_url": "https://example.com/1", "_source_site": "greenhouse"}
+    )
+    assert ats.title == "Associate Medical Editor - US Students (MD/DO)"
+
+    tabbed = job_match._normalize_record(
+        {"title": "Data\t\tIntern\n Summer", "link": "https://example.com/2", "site_label": "LinkedIn"}
+    )
+    assert tabbed.title == "Data Intern Summer"
+
+
+# ── score_level backed by job_level ─────────────────────────────────────────
+
+class _Sig:
+    """Minimal stand-in: score_level reads only `seniority`."""
+
+    def __init__(self, seniority):
+        self.seniority = seniority
+
+
+def test_a_staff_role_about_students_is_not_a_student_job():
+    """"Campus Recruiter" scored 1.0 for a student -- a perfect match.
+
+    The old junior/senior regex pair saw "campus" and stopped. It is a staff
+    recruiting job, and recommending it to a co-op student is the single worst
+    ranking error the old heuristic made, because it scored maximally.
+    """
+    student = _Sig("student")
+    assert job_match.score_level("Campus Recruiter", student) == 0.1
+    assert job_match.score_level("University Relations Partner", student) == 0.1
+    assert job_match.score_level("Campus Recruiter", _Sig("professional")) == 1.0
+
+
+def test_a_term_only_title_is_recognised_as_a_student_posting():
+    """"Software Developer (Winter 2027)" carries no level word at all.
+
+    The regex pair found neither junior nor senior marker and returned neutral,
+    so a posting aimed squarely at a co-op student ranked as though it said
+    nothing about level.
+    """
+    assert job_match.score_level("Software Developer (Winter 2027)", _Sig("student")) == 1.0
+    assert job_match.score_level("Software Developer (Winter 2027)", _Sig("professional")) == 0.2
+
+
+def test_conflicting_titles_stay_neutral():
+    """Preserved contract: a title pulling both ways is evidence of neither."""
+    for who in ("student", "professional"):
+        assert job_match.score_level("Senior Intern Program Lead", _Sig(who)) == 0.5
+
+
+def test_unlabelled_titles_stay_neutral():
+    for who in ("student", "professional"):
+        assert job_match.score_level("Software Engineer", _Sig(who)) == 0.5
+
+
+def test_stored_level_is_trusted_over_the_title():
+    """The scrape had the platform's employment_type; a reader has only a title.
+
+    Re-deriving at read time throws that away, so a posting the board itself
+    flagged as an internship would be re-read as mid.
+    """
+    student = _Sig("student")
+    assert job_match.score_level("Software Engineer", student, level="intern") == 1.0
+    # An unrecognised stored value must fall back, not silently score.
+    assert job_match.score_level("Software Engineer", student, level="nonsense") == 0.5
+
+
+def test_employment_type_reaches_the_classifier():
+    """The only signal on a title with neither a level word nor a term."""
+    assert job_match.score_level(
+        "Software Developer", _Sig("student"), "", "Internship") == 1.0
+    assert job_match.score_level("Software Developer", _Sig("student")) == 0.5
+
+
+def test_normalize_record_carries_the_stamped_level():
+    """Dropped here, the scrape-time stamp never reaches scoring at all."""
+    job = job_match._normalize_record({
+        "title": "Software Engineer", "company": "acme",
+        "location": "Toronto, ON, CA", "job_url": "https://x/1",
+        "date_posted": "2026-09-03", "description": "Build things.",
+        "level": "intern", "employment_type": "Internship",
+    })
+    assert job is not None
+    assert job.level == "intern"
+    assert job.employment_type == "Internship"
+    # And a record without them must still load.
+    plain = job_match._normalize_record({
+        "title": "Software Engineer", "job_url": "https://x/2"})
+    assert plain is not None and plain.level == ""
+
+
+def test_junior_counts_as_early_career():
+    """junior sits outside EARLY_CAREER (that set is coop/intern/campus/newgrad).
+
+    Dropping it from the early-career test is invisible in every intern-titled
+    case, so it needs its own: a Junior Developer is a plausible new-graduate
+    posting and must not score as a senior one.
+    """
+    assert job_match.score_level("Junior Developer", _Sig("student")) == 1.0
+    assert job_match.score_level("Junior Developer", _Sig("professional")) == 0.2
+
+
+def test_score_job_feeds_the_stored_level_into_the_level_component(signal):
+    """Pins the wiring, not the helper.
+
+    score_level can be entirely correct while score_job still calls it with the
+    title alone -- a mutation that dropped the extra arguments left every other
+    test in this file passing.
+    """
+    assert signal.seniority == "student"
+    # Identical titles: only the stamped level differs, so any score difference
+    # is attributable to it reaching score_level.
+    plain = _job("Software Engineer")
+    stamped = _job("Software Engineer")
+    stamped.level = "intern"
+
+    assert job_match.score_job(plain, signal).components["level"] == 0.5
+    assert job_match.score_job(stamped, signal).components["level"] == 1.0
+
+    typed = _job("Software Developer")
+    typed.employment_type = "Internship"
+    assert job_match.score_job(typed, signal).components["level"] == 1.0

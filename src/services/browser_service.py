@@ -5,10 +5,11 @@ import json
 import os
 import shutil
 import sqlite3
-import subprocess
 import threading
 import time
 from pathlib import Path
+
+from services import capacity, platform_support
 
 try:
     from playwright.sync_api import sync_playwright as _sync_playwright
@@ -19,12 +20,12 @@ except ImportError:
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_PROFILE = str(_REPO_ROOT / "chrome_profile")
 
-# run.bat launches the bot in a detached console window (`start "Discord Bot"
-# ...`), so plain print() output is never captured anywhere -- these [browser]
-# diagnostics (Chrome launch failures, session probe results, fetch errors)
-# were invisible when diagnosing why .resumebuild scrapes were failing.
-# Persist them alongside stdout so browser-layer failures are diagnosable
-# after the fact.
+# The Windows launcher starts the bot in a detached console window and the
+# systemd unit sends stdout to the journal, so plain print() output is easy to
+# lose -- these [browser] diagnostics (Chrome launch failures, session probe
+# results, fetch errors) were invisible when diagnosing why .resumebuild
+# scrapes were failing. Persist them alongside stdout so browser-layer failures
+# are diagnosable after the fact.
 _LOG_PATH = _REPO_ROOT / ".browser_service.log"
 
 
@@ -40,10 +41,10 @@ def _log(message: str) -> None:
 
 
 # Chrome headless=new reports "HeadlessChrome" in UA; Reddit blocks it. Override via Playwright context.
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
-)
+# The claimed platform tracks the real host OS -- Chrome's Sec-CH-UA-Platform
+# header comes from the OS and cannot be overridden here, so a mismatched UA
+# would be a detectable inconsistency.
+_UA = platform_support.chrome_user_agent()
 
 # Single-worker executor so ALL Playwright calls run in one dedicated background thread.
 # This keeps asyncio state out of the main thread, avoiding conflicts with discord.py's
@@ -110,6 +111,7 @@ class _PriorityDispatchGate:
         self._cv = threading.Condition()
         self._busy = False
         self._priority_waiting = 0
+        self._waiting = 0
 
     def acquire_with_reason(self, timeout: float | None = None, priority: bool = False) -> tuple[bool, str]:
         """Returns (acquired, reason). reason is "acquired", "yielded" (a
@@ -127,13 +129,17 @@ class _PriorityDispatchGate:
                         return True, "acquired"
                     if not priority and self._priority_waiting > 0:
                         return False, "yielded"
-                    if deadline is None:
-                        self._cv.wait()
-                        continue
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        return False, "timeout"
-                    self._cv.wait(timeout=remaining)
+                    self._waiting += 1
+                    try:
+                        if deadline is None:
+                            self._cv.wait()
+                            continue
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            return False, "timeout"
+                        self._cv.wait(timeout=remaining)
+                    finally:
+                        self._waiting -= 1
             finally:
                 if priority:
                     self._priority_waiting -= 1
@@ -153,6 +159,17 @@ class _PriorityDispatchGate:
     def priority_waiting(self) -> int:
         with self._cv:
             return self._priority_waiting
+
+    @property
+    def waiting(self) -> int:
+        """Callers currently parked in the wait, priority and bulk alike.
+
+        Symmetric with priority_waiting. Lets a caller (and the dispatch tests)
+        observe that a waiter has actually parked, instead of sleeping long
+        enough to assume it has.
+        """
+        with self._cv:
+            return self._waiting
 
 
 _fetch_dispatch_semaphore = _PriorityDispatchGate()
@@ -206,32 +223,47 @@ def _acquire_fetch_slot(op_name: str, timeout_s: float, url: str, priority: bool
     return False
 
 
+# orphan-ok: no external Playwright user remains. The ZipRecruiter scraper was
+# the one this was written for, and it was deliberately taken back out of the
+# gate when curl_cffi replaced its headless launch (see the note above
+# ZIPRECRUITER_HOME_URL in job_service) -- holding an app-wide browser slot for
+# a plain HTTP fetch stalled real browser work for nothing.
+#
+# Kept rather than deleted for two reasons: this module is now the only thing
+# in the tree that launches Playwright, so this is the documented entry point
+# the next external launcher needs; and test_ziprecruiter_scraper's
+# `test_no_browser_is_ever_launched` monkeypatches this name to a raising stub
+# to prove the scraper never reaches for it, which needs the attribute to
+# exist.
 def acquire_browser_work_slot(op_name: str, timeout_s: float, detail: str = "", priority: bool = False) -> bool:
-    """Public gate entry for EXTERNAL Playwright users (e.g. the ZipRecruiter
-    scraper's own headless launch in job_service). All headless-browser work
-    app-wide counts against this one dispatch slot, so a second Chromium
-    process can't spin up invisibly while a priority resume scrape is waiting
-    — bulk callers yield exactly like fetch_html/fetch_json bulk callers do.
-    Pair every True return with release_browser_work_slot() in a finally."""
+    """Gate entry for a Playwright user outside this module.
+
+    All headless-browser work app-wide counts against this one dispatch slot,
+    so a second Chromium process cannot spin up invisibly while a priority
+    resume scrape is waiting -- bulk callers yield exactly like
+    fetch_html/fetch_json bulk callers do. Pair every True return with
+    release_browser_work_slot() in a finally.
+
+    There is no caller today; see the note above.
+    """
     return _acquire_fetch_slot(op_name, timeout_s, detail, priority=priority)
 
 
+# orphan-ok: the release half of acquire_browser_work_slot, unused for the same
+# reason and necessarily kept with it.
 def release_browser_work_slot() -> None:
     _fetch_dispatch_semaphore.release()
 
 
 def _clear_profile_locks(profile_path: str) -> None:
     """Remove stale Chromium singleton lock artifacts for this profile."""
-    lock_candidates = [
-        Path(profile_path) / "SingletonLock",
-        Path(profile_path) / "SingletonCookie",
-        Path(profile_path) / "SingletonSocket",
-        Path(profile_path) / "lockfile",
-        Path(profile_path) / "Default" / "lockfile",
-    ]
-    for lock_path in lock_candidates:
+    for lock_path in platform_support.profile_lock_paths(profile_path):
         try:
-            if lock_path.exists():
+            # On POSIX the Singleton* entries are symlinks pointing at
+            # host-pid-token targets that no longer resolve once Chrome dies, so
+            # exists() is False for exactly the stale locks we need to remove.
+            # is_symlink() is the check that catches them.
+            if lock_path.exists() or lock_path.is_symlink():
                 lock_path.unlink()
         except Exception:
             # If a file is truly in use, the retry below will still fail with a clear error.
@@ -307,33 +339,39 @@ _CHROME_EPOCH_OFFSET = 11644473600
 
 
 def _find_chrome_profile_with_reddit_session() -> Path | None:
-    """Scan the user's Chrome profiles for one with a valid reddit_session cookie."""
-    user_data = Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "User Data"
-    if not user_data.exists():
-        return None
+    """Scan the user's Chrome profiles for one with a valid reddit_session cookie.
 
+    Checks every browser user-data dir this platform knows about (Chrome and
+    Chromium, plus Flatpak locations on Linux), so a session logged in under
+    whichever browser the user actually runs is still harvestable.
+    """
     now = time.time()
-    for entry in sorted(user_data.iterdir()):
-        if entry.name != "Default" and not entry.name.startswith("Profile "):
-            continue
-        cookies_db = entry / "Network" / "Cookies"
-        if not cookies_db.exists():
-            cookies_db = entry / "Cookies"
-        if not cookies_db.exists():
-            continue
+    for user_data in platform_support.chrome_user_data_dirs():
         try:
-            conn = sqlite3.connect(f"file:{cookies_db}?mode=ro", uri=True)
-            rows = conn.execute(
-                "SELECT expires_utc FROM cookies "
-                "WHERE host_key LIKE '%reddit.com%' AND name = 'reddit_session'"
-            ).fetchall()
-            conn.close()
-            for (expires_utc,) in rows:
-                expires_unix = (expires_utc / 1_000_000) - _CHROME_EPOCH_OFFSET if expires_utc > 0 else float("inf")
-                if expires_unix > now:
-                    return entry
-        except Exception:
+            entries = sorted(user_data.iterdir())
+        except OSError:
             continue
+        for entry in entries:
+            if entry.name != "Default" and not entry.name.startswith("Profile "):
+                continue
+            cookies_db = entry / "Network" / "Cookies"
+            if not cookies_db.exists():
+                cookies_db = entry / "Cookies"
+            if not cookies_db.exists():
+                continue
+            try:
+                conn = sqlite3.connect(f"file:{cookies_db}?mode=ro", uri=True)
+                rows = conn.execute(
+                    "SELECT expires_utc FROM cookies "
+                    "WHERE host_key LIKE '%reddit.com%' AND name = 'reddit_session'"
+                ).fetchall()
+                conn.close()
+                for (expires_utc,) in rows:
+                    expires_unix = (expires_utc / 1_000_000) - _CHROME_EPOCH_OFFSET if expires_utc > 0 else float("inf")
+                    if expires_unix > now:
+                        return entry
+            except Exception:
+                continue
     return None
 
 
@@ -392,116 +430,32 @@ def _harvest_chrome_session(target_profile: str) -> bool:
 
 
 def _launch_context(path: str):
+    # executable_path rather than channel="chrome": the channel lookup only
+    # knows about branded Chrome install locations, so it fails on hosts where
+    # only Chromium is present. _do_start has already resolved a real binary
+    # through the platform shim, so point Playwright straight at it.
     return _pw.chromium.launch_persistent_context(
         user_data_dir=path,
-        channel="chrome",
+        executable_path=_find_chrome(),
         headless=True,
         user_agent=_UA,
         service_workers="block",
-        args=["--no-first-run", "--no-default-browser-check"],
+        args=["--no-first-run", "--no-default-browser-check", *platform_support.chrome_sandbox_args()],
     )
 
 
 def _find_chrome() -> str | None:
-    candidates = [
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
-        Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
-        Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
-    ]
-    for p in candidates:
-        if p.exists():
-            return str(p)
-    return None
-
-
-def _current_session_id() -> int | None:
-    """Windows session id of this process (0 == hidden service session)."""
-    try:
-        import ctypes
-        sid = ctypes.c_ulong()
-        pid = ctypes.windll.kernel32.GetCurrentProcessId()
-        if ctypes.windll.kernel32.ProcessIdToSessionId(pid, ctypes.byref(sid)):
-            return int(sid.value)
-    except Exception:
-        pass
-    return None
-
-
-def _parse_pid_session_lines(out: str) -> list[tuple[int, int | None]]:
-    """Parse 'pid,sessionid' lines (sessionid optional) into (pid, session) tuples."""
-    procs: list[tuple[int, int | None]] = []
-    for line in out.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(",")
-        if not parts[0].strip().isdigit():
-            continue
-        pid = int(parts[0].strip())
-        session: int | None = None
-        if len(parts) > 1 and parts[1].strip().isdigit():
-            session = int(parts[1].strip())
-        procs.append((pid, session))
-    return procs
+    return platform_support.find_chrome()
 
 
 def _kill_chrome_using_profile(profile_path: str) -> None:
     """Kill Chrome processes using this profile, then clear lock artifacts.
-    Logs each PID with its owning session so cross-session (Task Scheduler /
-    Session 0) lock owners are attributable instead of silently unkillable."""
+    Logs each PID with its owning session so cross-session lock owners (Windows
+    Task Scheduler / Session 0, or a desktop login on Linux) are attributable
+    instead of silently unkillable."""
     profile_dir = Path(profile_path).name
-    procs: list[tuple[int, int | None]] = []
-
-    # PowerShell/CIM -- reliable on Windows 11 where WMIC is deprecated
-    try:
-        out = subprocess.check_output(
-            ["powershell", "-NoProfile", "-Command",
-             "Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" | "
-             f"Where-Object {{ $_.CommandLine -like '*{profile_dir}*' }} | "
-             "ForEach-Object { \"$($_.ProcessId),$($_.SessionId)\" }"],
-            stderr=subprocess.DEVNULL, text=True, timeout=10
-        )
-        procs = _parse_pid_session_lines(out)
-    except Exception:
-        # Fallback to WMIC for older Windows
-        try:
-            out = subprocess.check_output(
-                ["wmic", "process", "where",
-                 f"name='chrome.exe' and commandline like '%{profile_dir}%'",
-                 "get", "processid,sessionid", "/format:csv"],
-                stderr=subprocess.DEVNULL, text=True, timeout=10
-            )
-            # WMIC CSV columns are alphabetical: Node,ProcessId,SessionId
-            for line in out.splitlines():
-                line = line.strip()
-                if not line or "ProcessId" in line:
-                    continue
-                parts = line.split(",")
-                if len(parts) >= 3 and parts[-2].strip().isdigit():
-                    session = int(parts[-1].strip()) if parts[-1].strip().isdigit() else None
-                    procs.append((int(parts[-2].strip()), session))
-        except Exception:
-            pass
-
-    if not procs:
-        _log(f"[browser] kill({profile_dir}): no chrome.exe processes found using this profile")
-    else:
-        our_session = _current_session_id()
-        for pid, session in procs:
-            if session is not None and our_session is not None and session != our_session:
-                _log(
-                    f"[browser] kill({profile_dir}): PID {pid} owned by session {session} "
-                    f"(ours: {our_session}) -- likely Task Scheduler/Session 0; kill may be denied"
-                )
-            result = subprocess.run(
-                ["taskkill", "/F", "/PID", str(pid)],
-                capture_output=True, text=True,
-            )
-            if result.returncode == 0:
-                _log(f"[browser] kill({profile_dir}): killed PID {pid} (session {session if session is not None else '?'})")
-            else:
-                detail = (result.stderr or result.stdout or "").strip()
-                _log(f"[browser] kill({profile_dir}): FAILED to kill PID {pid} rc={result.returncode} -- {detail}")
+    killed = platform_support.kill_processes_using_profile(profile_dir, log=_log)
+    if killed:
         time.sleep(1.5)
     _clear_profile_locks(profile_path)
 
@@ -760,7 +714,9 @@ def start(profile_path: str | None = None) -> bool:
 
     _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="playwright")
     try:
-        return _executor.submit(_do_start, primary, runtime).result(timeout=90)
+        # Chromium cold-start is CPU- and disk-bound; on a small host 90s is
+        # marginal and a timeout here disables the whole browser layer.
+        return _executor.submit(_do_start, primary, runtime).result(timeout=capacity.timeout(90))
     except Exception as exc:
         _log(f"[browser] start failed: {exc}")
         return False
@@ -841,17 +797,16 @@ def is_ready() -> bool:
     return _executor is not None and _context is not None
 
 
-def check_session() -> bool:
-    """Check Reddit session validity. Thread-safe."""
-    if _executor is None or _context is None:
-        return False
-    try:
-        return _executor.submit(_do_check_session).result(timeout=10)
-    except Exception:
-        return False
-
-
 def session_valid() -> bool:
+    """Whether the last session probe found the Chrome profile still logged in.
+
+    A plain read of the flag `_do_check_session` maintains, so it costs
+    nothing and is safe to call while rendering an embed. There used to be a
+    `check_session()` beside this that forced a probe through the executor and
+    blocked up to ten seconds; nothing ever called it, and ensure_ready already
+    reprobes on _SESSION_CHECK_INTERVAL, so a caller asking "is the session
+    valid" has a fresh answer without paying for one.
+    """
     return _session_valid
 
 

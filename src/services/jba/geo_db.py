@@ -72,6 +72,23 @@ def build_lookup_from_db(db_path: Path = GEO_DB_PATH) -> dict[str, dict]:
 
 # ── Load geo lookup dicts (same interface as ats_service._load_geo_lookup) ───
 
+def _city_population_by_country(conn) -> dict[tuple[str, str], int]:
+    """Largest population for each (city_norm, country) pair.
+
+    Returns {} when the table is absent rather than raising: a partially built
+    geo.db should degrade to the old arbitrary ordering, not take every
+    location filter down.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT city_norm, country, MAX(population) FROM locations "
+            "GROUP BY city_norm, country"
+        )
+        return {(city, country): pop or 0 for city, country, pop in rows}
+    except sqlite3.Error:
+        return {}
+
+
 def load_geo_lookup_from_db(db_path: Path = GEO_DB_PATH) -> tuple[dict, dict, dict]:
     """Return (cities, admin1_by_code, admin1_by_name) dicts for ats_service.
 
@@ -84,10 +101,27 @@ def load_geo_lookup_from_db(db_path: Path = GEO_DB_PATH) -> tuple[dict, dict, di
 
     conn = _open(db_path)
     try:
+        # geo_cities carries no population and is stored in GeoNames id order,
+        # so an ambiguous name resolved to whichever entry happened to be first:
+        # "Toronto" resolved to AU (a 5,670-person town in New South Wales)
+        # rather than CA, and _matches_location then rejected every Toronto
+        # posting for a search that said "Toronto". The `locations` table does
+        # carry population, so rank each name's candidates by the largest city
+        # of that name in that country -- an unqualified city name means the
+        # famous one. Entries with no population row keep their relative order
+        # and sort last.
+        populations = _city_population_by_country(conn)
         for city_lower, cc, a1 in conn.execute(
             "SELECT city_lower, country_code, admin1_code FROM geo_cities"
         ):
             cities.setdefault(city_lower, []).append([cc, a1])
+        if populations:
+            for city_lower, entries in cities.items():
+                if len(entries) > 1:
+                    entries.sort(
+                        key=lambda e: populations.get((city_lower, e[0]), 0),
+                        reverse=True,
+                    )
 
         for name_lower, cc, a1 in conn.execute(
             "SELECT name_lower, country_code, admin1_code FROM geo_admin1_by_name"

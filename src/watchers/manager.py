@@ -18,7 +18,7 @@ import discord
 from config import AppConfig
 from services import job_service, reddit_service
 from services.ats_service import ATS_PLATFORMS as _ATS_PLATFORMS, BAMBOOHR as _BAMBOOHR, scrape_ats_platform as _scrape_ats_platform
-from services.health import WatcherHealthTracker
+from services.health import WatcherHealthTracker, compact_age
 from services.priority_scheduler import BACKGROUND, PriorityWorkScheduler
 from services import scheduler_labels
 from state.store import RuntimeStore
@@ -1340,11 +1340,28 @@ class WatcherManager:
                 stats = self.scheduler.stats()
                 print(
                     "[watchdog] scheduler: "
-                    f"workers={stats['workers']} active={stats['active']} "
-                    f"queued={stats['queued']} (interactive={stats['queued_interactive']}, "
+                    f"workers={stats['workers']}(reserved={stats['reserved_interactive']}) "
+                    f"active={stats['active']} "
+                    f"queued={stats['queued']} (commands={stats['queued_interactive']}, "
+                    f"aged={stats['queued_promoted']}, "
                     f"background={stats['queued_background']}) "
-                    f"completed={stats['completed']} promoted={stats['promoted']}"
+                    f"completed={stats['completed']} dropped={stats['dropped']} "
+                    # Lifetime total, distinct from the `aged=` currently in
+                    # the queue above -- one name for both read as a
+                    # contradiction on the same line.
+                    f"aged-up-total={stats['promoted']}"
                 )
+                # Naming the oldest runners is what turns "the pool is full"
+                # into "the pool is full BECAUSE of these". A saturated pool
+                # was previously indistinguishable from a busy one, and the
+                # difference is the whole diagnosis.
+                oldest = stats["in_flight"][:3]
+                if oldest:
+                    holding = ", ".join(
+                        f"{entry['label'] or 'unlabelled'}={compact_age(entry['age_seconds'])}"
+                        for entry in oldest
+                    )
+                    print(f"[watchdog] scheduler oldest in-flight: {holding}")
                 if stats["label_costs"]:
                     label_summary = ", ".join(
                         f"{label}={info['median_seconds']}s(n={info['samples']})"

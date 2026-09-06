@@ -44,8 +44,10 @@ _INDEX_PATH = _JOBS_DIR / "archive_index.db"
 # ~4 months. Beyond this a job may legitimately be surfaced again.
 DEDUP_WINDOW_DAYS: int = 122
 
-# Bumped whenever the table layout changes; a mismatch drops and rebuilds.
-_SCHEMA_VERSION = 2
+# Bumped whenever the table layout OR the keying rule changes; a mismatch drops
+# and rebuilds. v3: merge_data._dedup_key now keys ATS listings on the provider
+# job id, so every base_key stored under v2 is stale.
+_SCHEMA_VERSION = 3
 
 # Empty string, not NULL, marks "no date". SQLite permits multiple NULLs in a
 # non-INTEGER PRIMARY KEY, so a NULL date_posted would defeat the ON CONFLICT
@@ -54,10 +56,6 @@ _NO_DATE = ""
 
 _build_lock = threading.Lock()
 _BATCH = 1000
-
-
-def index_path() -> Path:
-    return _INDEX_PATH
 
 
 def _now() -> datetime:

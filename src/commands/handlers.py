@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import wraps
@@ -13,7 +14,7 @@ from typing import Any, Awaitable, Callable
 import discord
 
 from config import AppConfig
-from services import job_service, scrape_service
+from services import job_match, job_service, scrape_service
 from services.health import WatcherHealthTracker, build_channel_health_embed, build_all_health_embed
 from services.priority_scheduler import INTERACTIVE, PriorityWorkScheduler
 from services import scheduler_labels
@@ -29,9 +30,12 @@ from services.resumes.listing import (
 )
 from services.resumes.structured import load_structured_profile
 from services.resumes.resume import (
+    EXAMPLE_PROFILE_KEY,
+    RESUMES_CACHE_ROOT,
     compile_latex_to_pdf,
     discord_profile_key,
     ensure_profile_cache,
+    profile_cache_dir,
     resolve_discord_profile_key,
 )
 from state.store import RuntimeStore
@@ -129,9 +133,7 @@ CMD_CONTINUE = ".more"
 CMD_HELLO = ".hi"
 CMD_JOB_SETTINGS = ".job"
 CMD_JOB_SETTINGS_ALIAS = ".jobs"
-CMD_JOBBANK_TEST = ".jtest"
 CMD_JOB_PIPELINE_TEST = ".jobtest"
-CMD_JOBBANK_FILTERS = ".jfilters"
 CMD_REDDIT_SETTINGS = ".reddit"
 CMD_REDDIT_SETTINGS_ALIAS = ".rset"
 CMD_CLEAR_REDDIT_SEEN = ".rclear"
@@ -140,6 +142,10 @@ CMD_SCRAPE_SETTINGS = ".scrapecfg"
 CMD_SCRAPE_SETTINGS_ALIAS = ".cfg"
 CMD_SCRAPE = ".scrape"
 CMD_HEALTH = ".health"
+CMD_BEST_JOBS = ".bestjobs"
+CMD_BEST_JOBS_ALIAS = ".best"
+CMD_QUOTA = ".quota"
+CMD_RESET = ".reset"
 PRIMARY_RESUME_SLASH_COMMAND = "/resumebuild"
 
 
@@ -154,9 +160,7 @@ _COMMAND_ALIASES: dict[str, tuple[str, ...]] = {
     CMD_HELLO: ("/hi", "/hello", "/hello2"),
     CMD_JOB_SETTINGS: ("/job", "/jobsettings"),
     CMD_JOB_SETTINGS_ALIAS: ("/jobs", "/jobsinit"),
-    CMD_JOBBANK_TEST: ("/jtest", "/jobbanktest"),
     CMD_JOB_PIPELINE_TEST: ("/jobtest", "/jobpipelinetest"),
-    CMD_JOBBANK_FILTERS: ("/jfilters", "/jobbankfilters"),
     CMD_REDDIT_SETTINGS: ("/reddit", "/redditsettings"),
     CMD_REDDIT_SETTINGS_ALIAS: ("/rset",),
     CMD_CLEAR_REDDIT_SEEN: ("/rclear", "/clearredditseen"),
@@ -165,6 +169,10 @@ _COMMAND_ALIASES: dict[str, tuple[str, ...]] = {
     CMD_SCRAPE_SETTINGS_ALIAS: ("/cfg",),
     CMD_SCRAPE: ("/scrape",),
     CMD_HEALTH: ("/health", "/whealth"),
+    CMD_BEST_JOBS: ("/bestjobs", "/bestmatches"),
+    CMD_BEST_JOBS_ALIAS: ("/best",),
+    CMD_QUOTA: ("/quota", "/quotas"),
+    CMD_RESET: ("/reset",),
 }
 
 
@@ -192,11 +200,11 @@ def build_commands_cheatsheet_embed(sheet_kind: str = CHEATSHEET_KIND_GENERAL) -
             name="Job Watcher",
             value=(
                 f"`{CMD_JOB_SETTINGS}` / `{CMD_JOB_SETTINGS_ALIAS}` - Open job settings\n"
-                f"`{CMD_JOBBANK_TEST}` - Run Job Bank listing test\n"
                 f"`{CMD_JOB_PIPELINE_TEST}` - Full pipeline test with metrics\n"
-                f"`{CMD_JOBBANK_FILTERS} [query|clear]` - Additional native filters\n"
+                f"`{CMD_BEST_JOBS}` / `{CMD_BEST_JOBS_ALIAS}` - Top archive matches for your profile - `.best week 15`\n"
                 f"`{CMD_STATUS}` - Watcher status\n"
-                f"`{CMD_HEALTH}` - Scrape health dashboard · `.health all` for all channels"
+                f"`{CMD_HEALTH}` - Scrape health dashboard · `.health all` for all channels\n"
+                f"`{CMD_QUOTA}` - (owner) Member shares of the AI commands - `.quota user @them 0.5`"
             ),
             inline=False,
         )
@@ -205,6 +213,7 @@ def build_commands_cheatsheet_embed(sheet_kind: str = CHEATSHEET_KIND_GENERAL) -
             value=(
                 f"`{CMD_COMMANDS}` - Show general command sheet\n"
                 f"`{CMD_RESUME}` - Reply to a job post for tailored resume (add `--aggressive` or `--strongaggressive`)\n"
+                f"`{CMD_RESUME} (...)` - text in parentheses goes straight to the model, e.g. `(lead with the embedded work)`\n"
                 f"`{CMD_RESUME_COVER}` - Reply to a job post for a cover letter covering what the resume left out\n"
                 f"`{CMD_RESUME_CHECK}` - Compile your current template cache\n"
                 f"`{CMD_CONTINUE}` - Continue paginated output"
@@ -239,10 +248,12 @@ def build_commands_cheatsheet_embed(sheet_kind: str = CHEATSHEET_KIND_GENERAL) -
             f"`{CMD_COMMANDS}` - Show this list\n"
             f"`{CMD_STATUS}` / `{CMD_STATUS_ALIAS}` - Watcher status\n"
             f"`{CMD_RESUME}` - Reply to a job post and generate a tailored resume draft (add `--aggressive` or `--strongaggressive`)\n"
+            f"`{CMD_RESUME} (...)` - text in parentheses goes straight to the model, e.g. `(lead with the embedded work)`\n"
             f"`{CMD_RESUME_COVER}` - Reply to a job post and generate a complementary cover letter\n"
             f"`{CMD_RESUME_CHECK}` - Compile your current template cache\n"
             f"`{CMD_CONTINUE}` - Continue paginated output\n"
-            f"`{CMD_HELLO}` - Quick hello test"
+            f"`{CMD_HELLO}` - Quick hello test\n"
+            f"`{CMD_RESET}` - (owner) Restart the bot process"
         ),
         inline=False,
     )
@@ -250,9 +261,8 @@ def build_commands_cheatsheet_embed(sheet_kind: str = CHEATSHEET_KIND_GENERAL) -
         name="Job Watcher",
         value=(
             f"`{CMD_JOB_SETTINGS}` / `{CMD_JOB_SETTINGS_ALIAS}` - Open job settings\n"
-            f"`{CMD_JOBBANK_TEST}` - Run Job Bank listing test\n"
             f"`{CMD_JOB_PIPELINE_TEST}` - Full pipeline test with metrics\n"
-            f"`{CMD_JOBBANK_FILTERS} [query|clear]` - Additional native filters"
+            f"`{CMD_BEST_JOBS}` / `{CMD_BEST_JOBS_ALIAS}` - Top archive matches for your profile - `.best week 15`"
         ),
         inline=False,
     )
@@ -295,6 +305,33 @@ def _expand_command_aliases(prefixes: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(expanded)
 
 
+_MENTION_ID_PATTERN = re.compile(r"<@[!&]?(\d+)>")
+
+
+def parse_quota_payload(payload: str) -> tuple[str, str, str]:
+    """Split a `.quota` payload into (action, target, value).
+
+    Accepted forms, all owner-only:
+        .quota                          show the current policy
+        .quota default 0.5              everyone without a role or override
+        .quota role @Role 0.7           per-role share
+        .quota user @member 0.3         manual per-user share
+        .quota clear user @member       drop an override back to inherited
+    """
+    parts = str(payload or "").split()
+    if not parts:
+        return "show", "", ""
+    action = parts[0].lower()
+    if action == "clear":
+        scope = parts[1].lower() if len(parts) > 1 else ""
+        return "clear", scope, " ".join(parts[2:])
+    if action in ("default", "role", "user"):
+        if action == "default":
+            return "default", "", " ".join(parts[1:])
+        return action, " ".join(parts[1:-1]), parts[-1] if len(parts) > 1 else ""
+    return "unknown", "", ""
+
+
 def _extract_command_payload(content: str, command: str) -> str:
     stripped = content.strip()
     for alias in _expand_command_aliases((command,)):
@@ -319,6 +356,100 @@ def _extract_aggressiveness_flags(content: str) -> tuple[str, bool, bool]:
     if _AGGRESSIVE_FLAG_PATTERN.search(content):
         return _AGGRESSIVE_FLAG_PATTERN.sub("", content), True, False
     return content, False, False
+
+
+# Discord's hard message cap is 2000; a directive far past this is a paste
+# accident, and an unbounded string would displace the real prompt content.
+MAX_LLM_DIRECTIVE_CHARS = 600
+
+
+def _extract_llm_directive(content: str) -> tuple[str, str]:
+    """Strip ``(...)`` free-form model instructions from command text.
+
+    Returns ``(cleaned_content, directive)``; the directive is ``""`` when the
+    command carries no parenthesised span. Stripping matters as much as
+    capturing: the resume commands treat whatever remains as a target
+    username, so an unstripped ``(...)`` becomes "Could not resolve ... to a
+    server member."
+
+    Depth-tracked rather than regex-matched, because the obvious
+    ``\\(([^()]*)\\)`` gets the common cases wrong: a wiki URL ending in
+    ``_(bar))`` yields the directive "bar" and leaves the rest of the span
+    behind as a bogus username. Nested parens are consumed whole, every
+    top-level group is taken (so ``(a) ricky (b)`` still resolves the target),
+    and an unclosed ``(`` runs to end-of-line instead of being ignored.
+    """
+    parts: list[str] = []
+    kept: list[str] = []
+    depth = 0
+    start = 0
+    for index, char in enumerate(content):
+        if char == "(":
+            if depth == 0:
+                kept.append(content[start:index])
+                start = index + 1
+            depth += 1
+        elif char == ")" and depth > 0:
+            depth -= 1
+            if depth == 0:
+                parts.append(content[start:index])
+                start = index + 1
+    if depth > 0:  # unclosed "(" — treat the remainder as the directive
+        parts.append(content[start:])
+    else:
+        kept.append(content[start:])
+
+    if not parts:
+        return content, ""
+    directive = " ".join("; ".join(parts).split())[:MAX_LLM_DIRECTIVE_CHARS]
+    return "".join(kept), directive
+
+
+_BEST_JOBS_WINDOW_ALIASES: dict[str, str] = {
+    "day": "day", "today": "day", "d": "day", "24h": "day", "1d": "day",
+    "week": "week", "weekly": "week", "w": "week", "7d": "week", "7": "week",
+}
+
+
+def parse_best_jobs_payload(payload: str) -> tuple[str, int, str | None, bool, str | None]:
+    """Parse ``[day|week] [N] [profile] [--fast]`` for the best-jobs command.
+
+    Tokens are identified by shape rather than position, so `.best 20 week`
+    works as well as `.best week 20`. ``--fast`` skips the description-fetch
+    stage, trading ranking quality for a much faster answer. Returns
+    ``(window, limit, profile_token, enrich, error)``; ``error`` is non-None
+    only for input that cannot be honoured at all, so a bare `.best` is valid
+    and takes every default.
+    """
+    window = "day"
+    limit = job_match.DEFAULT_LIMIT
+    enrich = True
+    profile_parts: list[str] = []
+
+    for token in str(payload).split():
+        lowered = token.lower()
+        if lowered in ("--fast", "-fast", "fast"):
+            enrich = False
+            continue
+        if lowered in _BEST_JOBS_WINDOW_ALIASES:
+            window = _BEST_JOBS_WINDOW_ALIASES[lowered]
+            continue
+        if lowered.isdigit():
+            value = int(lowered)
+            if not 1 <= value <= job_match.MAX_LIMIT:
+                return window, limit, None, enrich, (
+                    f"Result count must be between 1 and {job_match.MAX_LIMIT} (got {value})."
+                )
+            limit = value
+            continue
+        profile_parts.append(token)
+
+    if len(profile_parts) > 1:
+        return window, limit, None, enrich, (
+            f"Unrecognized options: {' '.join(profile_parts)}. "
+            f"Usage: `{CMD_BEST_JOBS} [day|week] [count] [profile] [--fast]`."
+        )
+    return window, limit, (profile_parts[0] if profile_parts else None), enrich, None
 
 
 def _command_matches(content: str, prefix: str, normalize: bool) -> bool:
@@ -369,6 +500,12 @@ def command_handler(*prefixes: str, normalize: bool = False) -> Callable[[Messag
 
 
 class CommandRouter:
+    # Set once .reset has launched a forcerun; a second one would kill the
+    # replacement mid-warmup. No lock needed -- handle_reset checks and sets it
+    # with no await in between. On the class so a router built without
+    # __init__ still reads a sane default.
+    _restart_spawned = False
+
     def __init__(
         self,
         client: discord.Client,
@@ -396,14 +533,14 @@ class CommandRouter:
 
         self.handlers: tuple[MessageHandler, ...] = (
             self.handle_commands,
+            self.handle_reset,
             self.handle_resume,
             self.handle_resume_cover,
             self.handle_resume_check,
             self.handle_status,
             self.handle_health,
-            self.handle_jobbank_test,
             self.handle_job_pipeline_test,
-            self.handle_jobbank_filters,
+            self.handle_best_jobs,
             self.handle_clear_reddit_seen,
             self.handle_reddit_settings,
             self.handle_hello,
@@ -411,6 +548,7 @@ class CommandRouter:
             self.handle_job_settings,
             self.handle_continue,
             self.handle_scrape,
+            self.handle_quota,
         )
 
     async def _run_interactive(
@@ -590,6 +728,15 @@ class CommandRouter:
         reddit_task = self.watcher_manager.channel_reddit_tasks.get(channel_id)
         channel_name = getattr(message.channel, "name", str(channel_id))
 
+        # None while the browser is down: that is not a session problem, and
+        # session_valid() would read False and report it as one. A plain flag
+        # read, so it costs nothing to ask on every .health.
+        from services import browser_service
+
+        reddit_session = (
+            browser_service.session_valid() if browser_service.is_ready() else None
+        )
+
         embeds = build_channel_health_embed(
             self.health,
             channel_id,
@@ -599,6 +746,7 @@ class CommandRouter:
             active_job_watchers=active_job,
             active_reddit_watchers=active_reddit,
             scheduler_stats=self.scheduler.stats(),
+            reddit_session_valid=reddit_session,
         )
         await message.channel.send(embeds=embeds)
         return True
@@ -616,6 +764,28 @@ class CommandRouter:
             return await message.channel.fetch_message(reference.message_id)
         except (AttributeError, discord.NotFound, discord.HTTPException):
             return None
+
+    async def _read_text_attachment(self, message: discord.Message) -> str:
+        """Fall back to text-file attachment(s) when a message has no body
+        content: e.g. a job post pasted as one or more .txt uploads instead
+        of typed. Multiple attachments are concatenated in upload order."""
+        attachments = getattr(message, "attachments", None) or []
+        chunks: list[str] = []
+        for attachment in attachments:
+            filename = str(getattr(attachment, "filename", "") or "")
+            if not filename.lower().endswith((".txt", ".md")):
+                continue
+            try:
+                raw = await attachment.read()
+            except (AttributeError, discord.NotFound, discord.HTTPException):
+                continue
+            try:
+                text = raw.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                continue
+            if text:
+                chunks.append(text)
+        return "\n".join(chunks)
 
     def build_resume_missing_key_message(self) -> str:
         return (
@@ -727,8 +897,138 @@ class CommandRouter:
 
         return None, f"Could not resolve `{target_token}` to a server member."
 
-    def owner_profile_key(self, guild_owner_id: int | None) -> int | str | None:
-        return self.config.main_user_profile_key or guild_owner_id
+    @staticmethod
+    def _profile_has_content(cache_root: Path, profile_key: str | int | None) -> bool:
+        """True when this profile has resume text a ranker can actually match on.
+
+        ``profile_cache_seed_ready()`` only checks that the three seed files
+        exist, and ``ensure_profile_cache()`` creates them empty -- so every
+        member who has ever touched a resume command has a "ready" directory
+        holding a 0-byte baseinfo.txt. Ranking against one of those produces the
+        "no resume content" dead end, so the default picker skips them.
+        """
+        if profile_key is None:
+            return False
+        try:
+            text = (profile_cache_dir(profile_key, cache_root) / "baseinfo.txt").read_text(
+                encoding="utf-8"
+            )
+        except OSError:
+            return False
+        return bool(text.strip())
+
+    async def _member_profile_key(
+        self,
+        guild: Any,
+        user_id: int | None,
+        cache_root: Path,
+    ) -> str | None:
+        """The cache key for ``user_id``'s profile, resolved through their username.
+
+        Profile directories are named after the Discord username
+        (``discord_profile_key``), never the numeric id, so a raw owner_id can
+        never address one. The member may not be in the cache -- the bot runs on
+        ``Intents.default()``, which has no members intent -- so fall back to an
+        HTTP fetch, which does not need it.
+        """
+        if guild is None or user_id is None:
+            return None
+
+        member = getattr(guild, "owner", None)
+        if self._normalized_discord_id(getattr(member, "id", None)) != user_id:
+            member = None
+        if member is None:
+            getter = getattr(guild, "get_member", None)
+            member = getter(user_id) if callable(getter) else None
+        if member is None:
+            fetch = getattr(guild, "fetch_member", None)
+            if callable(fetch):
+                try:
+                    member = await fetch(user_id)
+                except (discord.HTTPException, discord.NotFound, AttributeError, TypeError):
+                    member = None
+
+        username = self._author_profile_name(member)
+        if not username:
+            return None
+        key = discord_profile_key(user_id, username)
+        return key if (cache_root / key).is_dir() else None
+
+    async def resolve_default_profile_key(
+        self,
+        message: discord.Message,
+        cache_root: Path = RESUMES_CACHE_ROOT,
+    ) -> str | int | None:
+        """Which profile a no-argument ranking command should rank for.
+
+        The channel's owner is the intended default. An explicitly configured
+        MAIN_USER_PROFILE still wins (that is what setting it means), but the
+        bare "example" fallback config.py substitutes when it is unset does not
+        -- that seed profile is empty by design.
+        """
+        configured = self.config.main_user_profile_key
+        if configured and str(configured).lower() != EXAMPLE_PROFILE_KEY:
+            return configured
+
+        guild = getattr(message, "guild", None)
+        owner_id = self._normalized_discord_id(getattr(guild, "owner_id", None))
+        owner_key = await self._member_profile_key(guild, owner_id, cache_root)
+        if owner_key and self._profile_has_content(cache_root, owner_key):
+            return owner_key
+
+        # A DM has no owner; rank for whoever is talking to the bot.
+        if guild is None:
+            author = getattr(message, "author", None)
+            author_key = discord_profile_key(
+                self._normalized_discord_id(getattr(author, "id", None)) or 0,
+                self._author_profile_name(author),
+            )
+            if self._profile_has_content(cache_root, author_key):
+                return author_key
+
+        # Only when the owner could not be identified at all -- no guild, or a
+        # member lookup the bot could not complete. If the owner IS known and
+        # their profile is simply empty, fall through to the caller's "seed one
+        # first" message instead: silently ranking some other member's resume
+        # would answer a question nobody asked, and would show one member's
+        # matches to the whole channel.
+        if owner_key is None:
+            with_content = [
+                path.name
+                for path in sorted(cache_root.iterdir())
+                if path.is_dir()
+                and path.name != EXAMPLE_PROFILE_KEY
+                and self._profile_has_content(cache_root, path.name)
+            ] if cache_root.is_dir() else []
+            if len(with_content) == 1:
+                return with_content[0]
+
+        # Nothing usable. Returning an empty profile directory here would only
+        # buy the ranker's "seed it first" message one archive scan later; the
+        # caller says it straight away instead.
+        return None
+
+    async def _resolve_member_profile_token(
+        self,
+        message: discord.Message,
+        token: str,
+        cache_root: Path,
+    ) -> str:
+        """Turn an @mention into the username the cache is keyed by.
+
+        Anything else is passed through untouched for the folder-name resolver.
+        """
+        mention_id = self._parse_user_mention_id(token)
+        if mention_id is None:
+            return token
+        # Permission is checked by the caller, but check it here too before
+        # spending a member fetch on a request that is about to be refused.
+        if not self._is_guild_owner(message):
+            return token
+        key = await self._member_profile_key(
+            getattr(message, "guild", None), mention_id, cache_root
+        )
+        return key or token
 
     def _resolve_owner_profile_key_from_payload(
         self,
@@ -818,7 +1118,12 @@ class CommandRouter:
 
         content = str(getattr(referenced, "content", "")).strip()
         if not content:
-            await message.channel.send("The replied message does not contain a text job post to parse.")
+            content = await self._read_text_attachment(referenced)
+        if not content:
+            await message.channel.send(
+                "The replied message does not contain a text job post to parse, "
+                "and no readable text file attachment was found."
+            )
             return None
 
         listing_lines = [line.strip() for line in content.splitlines() if line.strip()]
@@ -949,8 +1254,17 @@ class CommandRouter:
 
     @command_handler(CMD_RESUME, normalize=True)
     async def handle_resume(self, message: discord.Message) -> bool:
-        stripped_content, aggressive, strong_aggressive = _extract_aggressiveness_flags(str(getattr(message, "content", "")))
-        if aggressive or strong_aggressive:
+        raw_content = str(getattr(message, "content", ""))
+        # Directive first: flag stripping is a whole-message regex, so running
+        # it first eats a "--aggressive" written INSIDE the steer and silently
+        # turns the mode on — the opposite of what "(avoid --aggressive
+        # phrasing)" asked for.
+        stripped_content, user_directive = _extract_llm_directive(raw_content)
+        stripped_content, aggressive, strong_aggressive = _extract_aggressiveness_flags(stripped_content)
+        # Keyed on the content actually changing, not on the directive being
+        # non-empty: ".resumebuild ()" strips to nothing but must still be
+        # re-wrapped, or the bare "()" is read as a target username.
+        if stripped_content != raw_content:
             message = _ContentOverrideMessage(message, stripped_content)
 
         request = await self._prepare_resume_request(message, CMD_RESUME, PRIMARY_RESUME_SLASH_COMMAND)
@@ -993,6 +1307,15 @@ class CommandRouter:
                 message="Gemini cache skipped: no Gemini API key configured.",
             )
 
+        allowance = self._member_allowance(message)
+        if allowance.blocked:
+            await message.channel.send(
+                f"Resume generation is not available on your quota. "
+                f"Ask the server owner for a share: `{CMD_QUOTA} user @you 0.5`.",
+                **reply_send_kwargs,
+            )
+            return True
+
         rewrite_result = await self._run_interactive(
             generate_resume_rewrite,
             settings,
@@ -1004,6 +1327,10 @@ class CommandRouter:
             label=scheduler_labels.RESUME_REWRITE,
             aggressive=aggressive,
             strong_aggressive=strong_aggressive,
+            user_directive=user_directive,
+            # A reduced share keeps the generation pass and drops the optional
+            # audits in order of cost: a cheaper resume, never a broken one.
+            allowance=allowance,
         )
 
         if rewrite_result.status != "ok" or not rewrite_result.rewritten_resume:
@@ -1154,6 +1481,16 @@ class CommandRouter:
 
     @command_handler(CMD_RESUME_COVER, normalize=True)
     async def handle_resume_cover(self, message: discord.Message) -> bool:
+        # The aggressiveness flags do not change cover-letter generation, but
+        # they must still be stripped: anything left in the message is read as
+        # a target username, so `.resumecoverbuild --aggressive` used to fail
+        # with "Could not resolve `--aggressive` to a server member."
+        raw_content = str(getattr(message, "content", ""))
+        stripped_content, user_directive = _extract_llm_directive(raw_content)
+        stripped_content, _aggressive, _strong = _extract_aggressiveness_flags(stripped_content)
+        if stripped_content != raw_content:
+            message = _ContentOverrideMessage(message, stripped_content)
+
         request = await self._prepare_resume_request(message, CMD_RESUME_COVER, "/resumecoverbuild")
         if request is None:
             return True
@@ -1164,6 +1501,15 @@ class CommandRouter:
         compile_log_dir = self.config.resume_cache_dir / "compile_logs"
         cover_log_path = compile_log_dir / f"{profile_dir.name}.coverbuild.log"
 
+        allowance = self._member_allowance(message)
+        if allowance.blocked:
+            await message.channel.send(
+                f"Cover letter generation is not available on your quota. "
+                f"Ask the server owner for a share: `{CMD_QUOTA} user @you 0.5`.",
+                **reply_send_kwargs,
+            )
+            return True
+
         cover_result = await self._run_interactive(
             generate_cover_letter,
             request.settings,
@@ -1171,6 +1517,8 @@ class CommandRouter:
             request.template_path,
             profile_dir / "baseinfo.txt",
             label=scheduler_labels.RESUME_COVER_REWRITE,
+            user_directive=user_directive,
+            allowance=allowance,
         )
 
         if cover_result.status != "ok" or not cover_result.latex_document:
@@ -1223,6 +1571,13 @@ class CommandRouter:
 
     @command_handler(CMD_RESUME_CHECK, normalize=True)
     async def handle_resume_check(self, message: discord.Message) -> bool:
+        # No LLM runs here — this is a raw template compile — so a directive
+        # has nothing to steer. Strip it anyway so the parse stays uniform
+        # across the resume family and `(...)` is never read as a username.
+        check_content, _directive = _extract_llm_directive(str(getattr(message, "content", "")))
+        if check_content != str(getattr(message, "content", "")):
+            message = _ContentOverrideMessage(message, check_content)
+
         guild_owner_id = getattr(getattr(message, "guild", None), "owner_id", None)
         if guild_owner_id is None:
             await message.channel.send(f"`{CMD_RESUME_CHECK}` is only available in a server channel.")
@@ -1331,56 +1686,313 @@ class CommandRouter:
         await message.channel.send("Cleared reddit seen list for this channel.")
         return True
 
-    @command_handler(CMD_JOBBANK_TEST, normalize=True)
-    async def handle_jobbank_test(self, message: discord.Message) -> bool:
+    @command_handler(CMD_BEST_JOBS, CMD_BEST_JOBS_ALIAS, normalize=True)
+    async def handle_best_jobs(self, message: discord.Message) -> bool:
+        payload = _extract_command_payload(message.content, CMD_BEST_JOBS)
+        if not payload:
+            payload = _extract_command_payload(message.content, CMD_BEST_JOBS_ALIAS)
+        window, limit, profile_token, enrich, error = parse_best_jobs_payload(payload)
+        if error:
+            await message.channel.send(error, **quiet_reply_kwargs(message))
+            return True
 
-        settings = self.store.get_job_settings(message.channel.id)
-        keywords = str(settings.get("keywords") or "").strip()
-        location = str(settings.get("location") or "").strip()
+        profile_key: str | int | None
+        if profile_token:
+            # Same rule as the resume commands: only the server owner may point
+            # a command at somebody else's resume cache. An @mention is accepted
+            # as well as a folder name, since naming a member is the obvious way
+            # to ask for their matches.
+            profile_token = await self._resolve_member_profile_token(
+                message, profile_token, RESUMES_CACHE_ROOT
+            )
+            resolved, resolve_error = self._resolve_owner_profile_key_from_payload(
+                _ContentOverrideMessage(message, f"{CMD_BEST_JOBS} {profile_token}"),
+                CMD_BEST_JOBS,
+                RESUMES_CACHE_ROOT,
+            )
+            if resolve_error:
+                await message.channel.send(resolve_error, **quiet_reply_kwargs(message))
+                return True
+            profile_key = resolved
+        else:
+            profile_key = await self.resolve_default_profile_key(message, RESUMES_CACHE_ROOT)
 
-        used_sample_fallback = False
-        if not keywords:
-            keywords = "jobs"
-            used_sample_fallback = True
-        if not location:
-            location = "Canada"
-            used_sample_fallback = True
-
-        native_query = job_service.effective_jobbank_native_query(str(settings.get("jobbank_native_query") or ""))
-
-        requested = max(1, min(int(settings.get("results_wanted") or 10), 10))
-        items = await self._run_interactive(
-            job_service.scrape_job_postings,
-            [job_service.JOBBANK_CANADA_SITE],
-            keywords,
-            location,
-            self.config.jobspy_python_exe,
-            int(settings.get("hours_old") or 72),
-            requested,
-            int(settings.get("radius_miles") or 25),
-            str(settings.get("country_indeed") or "AUTO"),
-            "command:jobbanktest",
-            bool(settings.get("allow_north_america", False)),
-            native_query,
-            label=scheduler_labels.JOBBANK_TEST_SCRAPE,
-        )
-
-        source_label = "sample params" if used_sample_fallback else "watcher params"
-        native_count = len(native_query)
-        if not items:
+        if profile_key is None:
             await message.channel.send(
-                "Job Bank test returned no listings "
-                f"using {source_label}: '{keywords}' in '{location}' with {native_count} native filter key(s)."
+                f"No seeded resume profile to rank against. Run `{CMD_RESUME}` to seed one, "
+                f"or name a profile: `{CMD_BEST_JOBS} {window} {limit} <profile>`.",
+                **quiet_reply_kwargs(message),
             )
             return True
 
-        lines = [
-            f"Job Bank test results ({len(items)} listing(s), {source_label}, native filters={native_count}):"
-        ]
-        for item in items:
-            lines.append(self.watcher_manager.format_job_watcher_message(item))
+        allowance = self._member_allowance(message)
+        if allowance.blocked:
+            await message.channel.send(
+                f"`{CMD_BEST_JOBS}` is not available on your quota. "
+                f"Ask the server owner for a share: `{CMD_QUOTA} user @you 0.5`.",
+                **quiet_reply_kwargs(message),
+            )
+            return True
 
-        await message.channel.send(self.set_continuation(message.channel.id, "\n\n".join(lines)))
+        status_note = (
+            "fetching descriptions, then ranking" if enrich else "ranking (fast, titles only)"
+        )
+        if not allowance.full:
+            status_note += f" · {allowance.describe()}"
+        status_message = await message.channel.send(
+            f"Best matches for the last {window} - {status_note}...",
+            **quiet_reply_kwargs(message),
+        )
+        # Scope the archive to this channel's own job-watcher settings --
+        # otherwise the ranking draws from every channel's search, not just
+        # the one the command was actually run in.
+        job_settings = self.store.get_job_settings(message.channel.id)
+        try:
+            report = await self._run_interactive(
+                job_match.best_jobs,
+                profile_key,
+                window=window,
+                limit=limit,
+                settings=load_gemini_settings(self.config),
+                cache_root=RESUMES_CACHE_ROOT,
+                enrich=enrich,
+                llm_candidates=allowance.scale(job_match.LLM_CANDIDATES, minimum=5),
+                enrich_candidates=allowance.scale(job_match.ENRICH_CANDIDATES, minimum=2),
+                role_filters=job_settings["role_filters"],
+                exclusion_terms=job_settings["exclusion_terms"],
+                allow_north_america=bool(job_settings.get("allow_north_america", False)),
+                label=scheduler_labels.BEST_JOBS_RANK,
+            )
+        except Exception as exc:
+            await status_message.edit(content=f"`{CMD_BEST_JOBS}` failed: {exc}")
+            return True
+
+        text = job_match.format_match_report(report, window)
+        try:
+            await status_message.delete()
+        except (discord.NotFound, discord.HTTPException):
+            pass
+        await message.channel.send(
+            self.set_continuation(message.channel.id, text), **quiet_reply_kwargs(message)
+        )
+        return True
+
+    def _member_allowance(self, message: discord.Message):
+        """This author's share of the expensive work in one command."""
+        from services import quota
+
+        guild = getattr(message, "guild", None)
+        # A router without a store (tests, and any future embedding that does
+        # not persist state) still has to run its commands: an unreadable quota
+        # means "no quota configured", never a failed command. Same fail-open
+        # rule the description cache follows -- a limiter that can take the bot
+        # down is worse than no limiter.
+        store = getattr(self, "store", None)
+        if store is None:
+            from services.quota import QuotaPolicy
+
+            policy = QuotaPolicy()
+        else:
+            policy = store.get_quota_policy(
+                self._normalized_discord_id(getattr(guild, "id", None))
+            )
+        author = getattr(message, "author", None)
+        role_ids = tuple(
+            rid for rid in (
+                self._normalized_discord_id(getattr(role, "id", None))
+                for role in (getattr(author, "roles", None) or ())
+            ) if rid is not None
+        )
+        return quota.allowance_for(
+            policy,
+            user_id=self._normalized_discord_id(getattr(author, "id", None)),
+            role_ids=role_ids,
+            is_owner=self._is_guild_owner(message),
+        )
+
+    @staticmethod
+    def _quota_target_id(text: str) -> int | None:
+        """A user or role id from a mention, or a raw id typed directly."""
+        match = _MENTION_ID_PATTERN.search(str(text or ""))
+        if match:
+            return int(match.group(1))
+        try:
+            return int(str(text).strip())
+        except (TypeError, ValueError):
+            return None
+
+    def _format_quota_policy(self, message: discord.Message, policy) -> str:
+        from services import quota
+
+        guild = getattr(message, "guild", None)
+        lines = [
+            f"Quota shares (0-1) for `{getattr(guild, 'name', 'this server')}`",
+            f"  default: {policy.default_share:.2f} "
+            f"({quota.Allowance(policy.default_share).describe()})",
+        ]
+        if policy.role_shares:
+            lines.append("  roles:")
+            for role_id, share in sorted(policy.role_shares.items()):
+                role = discord.utils.get(getattr(guild, "roles", None) or [], id=role_id)
+                lines.append(f"    {getattr(role, 'name', role_id)}: {share:.2f}")
+        if policy.user_shares:
+            lines.append("  members (manual overrides, these win over roles):")
+            for user_id, share in sorted(policy.user_shares.items()):
+                member = discord.utils.get(getattr(guild, "members", None) or [], id=user_id)
+                lines.append(f"    {getattr(member, 'display_name', user_id)}: {share:.2f}")
+        lines.append("")
+        lines.append(
+            f"The server owner is always {quota.FULL_SHARE:.1f} and cannot be limited. "
+            f"A share below {quota.BLOCKED_BELOW} refuses the command outright."
+        )
+        return "\n".join(lines)
+
+    @command_handler(CMD_RESET, normalize=True)
+    async def handle_reset(self, message: discord.Message) -> bool:
+        """Restart the bot: spawn `run.py --forcerun` detached (not a child of
+        this process, so it outlives it) in run.bat's directory. That spawned
+        process kills this one and starts a genuinely new interpreter, which
+        imports every module fresh off disk -- not a fork/clone of this
+        process's already-loaded state, so any code changes since this
+        process started are what the restarted bot runs.
+        """
+        if not self._is_guild_owner(message):
+            await message.channel.send(
+                "Only the server owner can reset the bot.",
+                **quiet_reply_kwargs(message),
+            )
+            return True
+
+        from services import platform_support
+
+        if self._restart_spawned:
+            await message.channel.send(
+                "A restart is already in progress.", **quiet_reply_kwargs(message)
+            )
+            return True
+        # Claim it before the first await, or a .reset arriving mid-send races in.
+        self._restart_spawned = True
+
+        # Confirm intent BEFORE spawning: once the child's forcerun reaches its
+        # kill step, this process can be gone within milliseconds (Windows'
+        # taskkill /F is immediate), too fast to rely on a reply sent after.
+        await message.channel.send("Restarting...", **quiet_reply_kwargs(message))
+
+        run_py = self.config.base_dir / "run.py"
+        # The child's output used to go to DEVNULL, so the one process that
+        # knew why a restart failed wrote its reason nowhere -- and this process
+        # is about to be killed by it, taking the question with it.
+        ok, detail = platform_support.spawn_detached(
+            [sys.executable, str(run_py), "--forcerun"],
+            cwd=self.config.base_dir,
+            log_path=self.config.base_dir / ".restart.log",
+        )
+        if not ok:
+            # Either nothing spawned or it died on startup, so this process
+            # stays -- release the claim, or one failed launch refuses every
+            # later .reset for this process's life. That was the trap: a child
+            # that exited immediately still made Popen succeed, so the bot said
+            # "Restarting...", never restarted, and would not try again.
+            self._restart_spawned = False
+            await message.channel.send(
+                f"Restart failed to launch: {detail}", **quiet_reply_kwargs(message)
+            )
+        return True
+
+    @command_handler(CMD_QUOTA, normalize=True)
+    async def handle_quota(self, message: discord.Message) -> bool:
+        from services import quota
+
+        if not self._is_guild_owner(message):
+            await message.channel.send(
+                "Only the server owner can view or change quotas.",
+                **quiet_reply_kwargs(message),
+            )
+            return True
+
+        guild_id = self._normalized_discord_id(getattr(getattr(message, "guild", None), "id", None))
+        if guild_id is None:
+            await message.channel.send(
+                "Quotas are per-server, so this only works inside a server.",
+                **quiet_reply_kwargs(message),
+            )
+            return True
+
+        policy = self.store.get_quota_policy(guild_id)
+        action, target, value = parse_quota_payload(
+            _extract_command_payload(message.content, CMD_QUOTA)
+        )
+
+        if action == "show":
+            await message.channel.send(
+                self._format_quota_policy(message, policy), **quiet_reply_kwargs(message)
+            )
+            return True
+
+        if action == "unknown":
+            await message.channel.send(
+                f"Usage: `{CMD_QUOTA}` · `{CMD_QUOTA} default 0.5` · "
+                f"`{CMD_QUOTA} role @Role 0.7` · `{CMD_QUOTA} user @member 0.3` · "
+                f"`{CMD_QUOTA} clear user @member`",
+                **quiet_reply_kwargs(message),
+            )
+            return True
+
+        if action == "clear":
+            target_id = self._quota_target_id(value)
+            table = policy.user_shares if target == "user" else policy.role_shares
+            if target not in ("user", "role") or target_id is None:
+                await message.channel.send(
+                    f"Usage: `{CMD_QUOTA} clear user @member` or "
+                    f"`{CMD_QUOTA} clear role @Role`.",
+                    **quiet_reply_kwargs(message),
+                )
+                return True
+            if table.pop(target_id, None) is None:
+                await message.channel.send(
+                    f"No {target} override was set for that.", **quiet_reply_kwargs(message)
+                )
+                return True
+            self.store.set_quota_policy(guild_id, policy)
+            await message.channel.send(
+                f"Cleared the {target} override; it now inherits "
+                f"{'its role or ' if target == 'user' else ''}the default.",
+                **quiet_reply_kwargs(message),
+            )
+            return True
+
+        share = quota.clamp_share(value)
+        if share is None:
+            await message.channel.send(
+                f"The share must be a number from 0 to 1 -- `0.5` is half the allowance, "
+                f"`0` refuses the command. Got `{value}`.",
+                **quiet_reply_kwargs(message),
+            )
+            return True
+
+        if action == "default":
+            policy.default_share = share
+            label = "default"
+        else:
+            target_id = self._quota_target_id(target)
+            if target_id is None:
+                await message.channel.send(
+                    f"Name the {action} by mention or id: `{CMD_QUOTA} {action} @"
+                    f"{'member' if action == 'user' else 'Role'} {share}`.",
+                    **quiet_reply_kwargs(message),
+                )
+                return True
+            if action == "user":
+                policy.user_shares[target_id] = share
+            else:
+                policy.role_shares[target_id] = share
+            label = f"{action} {target.strip()}"
+
+        self.store.set_quota_policy(guild_id, policy)
+        await message.channel.send(
+            f"Set {label} to {share:.2f} -- {quota.Allowance(share).describe()}.",
+            **quiet_reply_kwargs(message),
+        )
         return True
 
     @command_handler(CMD_JOB_PIPELINE_TEST, normalize=True)
@@ -1416,7 +2028,6 @@ class CommandRouter:
         radius_miles = max(0, int(settings.get("radius_miles") or 25))
         country_indeed = str(settings.get("country_indeed") or "AUTO")
         allow_na = bool(settings.get("allow_north_america", False))
-        native_query = job_service.effective_jobbank_native_query(str(settings.get("jobbank_native_query") or ""))
         try:
             sem_threshold = float(settings.get("semantic_threshold") or 0.30)
         except (TypeError, ValueError):
@@ -1441,7 +2052,6 @@ class CommandRouter:
             country_indeed,
             "command:jobtest",
             allow_na,
-            native_query,
             label=scheduler_labels.JOB_PIPELINE_TEST_SCRAPE,
         )
         t_scrape = _time.perf_counter()
@@ -1561,38 +2171,6 @@ class CommandRouter:
             await status_msg.edit(content=self.set_continuation(message.channel.id, "\n".join(lines)))
         except discord.HTTPException:
             await message.channel.send(self.set_continuation(message.channel.id, "\n".join(lines)))
-        return True
-
-    @command_handler(CMD_JOBBANK_FILTERS, normalize=True)
-    async def handle_jobbank_filters(self, message: discord.Message) -> bool:
-
-        payload = _extract_command_payload(message.content, CMD_JOBBANK_FILTERS)
-        current = str(self.store.get_job_settings(message.channel.id).get("jobbank_native_query") or "")
-        if not payload:
-            if current:
-                await message.channel.send(
-                    "Current additional Job Bank native filters: "
-                    f"`{current}`\nDefault Job Bank native filters are always applied."
-                )
-            else:
-                await message.channel.send(
-                    "No additional Job Bank native filters set. Default Job Bank native filters are still applied. "
-                    f"Use `{CMD_JOBBANK_FILTERS} <query>` (without URL), for example: "
-                    f"`{CMD_JOBBANK_FILTERS} fgeo=27234&fn21=21231`."
-                )
-            return True
-
-        if payload.lower() in {"clear", "reset", "none"}:
-            self.store.update_job_setting(message.channel.id, "jobbank_native_query", "")
-            await message.channel.send("Cleared additional Job Bank native filters for this channel (defaults remain active).")
-            return True
-
-        query_text = payload[1:] if payload.startswith("?") else payload
-        self.store.update_job_setting(message.channel.id, "jobbank_native_query", query_text)
-        await message.channel.send(
-            "Saved additional Job Bank native filters for this channel: "
-            f"`{query_text}`\nDefaults remain active and will be merged with these."
-        )
         return True
 
     async def dispatch(self, message: discord.Message) -> bool:

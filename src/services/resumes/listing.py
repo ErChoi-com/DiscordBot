@@ -26,18 +26,30 @@ from .configkey import GeminiSettings
 from .resume import LLM_PROVIDER_SWITCH_ORDER, PROVIDER_CAPABILITIES, TEMPLATE_PATH, extract_latex_document, read_resume_template, resolve_provider_capabilities
 from .structured import (
     StructuredSelection,
+    _build_user_request_block,
     _effective_render_config,
     _extract_jd_tools,
+    apply_domain_fit_verdicts,
     apply_grounding_verdicts,
+    build_domain_fit_audit_items,
+    apply_metric_injection,
     build_grounding_audit_items,
+    build_metric_injection_items,
+    build_skills_rewrite_prompt,
     build_structured_prompt,
+    domain_fit_audit_prompt,
     excerpt_job_description,
     extract_json_object,
     extract_listing_keywords,
+    gather_rewritten_bullet_text,
     grounding_audit_prompt,
+    metric_injection_prompt,
     load_structured_profile,
+    normalize_skills_rewrite_payload,
     parse_structured_response,
     render_structured_resume,
+    THIN_JOB_DESCRIPTION_CHARS,
+    usable_job_description_chars,
 )
 
 # rebuilt_app/.resume_cache — same root the compile logs and failed-latex
@@ -1074,7 +1086,17 @@ def scrape_job_posting(
     posting_url: str,
     timeout_seconds: int = 20,
     user_agent: str = "Mozilla/5.0 (compatible; RebuiltResumeBot/1.0)",
+    allow_browser: bool = True,
 ) -> ScrapedJobPosting:
+    """Scrape one posting through the ladder: per-platform API, plain HTTP,
+    browser, job_service fallback.
+
+    `allow_browser=False` drops the browser rung. There is one shared browser
+    context (services.browser_service) and the Reddit watcher depends on it, so
+    a caller scraping postings in bulk should not let a handful of blocked
+    fetches queue up behind it -- for those callers a missing description is a
+    far better outcome than monopolising the browser.
+    """
     started = time.monotonic()
     # Some job sites (LinkedIn especially) block plain `requests` clients via
     # TLS/JA3 fingerprinting (surfaces as SSLError/EOF). For sites with a
@@ -1106,7 +1128,11 @@ def scrape_job_posting(
         html_text = response.text
     except requests.RequestException as page_exc:
         html_rung = "browser"
-        html_text = _scrape_job_posting_with_browser(posting_url, timeout_seconds)
+        html_text = (
+            _scrape_job_posting_with_browser(posting_url, timeout_seconds)
+            if allow_browser
+            else None
+        )
         if html_text is None:
             try:
                 fallback = _fallback_scrape_job_posting_with_job_service(posting_url)
@@ -1193,10 +1219,19 @@ def load_supporting_prompt_context(
     return "\n\n".join(sections)
 
 
-def build_resume_rewrite_prompt(job: JobContext, scraped_job: ScrapedJobPosting, baseinfo: str, supporting_context: str) -> str:
+def build_resume_rewrite_prompt(
+    job: JobContext,
+    scraped_job: ScrapedJobPosting,
+    baseinfo: str,
+    supporting_context: str,
+    user_directive: str = "",
+) -> str:
     highlights = "\n".join(f"- {line}" for line in scraped_job.highlights[:10]) or "- No specific highlights parsed"
     company_text = scraped_job.company or "Unknown company"
     location_text = scraped_job.location or "Unknown location"
+    # Most profiles are legacy (non-structured), so without this the ``(...)``
+    # argument would be accepted and silently do nothing for nearly everyone.
+    directive_section = _build_user_request_block(user_directive, "the rules in <task> and <output_format>")
 
     return (
         "<task>\n"
@@ -1217,6 +1252,7 @@ def build_resume_rewrite_prompt(job: JobContext, scraped_job: ScrapedJobPosting,
         "</input>\n\n"
         f"{baseinfo or '<context>No baseinfo content available.</context>'}\n\n"
         f"{supporting_context or '<instructions>No additional instructions provided.</instructions>'}\n\n"
+        f"{directive_section}"
         "<output_format>\n"
         "1. rewritten_tex: a complete compilable standalone LaTeX document that follows template.tex.\n"
         "2. Append exactly one <latex>...</latex> block containing the same rewritten_tex document.\n"
@@ -1267,18 +1303,39 @@ def _build_cached_content_config(cache_name: str) -> Any:
         return {"cached_content": cache_name}
 
 
+_TRUNCATION_NOTICE = "\n\n[...content truncated to fit provider limit]"
+
+
 def _truncate_prompt_for_provider(prompt: str, max_chars: int) -> str:
     """Trim a prompt to stay within a provider's character ceiling.
 
-    Tries to break at a paragraph boundary (double newline) to avoid
-    cutting mid-sentence.  Appends a short notice so the model knows
-    the input was trimmed.
+    The structured prompt ends with its ``<output_format>`` block — the rules
+    and the JSON contract the response is parsed against. A plain tail cut
+    therefore deleted the very instructions that make the answer usable: the
+    structured prompt runs ~35k chars against Groq's 24k ceiling, so Groq was
+    being sent an instruction list ending mid-sentence with no schema at all.
+    Keep that block whole and take the space out of the material before it
+    (the candidate/listing content, which degrades gracefully); fall back to
+    the old tail cut only when there is no block to protect, or when the block
+    alone already exceeds the ceiling.
     """
     if len(prompt) <= max_chars:
         return prompt
+
+    marker = "<output_format>"
+    start = prompt.rfind(marker)
+    if start != -1:
+        contract = prompt[start:]
+        budget = max_chars - len(contract) - len(_TRUNCATION_NOTICE)
+        if budget > 500:
+            head = prompt[:start]
+            boundary = head.rfind("\n\n", 0, budget)
+            cut = boundary if boundary > budget // 2 else budget
+            return head[:cut].rstrip() + _TRUNCATION_NOTICE + "\n\n" + contract
+
     boundary = prompt.rfind("\n\n", 0, max_chars)
     cut = boundary if boundary > max_chars // 2 else max_chars
-    return prompt[:cut].rstrip() + "\n\n[...content truncated to fit provider limit]"
+    return prompt[:cut].rstrip() + _TRUNCATION_NOTICE
 
 
 def _openrouter_api_key() -> str | None:
@@ -1618,6 +1675,204 @@ def _audit_selection_grounding(
     return "failed: " + ("; ".join(errors) if errors else "no providers available"), []
 
 
+
+def _inject_metrics(
+    settings: GeminiSettings,
+    catalog: Any,
+    job_title: str,
+    selection: Any,
+    client_factory: Callable[[str], Any] | None,
+) -> tuple[str, list[str]]:
+    """One batched call that adds a figure to every bullet that lacks one.
+
+    Quantified achievement is the strongest signal recruiter guidance names,
+    and permission alone does not produce it: strong-aggressive has always
+    allowed invented numbers and returns the fewest, and enabling
+    allow_invented_metrics plus rewriting the prompt rules moved the corpus
+    ~4 points, inside sampling noise. This pass is what actually closes it.
+
+    Fail-open like the other audits: a provider outage leaves the selection
+    untouched and the status records why.
+    """
+    items, id_map = build_metric_injection_items(catalog, selection)
+    if not items:
+        return "skipped", []
+
+    prompt = metric_injection_prompt(job_title, items)
+    errors: list[str] = []
+    candidates = sorted(
+        _provider_switch_candidates(settings),
+        key=lambda c: 0 if c.name == "gemini-flash" else 1,
+    )
+    for provider_name, text in _iter_provider_responses(
+        settings,
+        prompt,
+        client_factory,
+        json_response=True,
+        candidates=candidates,
+        errors=errors,
+    ):
+        payload = extract_json_object(text)
+        if not isinstance(payload, dict):
+            errors.append(f"{provider_name}: no object in response")
+            continue
+        notes = apply_metric_injection(selection, payload, id_map)
+        return f"ok:{provider_name}", notes
+
+    return "failed: " + ("; ".join(errors) if errors else "no providers available"), []
+
+def _audit_domain_fit(
+    settings: GeminiSettings,
+    catalog: Any,
+    job_title: str,
+    job_description: str,
+    client_factory: Callable[[str], Any] | None,
+) -> tuple[str, frozenset[str], list[str]]:
+    """One batched judge call over every catalog entry; flags entries whose
+    core subject matter is a narrow specialist domain unrelated to this
+    listing's field (see DOMAIN_FIT_AUDIT_PROMPT_HEADER).
+
+    General-purpose companion to the deterministic specialist_categories
+    gate in structured.py, which needs a hand-curated term list per category
+    (currently only "electrical"). This judge needs no per-domain
+    configuration, so it covers any specialist field (healthcare,
+    construction, culinary, legal, ...) a profile owner never anticipated.
+
+    Fail-open by design: if every provider fails or the response is
+    malformed, nothing is gated and the status string records why — same
+    contract as _audit_selection_grounding.
+    """
+    items, id_map = build_domain_fit_audit_items(catalog)
+    if not items:
+        return "skipped", frozenset(), []
+
+    prompt = domain_fit_audit_prompt(job_title, job_description, items)
+    errors: list[str] = []
+    # Cheapest capable model first: the audit is a small classification task.
+    candidates = sorted(
+        _provider_switch_candidates(settings),
+        key=lambda c: 0 if c.name == "gemini-flash" else 1,
+    )
+    for provider_name, text in _iter_provider_responses(
+        settings,
+        prompt,
+        client_factory,
+        json_response=True,
+        candidates=candidates,
+        errors=errors,
+    ):
+        payload = extract_json_object(text)
+        verdicts = payload.get("verdicts") if isinstance(payload, dict) else None
+        if not isinstance(verdicts, list):
+            errors.append(f"{provider_name}: no verdicts in response")
+            continue
+        gated, reasons = apply_domain_fit_verdicts(id_map, verdicts)
+        return f"ok:{provider_name}", frozenset(gated), reasons
+
+    return "failed: " + ("; ".join(errors) if errors else "no providers available"), frozenset(), []
+
+
+def _llm_rewrite_skills(
+    settings: GeminiSettings,
+    catalog: Any,
+    job_title: str,
+    job_description: str,
+    rendered_bullets: str,
+    keywords: list[str],
+    client_factory: Callable[[str], Any] | None,
+    cache_path: Path | None = None,
+    jd_inject_tools: tuple[str, ...] = (),
+) -> tuple[str, dict[str, list[str]] | None]:
+    """Real LLM rewrite of the Skills section (strong-aggressive only): the
+    model chooses and orders items from the candidate's OWNED skill_anchors
+    (plus the same curated jd_inject_tools allowance the deterministic path
+    already injects — see structured._extract_jd_tools) to best match this
+    listing and the resume content actually produced, replacing the
+    deterministic reorder/inject path (structured._rewrite_skills_for_jd)
+    instead of just supplementing it.
+
+    Fail-open by design, same contract as _audit_domain_fit /
+    _audit_selection_grounding: any provider failure or malformed response
+    returns (status, None) and the caller keeps the deterministic path. The
+    "nothing outside owned skills + jd_inject_tools" rule is enforced again
+    in code by structured.apply_llm_skills_rewrite regardless of what comes
+    back here.
+
+    Two efficiency/quality passes beyond a plain audit call:
+    - a response is only ACCEPTED once normalize_skills_rewrite_payload
+      confirms at least one item survives that validation — a model that
+      returns nothing but invented items (or an empty/malformed dict) is
+      treated as a failed attempt and the loop moves to the next provider
+      candidate, instead of "succeeding" with a payload that would render as
+      a silent no-op anyway.
+    - when `cache_path` is given, a fresh validated response is cached raw
+      (same file format/TTL as _selection_cache_path) and reused on the next
+      build of the same listing+profile+mode, skipping the LLM call
+      entirely — this is a second per-build call on top of the main
+      selection, so rebuilding an unchanged listing (a common case: retrying
+      after a LaTeX compile failure, or re-running with a tweaked directive
+      that doesn't touch mode) would otherwise double that cost every time.
+    """
+    prompt = build_skills_rewrite_prompt(
+        catalog, job_title, job_description, rendered_bullets, keywords, jd_inject_tools
+    )
+    if prompt is None:
+        return "skipped", None
+
+    if cache_path is not None:
+        cached_raw = _load_cached_selection(cache_path)
+        if cached_raw:
+            cached_payload = extract_json_object(cached_raw)
+            cached_skills = cached_payload.get("skills") if isinstance(cached_payload, dict) else None
+            if isinstance(cached_skills, dict) and normalize_skills_rewrite_payload(
+                cached_skills, catalog.skill_anchors, catalog.skill_anchor_display, jd_inject_tools,
+                allow_unowned=catalog.render_config.strong_aggressive,
+            ):
+                return "ok:cache", cached_skills
+
+    errors: list[str] = []
+    # Cheapest capable model first: reordering/selecting from a known list is
+    # a small task, same reasoning as the other audits above.
+    candidates = sorted(
+        _provider_switch_candidates(settings),
+        key=lambda c: 0 if c.name == "gemini-flash" else 1,
+    )
+    for provider_name, text in _iter_provider_responses(
+        settings,
+        prompt,
+        client_factory,
+        json_response=True,
+        candidates=candidates,
+        errors=errors,
+    ):
+        payload = extract_json_object(text)
+        skills = payload.get("skills") if isinstance(payload, dict) else None
+        if not isinstance(skills, dict) or not skills:
+            errors.append(f"{provider_name}: no skills object in response")
+            continue
+        if not normalize_skills_rewrite_payload(
+            skills, catalog.skill_anchors, catalog.skill_anchor_display, jd_inject_tools,
+            allow_unowned=catalog.render_config.strong_aggressive,
+        ):
+            errors.append(f"{provider_name}: no skill items survived validation")
+            continue
+        if cache_path is not None:
+            _store_cached_selection(cache_path, text, provider_name)
+        return f"ok:{provider_name}", skills
+
+    return "failed: " + ("; ".join(errors) if errors else "no providers available"), None
+
+
+def _within_allowance(allowance: Any, feature: str) -> bool:
+    """Whether an optional model call is inside the caller's quota share.
+
+    `None` means no quota applies (the owner, a scheduled job, a direct API
+    caller), so every pass runs -- the quota system must never change what
+    happens when nobody has configured one.
+    """
+    return allowance is None or bool(allowance.permits(feature))
+
+
 def _generate_structured_rewrite(
     settings: GeminiSettings,
     job: JobContext,
@@ -1626,6 +1881,8 @@ def _generate_structured_rewrite(
     client_factory: Callable[[str], Any] | None,
     aggressive: bool = False,
     strong_aggressive: bool = False,
+    user_directive: str = "",
+    allowance: Any = None,
 ) -> ResumeRewriteResult:
     """Structured pipeline: LLM returns JSON decisions, Python renders LaTeX.
 
@@ -1639,6 +1896,8 @@ def _generate_structured_rewrite(
     structured._effective_render_config): it never touches number/employer/
     title/date/certification grounding, only the style/conservatism guards.
     `strong_aggressive` is a superset that fabricates all content from the JD.
+    `user_directive` is the caller's free-form ``(...)`` steer, passed to the
+    prompt as a request the model honours only within the existing rules.
     """
     if strong_aggressive:
         catalog.render_config.strong_aggressive = True
@@ -1652,6 +1911,7 @@ def _generate_structured_rewrite(
         job_highlights=scraped_job.highlights,
         catalog=catalog,
         extra_guidance=catalog.guidance,
+        user_directive=user_directive,
     )
 
     provider_errors: list[str] = []
@@ -1683,6 +1943,12 @@ def _generate_structured_rewrite(
     # + the scraped description, so a reposted/edited listing never reuses a
     # selection made against the old text.
     _cache_mode = "sa" if strong_aggressive else ("ag" if aggressive else "")
+    # A directive changes the selection the model returns, so it has to key the
+    # cache too — otherwise the all-providers-failed fallback can serve a
+    # selection built for "emphasise the embedded work" to a request that asked
+    # for the opposite.
+    if user_directive.strip():
+        _cache_mode += "d" + hashlib.sha256(user_directive.strip().encode("utf-8")).hexdigest()[:8]
     cache_path = _selection_cache_path(job.posting_url, catalog.header_block, scraped_job.description, mode=_cache_mode)
     if selection is not None and raw_response:
         _store_cached_selection(cache_path, raw_response, used_provider or "")
@@ -1717,9 +1983,32 @@ def _generate_structured_rewrite(
     # keywordless filter then scrapped — 5-bullet, 0-tailored pages.
     grounding_audit_status = "disabled"
     grounding_flagged: list[str] = []
-    if _effective_render_config(catalog.render_config).grounding_audit and selection.bullets:
+    if (
+        _effective_render_config(catalog.render_config).grounding_audit
+        and selection.bullets
+        and _within_allowance(allowance, "grounding_audit")
+    ):
         grounding_audit_status, grounding_flagged = _audit_selection_grounding(
             settings, catalog, selection, client_factory
+        )
+
+    # Domain-fit audit: general-purpose companion to the deterministic
+    # specialist_categories gate (structured.py) — no per-domain term list
+    # needed, so it also catches specialist fields the profile owner never
+    # curated (healthcare, construction, ...). Same gating as the grounding
+    # audit above (aggressive modes exempt by design); additionally skipped
+    # when every provider already just failed (deterministic_fallback) since
+    # the audit call would only fail again for the same reason.
+    domain_fit_status = "disabled"
+    domain_fit_flagged: list[str] = []
+    llm_domain_gated: frozenset[str] = frozenset()
+    if (
+        _effective_render_config(catalog.render_config).grounding_audit
+        and not deterministic_fallback
+        and _within_allowance(allowance, "domain_fit_audit")
+    ):
+        domain_fit_status, llm_domain_gated, domain_fit_flagged = _audit_domain_fit(
+            settings, catalog, job.title, scraped_job.description or "", client_factory
         )
 
     jd_tools = (
@@ -1727,8 +2016,67 @@ def _generate_structured_rewrite(
         if catalog.render_config.aggressive
         else ()
     )
+
+    # Metric injection: adds a figure to every bullet that came back without
+    # one. Runs AFTER both audits on purpose — an invented figure has no
+    # grounding by construction, so auditing it would only strip what this
+    # pass just added. Gated on allow_invented_metrics (owner decision), and
+    # skipped on deterministic_fallback since no provider is reachable.
+    metric_injection_status = "disabled"
+    metric_injection_notes: list[str] = []
+    if (
+        _effective_render_config(catalog.render_config).allow_invented_metrics
+        and selection.bullets
+        and not deterministic_fallback
+    ):
+        metric_injection_status, metric_injection_notes = _inject_metrics(
+            settings, catalog, job.title, selection, client_factory
+        )
+
+
+    # Skills rewrite: strong-aggressive only, and the actual feature (not an
+    # audit) — unlike the two gates above, this is not skipped by the
+    # grounding_audit flag, since that flag exists to exempt aggressive modes
+    # from anti-fabrication audits, and this pass IS the anti-fabrication
+    # guard for the skills section (see structured.apply_llm_skills_rewrite).
+    # Still skipped on deterministic_fallback: no LLM reachable for the main
+    # rewrite means none is reachable here either. jd_tools is passed through
+    # so this rewrite can't regress the deterministic path's already-
+    # sanctioned JD-tool injection (structured._extract_jd_tools) — without
+    # it, this pass's stricter "owned skills only" validation would silently
+    # strip that injection back out.
+    skills_rewrite_status = "disabled"
+    llm_rewritten_skills: dict[str, list[str]] | None = None
+    if (
+        catalog.render_config.strong_aggressive
+        and not deterministic_fallback
+        and _within_allowance(allowance, "skills_rewrite")
+    ):
+        # Own cache entry (mode suffix keeps it from colliding with the main
+        # selection cache above) — rebuilding the same listing/profile/mode
+        # (e.g. retrying after a LaTeX compile failure) reuses the validated
+        # skills rewrite instead of paying for a second LLM call every time.
+        skills_cache_path = _selection_cache_path(
+            job.posting_url, catalog.header_block, scraped_job.description, mode=_cache_mode + "-skills"
+        )
+        skills_rewrite_status, llm_rewritten_skills = _llm_rewrite_skills(
+            settings,
+            catalog,
+            job.title,
+            scraped_job.description or "",
+            gather_rewritten_bullet_text(catalog, selection),
+            selection.keywords,
+            client_factory,
+            cache_path=skills_cache_path,
+            jd_inject_tools=jd_tools,
+        )
     latex_document, report = render_structured_resume(
-        catalog, selection, jd_tools, jd_text=scraped_job.description or ""
+        catalog,
+        selection,
+        jd_tools,
+        jd_text=scraped_job.description or "",
+        llm_domain_gated=llm_domain_gated,
+        llm_rewritten_skills=llm_rewritten_skills,
     )
 
     summary = {
@@ -1740,9 +2088,14 @@ def _generate_structured_rewrite(
         "tailored_bullets_used": report.tailored_bullets_used,
         "canonical_fallbacks": report.canonical_fallbacks + grounding_flagged,
         "grounding_audit": grounding_audit_status,
+        "metric_injection": metric_injection_status,
         "grounding_flagged": grounding_flagged,
+        "domain_fit_audit": domain_fit_status,
+        "domain_fit_flagged": domain_fit_flagged,
+        "skills_rewrite": skills_rewrite_status,
         "excluded_entries": report.excluded_entries,
         "ignored_exclusions": report.ignored_exclusions,
+        "domain_gated_entries": report.domain_gated_entries,
         "header_tech_applied": report.header_tech_applied,
         "header_tech_rejected": report.header_tech_rejected,
         "fidelity_findings": report.fidelity_findings,
@@ -1778,6 +2131,18 @@ def _generate_structured_rewrite(
             f"{report.visible_bullet_count} bullets, {report.tailored_bullets_used} tailored.{aggressive_suffix}"
         )
 
+    # Say so when there was nothing to tailor against. A scrape that returns
+    # only its metadata header still produces a confident-looking "N tailored"
+    # line, and without this the reader cannot tell that those rewrites were
+    # steered by the job title alone.
+    usable_chars = usable_job_description_chars(scraped_job.description)
+    if usable_chars < THIN_JOB_DESCRIPTION_CHARS:
+        message += (
+            f" WARNING: the posting scrape returned only {usable_chars} characters "
+            "of description, so the tailoring is based on the title alone — "
+            "re-run once the listing loads, or paste the description in."
+        )
+
     _append_structured_telemetry(
         {
             "ts": round(time.time(), 1),
@@ -1792,6 +2157,9 @@ def _generate_structured_rewrite(
             "header_tech_applied": len(report.header_tech_applied),
             "grounding_audit": grounding_audit_status,
             "grounding_flagged": grounding_flagged,
+            "metric_injection": metric_injection_status,
+            "metric_injection_notes": metric_injection_notes,
+            "skills_rewrite": skills_rewrite_status,
             "deterministic": deterministic_fallback,
             "provider_error_count": len(provider_errors),
         }
@@ -1819,6 +2187,8 @@ def generate_resume_rewrite(
     client_factory: Callable[[str], Any] | None = None,
     aggressive: bool = False,
     strong_aggressive: bool = False,
+    user_directive: str = "",
+    allowance: Any = None,
 ) -> ResumeRewriteResult:
     scrape = scraper or scrape_job_posting
     try:
@@ -1840,11 +2210,15 @@ def generate_resume_rewrite(
             client_factory,
             aggressive=aggressive,
             strong_aggressive=strong_aggressive,
+            user_directive=user_directive,
+            allowance=allowance,
         )
 
     baseinfo = load_baseinfo_text(baseinfo_paths)
     supporting_context = load_supporting_prompt_context(support_paths, template_path=template_path)
-    prompt = build_resume_rewrite_prompt(job, scraped_job, baseinfo, supporting_context)
+    prompt = build_resume_rewrite_prompt(
+        job, scraped_job, baseinfo, supporting_context, user_directive
+    )
 
     provider_errors: list[str] = []
     text = ""
@@ -1956,6 +2330,10 @@ def generate_validated_with_providers(
     settings: GeminiSettings,
     validate: Callable[[str], Any],
     client_factory: Callable[[str], Any] | None = None,
+    *,
+    json_response: bool = False,
+    lowest_priority_first: bool = False,
+    errors: list[str] | None = None,
 ) -> tuple[Any, str | None]:
     """Run a prompt through the provider fallback chain (Gemini -> OpenRouter
     -> Groq) and return the first response that `validate` accepts.
@@ -1963,11 +2341,36 @@ def generate_validated_with_providers(
     `validate` maps raw response text to a usable value, or None to reject it
     (rejection advances to the next provider). Returns (value, provider_name),
     or (None, None) when no configured provider produced an accepted response.
+
+    `json_response` asks each provider for structured output.
+
+    `lowest_priority_first` reverses the fallback chain, so the provider the
+    resume commands reach for last is tried first here. That is for background
+    or bulk work whose whole point is to leave the primary providers' quota
+    free for the interactive commands. The rest of the chain still follows in
+    reverse, so an unconfigured or failing last-resort provider degrades to the
+    next one instead of taking the caller down.
+
+    `errors` collects per-provider skip and failure reasons for callers that
+    want to report why nothing succeeded.
     """
-    for provider_name, text in _iter_provider_responses(settings, prompt, client_factory):
+    candidates = None
+    if lowest_priority_first:
+        candidates = list(reversed(_provider_switch_candidates(settings)))
+
+    for provider_name, text in _iter_provider_responses(
+        settings,
+        prompt,
+        client_factory,
+        json_response=json_response,
+        candidates=candidates,
+        errors=errors,
+    ):
         value = validate(text)
         if value is not None:
             return value, provider_name
+        if errors is not None:
+            errors.append(f"{provider_name}: response rejected by validator")
 
     return None, None
 

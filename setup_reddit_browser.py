@@ -19,6 +19,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
+from services import platform_support
+
 try:
     from playwright.sync_api import sync_playwright
 except ImportError:
@@ -31,29 +33,30 @@ _SESSION_DIRS  = ["Network", "Local Storage", "Session Storage", "IndexedDB"]
 BOT_PROFILE = Path(__file__).parent / "chrome_profile"
 
 
-def _chrome_user_data() -> Path:
-    return Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "User Data"
-
-
 def _find_profiles() -> list[tuple[str, str, Path]]:
-    user_data = _chrome_user_data()
-    if not user_data.exists():
-        return []
+    """Every browser profile on this machine, across all user-data dirs the
+    platform shim knows about (Chrome and Chromium)."""
     profiles = []
-    for entry in sorted(user_data.iterdir()):
-        if entry.name != "Default" and not entry.name.startswith("Profile "):
-            continue
-        if not (entry / "Preferences").exists():
-            continue
+    for user_data in platform_support.chrome_user_data_dirs():
         try:
-            prefs = json.loads((entry / "Preferences").read_text(encoding="utf-8", errors="ignore"))
-            name = (prefs.get("profile") or {}).get("name") or entry.name
-            accounts = prefs.get("account_info") or []
-            email = accounts[0].get("email") if accounts else None
-            label = f"{name} — {email}  ({entry.name})" if email else f"{name}  ({entry.name})"
-        except Exception:
-            label = entry.name
-        profiles.append((label, entry.name, entry))
+            entries = sorted(user_data.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name != "Default" and not entry.name.startswith("Profile "):
+                continue
+            if not (entry / "Preferences").exists():
+                continue
+            try:
+                prefs = json.loads((entry / "Preferences").read_text(encoding="utf-8", errors="ignore"))
+                name = (prefs.get("profile") or {}).get("name") or entry.name
+                accounts = prefs.get("account_info") or []
+                email = accounts[0].get("email") if accounts else None
+                where = f"{user_data.name}/{entry.name}"
+                label = f"{name} — {email}  ({where})" if email else f"{name}  ({where})"
+            except Exception:
+                label = f"{user_data.name}/{entry.name}"
+            profiles.append((label, entry.name, entry))
     return profiles
 
 
@@ -80,7 +83,10 @@ def _copy_profile(src_profile: Path) -> None:
                 print(f"  copied {name}/")
             except Exception as exc:
                 print(f"  skipped {name}/: {exc}")
-    ls = _chrome_user_data() / "Local State"
+    # Local State sits one level above the profile dir, in the user-data root.
+    # Deriving it from the chosen profile keeps this correct no matter which of
+    # the several candidate user-data dirs that profile came from.
+    ls = src_profile.parent / "Local State"
     if ls.exists():
         try:
             shutil.copy2(ls, BOT_PROFILE / "Local State")
@@ -129,18 +135,13 @@ def _validate_with_browser_service() -> bool:
 
 def _launch_chrome_profile() -> subprocess.Popen | None:
     """Launch Chrome with the bot user-data-dir. Returns process on success."""
-    chrome_candidates = [
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
-        Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
-        Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
-    ]
-    chrome_exe = next((p for p in chrome_candidates if p.exists()), None)
+    chrome_exe = platform_support.find_chrome()
     if chrome_exe is None:
-        print("[setup] Chrome not found. Install Google Chrome and try again.")
+        print("[setup] Chrome not found. Install Google Chrome (or set CHROME_EXECUTABLE) and try again.")
         return None
 
     args = [
-        str(chrome_exe),
+        chrome_exe,
         f"--user-data-dir={BOT_PROFILE}",
         "--no-first-run",
         "--no-default-browser-check",
@@ -156,11 +157,17 @@ def _open_for_login() -> bool:
     """Open the bot profile at Reddit login. Returns True if session found after."""
     print("\nOpening Chrome — log into Reddit, then come back here and press Enter.")
 
+    if not platform_support.is_windows() and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        print("[setup] No DISPLAY/WAYLAND_DISPLAY: this step needs a graphical session.")
+        print("[setup] Run it on a desktop machine (or over X forwarding) and copy")
+        print("[setup] the resulting chrome_profile/ directory to this host.")
+        return False
+
     try:
         with sync_playwright() as p:
             ctx = p.chromium.launch_persistent_context(
                 user_data_dir=str(BOT_PROFILE),
-                channel="chrome",
+                executable_path=platform_support.find_chrome(),
                 headless=False,
                 args=["--no-first-run", "--no-default-browser-check"],
             )

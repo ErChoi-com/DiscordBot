@@ -398,23 +398,78 @@ class WatcherHealthTracker:
 # ── Discord embed builders ────────────────────────────────────────────────────
 
 
+def compact_age(seconds: float) -> str:
+    """Task ages at a glance. The runaway scrapes this exists to expose sit in
+    the tens of thousands of seconds, where the raw number ("17722s") has to be
+    divided in your head before it means anything."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds / 60:.0f}m"
+    return f"{seconds / 3600:.1f}h"
+
+
 def _format_queue_field(scheduler_stats: dict[str, Any]) -> str:
+    """Every number scheduler.stats() reports, in standard thread-pool terms.
+
+    "boosted" is priority aging -- a task whose priority was raised for having
+    waited too long. "cancelled" is a task whose caller went away before a
+    worker picked it up. Both previously appeared under names ("aged-up",
+    "abandoned") that described the codebase rather than the state.
+    """
     queued = scheduler_stats.get("queued", 0)
     queued_interactive = scheduler_stats.get("queued_interactive", 0)
+    queued_boosted = scheduler_stats.get("queued_promoted", 0)
     queued_background = scheduler_stats.get("queued_background", 0)
     active = scheduler_stats.get("active", 0)
     workers = scheduler_stats.get("workers", 0)
+    reserved = scheduler_stats.get("reserved_interactive", 0)
     completed = scheduler_stats.get("completed", 0)
-    promoted = scheduler_stats.get("promoted", 0)
-    icon = "🟢" if queued == 0 else "🟡" if queued < workers else "🔴"
+    cancelled = scheduler_stats.get("dropped", 0)
+    boosted_total = scheduler_stats.get("promoted", 0)
+    in_flight = scheduler_stats.get("in_flight") or []
+
+    # Saturation, not queue depth: a deep queue draining steadily is fine, a
+    # full pool with anything waiting is what hung interactive commands.
+    saturated = workers > 0 and active >= workers and queued > 0
+    icon, status = (
+        ("🔴", "Saturated") if saturated
+        else ("🟡", "Queue building") if queued
+        else ("🟢", "Healthy")
+    )
+
     lines = [
-        f"{icon} Queued: **{queued}** ({queued_interactive} interactive / {queued_background} background)",
-        f"Active: **{active}**/{workers} workers · Completed: **{completed}** · Aged-up: **{promoted}**",
-        # Detected hardware and the resulting pool scale: the fastest way to
-        # confirm a new host (especially a container, where cpu_count lies)
-        # sized its pools the way you expected.
-        f"Hardware: {capacity.describe()}",
+        f"{icon} **{status}** · {active} running · {max(0, workers - active)} idle · "
+        f"{queued} waiting · {workers} workers ({reserved} reserved)"
     ]
+
+    # Which tasks hold the workers, and for how long -- the difference between
+    # "the pool is full" and "the pool is full BECAUSE of these".
+    if in_flight:
+        shown = " · ".join(
+            f"`{e.get('label') or 'unlabelled'}` {compact_age(e.get('age_seconds', 0))}"
+            for e in in_flight[:3]
+        )
+        if len(in_flight) > 3:
+            shown += f" · +{len(in_flight) - 3}"
+        lines.append(f"Running: {shown}")
+
+    # Zeros included so the split visibly sums to the waiting count above.
+    if queued:
+        lines.append(
+            f"Waiting: {queued_interactive} interactive · "
+            f"{queued_boosted} boosted · {queued_background} background"
+        )
+
+    # Bold rather than a sentence of explanation: a nonzero cancelled count is
+    # work accepted and silently never run, and nothing else reports it.
+    cancelled_text = f"**{cancelled} cancelled**" if cancelled else "0 cancelled"
+    lines.append(f"Totals: {completed} completed · {cancelled_text} · {boosted_total} boosted")
+
+    # Detected hardware and resulting pool scale: the fastest way to confirm a
+    # new host (especially a container, where cpu_count lies) sized as expected.
+    lines.append(f"Hardware: {capacity.describe()}")
+
     return "\n".join(lines)
 
 
@@ -541,6 +596,23 @@ def _format_ats_coverage_field(tracker: WatcherHealthTracker) -> str | None:
     return _join_within_limit(lines)
 
 
+def _reddit_session_note(session_valid: bool | None) -> str:
+    """What the browser's Reddit login is doing, when there is something to say.
+
+    A logged-out session does not make the watcher stop or error: Reddit still
+    answers, with less, and the watcher reports a normal quiet run. So "running"
+    on its own cannot distinguish a subreddit with nothing new from a bot that
+    has been signed out for a week -- the same "returned nothing" ambiguity the
+    ATS platform lines exist to break.
+
+    None means the browser is not up, which is not a session problem and must
+    not be shown as one.
+    """
+    if session_valid is None:
+        return ""
+    return "🔓 Logged in" if session_valid else "🔒 Signed out · public view only"
+
+
 def build_channel_health_embed(
     tracker: WatcherHealthTracker,
     channel_id: int,
@@ -550,6 +622,7 @@ def build_channel_health_embed(
     active_job_watchers: int,
     active_reddit_watchers: int,
     scheduler_stats: dict[str, Any] | None = None,
+    reddit_session_valid: bool | None = None,
 ) -> list[discord.Embed]:
     import discord as _discord
 
@@ -638,8 +711,11 @@ def build_channel_health_embed(
         )
 
     # Reddit
-    reddit_status = "🟢 Running" if reddit_task_alive else "⭕ Not active"
-    main.add_field(name="Reddit Watcher", value=reddit_status, inline=True)
+    reddit_lines = ["🟢 Running" if reddit_task_alive else "⭕ Not active"]
+    session_note = _reddit_session_note(reddit_session_valid)
+    if session_note:
+        reddit_lines.append(session_note)
+    main.add_field(name="Reddit Watcher", value="\n".join(reddit_lines), inline=True)
 
     if scheduler_stats is not None:
         main.add_field(name="Work Queue", value=_format_queue_field(scheduler_stats), inline=False)

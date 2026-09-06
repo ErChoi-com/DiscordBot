@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from services import capacity
 from services.net_util import parse_proxy_pool, pick_proxy
 from services.priority_scheduler import BACKGROUND, PriorityWorkScheduler
 from services.rss_service import extract_link_from_html, fetch_and_parse_atom
@@ -575,7 +576,7 @@ def _scrape_with_proxy_rotation(
         print(f"[reddit] Probing proxies {batch_start + 1}-{batch_end}/{total}...")
 
         winner: list[dict[str, Any]] | None = None
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(batch)) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(capacity.workers(_PROXY_BATCH_SIZE, minimum=2), len(batch))) as pool:
             future_to_proxy = {
                 pool.submit(
                     _scrape_once,

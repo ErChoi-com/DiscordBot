@@ -1,0 +1,111 @@
+\documentclass[11pt]{article}
+\usepackage[letterpaper,
+top=0.5in,
+bottom=0.5in,
+left=0.5in,
+right=0.5in]{geometry}
+
+\usepackage{XCharter}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}
+\usepackage{comment}
+\raggedright
+\pagestyle{empty}
+
+\input{glyphtounicode}
+\pdfgentounicode=1
+
+% Section heading: bold, rule underneath, controlled spacing above/below
+\titleformat{\section}{\bfseries\large}{}{0pt}{}[\vspace{1pt}\titlerule]
+\titlespacing*{\section}{0pt}{8pt}{2pt}
+
+\renewcommand\labelitemi{$\vcenter{\hbox{\small$\bullet$}}$}
+% topsep: gap between entry title line and bullet list
+% itemsep: gap between individual bullets
+% parsep/partopsep: suppress extra paragraph padding
+\setlist[itemize]{itemsep=-2pt, leftmargin=12pt, topsep=2pt, parsep=0pt, partopsep=0pt}
+
+\begin{document}
+
+% ---------- NAME ----------
+\centerline{\Huge Ernest Choi}
+\vspace{3pt}
+
+% ---------- CONTACT ----------
+\centerline{%
+  \href{mailto:ernestljchoi@gmail.com}{ernestljchoi@gmail.com} |
+  \href{https://www.github.com/ErChoi-com}{github.com/ErChoi-com} |
+  \href{https://www.linkedin.com/in/ernest-choi-lj}{linkedin.com/in/ernest-choi-lj} |
+  647-713-8997
+}
+
+% ---------- PROJECTS ----------
+
+\section*{Projects}
+
+% [graphics]
+\textbf{Algorithm Terrain Visualizer} | \textit{JavaScript, C++, Java} \hfill \href{https://www.ernestchoi.com/terrain/src/terrain.html}{ernestchoi.com/terrain} \\
+\begin{itemize}
+  \item Built a 3D terrain generator in \textbf{JavaScript} on \textbf{WebGLRenderer}, applying procedural texture algorithms (Perlin, Gaussian) prototyped in \textbf{C++} and Java to visualize complex math concepts.
+  \item Developed a voxel-style tile system with adjustable generation parameters, dynamic lighting and shadows, useful for explaining physics and geometry to students in a teaching role.
+\end{itemize}
+
+% [backend, ai]
+\textbf{AI Resume \& Job-Search Automation Bot} | \textit{Python} \hfill \href{https://github.com/ErChoi-com/DiscordBot}{github.com/ErChoi-com/DiscordBot} \\
+\begin{itemize}
+  \item Built a \textbf{Discord.py} bot in \textbf{Python} that scrapes job postings through \textbf{REST APIs}.
+  \item Designed an \textbf{LLM}-driven resume pipeline with fallback across multiple providers, prompting for structured \textbf{JSON} output, a skill transferable to providing clear instructions to students in a learning context.
+\end{itemize}
+% ---------- EXPERIENCE ----------
+
+\section*{Experience}
+
+\smallskip
+% [teaching]
+\textbf{Engineering Instructor,} {Obotz Robotics} -- Markham, Ontario \hfill September 2022 -- Present \\
+\begin{itemize}
+  \item Taught digital logic concepts and embedded \textbf{C} programming to High School students, raising robotics problem-completion scores by 35\% through focused learning and practice.
+  \item Coached students in robotics competitions to place in the 75th percentile, helping them apply science and math principles with custom \textbf{Arduino} hardware.
+  \item Communicated students' technical progress to parents in clear, non-technical terms, fostering a supportive learning environment at the \textbf{Centre} for teaching.
+\end{itemize}
+
+\smallskip
+% [general]
+\textbf{Technical Development Intern,} {City of Markham} -- Markham, Ontario \hfill July 2022 -- August 2024 \\
+\begin{itemize}
+  \item Maintained clear \textbf{LaTeX} documentation of website workflows and operating processes, helping cut website downtime by 41\%.
+  \item Tracked project milestones and reported progress to management using \textbf{Microsoft Suite}, reducing coordination delays by 14\%, which can aid in helping students manage their time and learning.
+  \item Validated and tested system changes against quality standards, reducing reported errors by 20\%.
+\end{itemize}
+
+\smallskip
+% [frontend]
+\textbf{Frontend Development Intern,} {MCG3D} -- Remote \hfill January 2026 -- March 2026 \\
+\begin{itemize}
+  \item Built production web applications in \textbf{React} and \textbf{TypeScript}, focusing on a scalable component architecture and fast, user-centric interfaces for effective learning.
+  \item Integrated frontend features with \textbf{Python} \textbf{Flask} backend services over secure \textbf{RESTful APIs}, including AI-enabled workflows, a systematic approach for helping users.
+\end{itemize}
+
+\smallskip
+% [ml]
+\textbf{Machine Learning Intern,} {Goopter Commerce Solutions} -- Remote \hfill September 2025 -- December 2025 \\
+\begin{itemize}
+  \item Engineered a distributed, low-latency data pipeline for financial modeling, streaming \textbf{Kafka} data into asynchronous \textbf{Python} services using \textbf{Pandas} and NumPy.
+\end{itemize}
+% ---------- SKILLS ----------
+
+\section*{Skills}
+\textbf{Languages:} JavaScript/Node.js, Java, Python, C++, C, SQL, HTML, CSS \\
+\textbf{Frameworks/Libraries:} OpenGL, WebRTC, JavaFX, React, TypeScript, Flask, FastAPI, TensorFlow \\
+\textbf{Tools:} Git, PostgreSQL, Ubuntu Linux, Docker, Kafka, Tableau, Power BI, FPGA \\
+\textbf{Platforms:} GitHub, GitLab, Raspberry Pi, Arduino \\
+\textbf{Relevant Courses:} Object Oriented Eng Analysis and Design, Digital Systems, Electronic Circuits I, Microprocessor Systems
+
+% ---------- EDUCATION ----------
+\section*{Education}
+\textbf{Toronto Metropolitan University} -- Bachelor of Engineering in Computer Engineering \hfill 2023--2027
+
+\end{document}

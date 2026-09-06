@@ -254,7 +254,7 @@ Discord Command Flow:
 ✓ Search URL:   https://www.glassdoor.com/Job/jobs.htm?sc.keyword=...
 ✓ Raw Output:   {len(raw_results)} job listings with title, company, location, job_url
 ✓ Shaped:       Transformed to site_label, link, and other Discord fields
-✓ Integration:  Works identically to Indeed, LinkedIn, Job Bank Canada
+✓ Integration:  Works identically to Indeed, LinkedIn, ZipRecruiter
 ✓ Call Stack:   User command → settings → watcher → scraper → formatter → Discord
 
 Glassdoor integration is COMPLETE and FUNCTIONAL.

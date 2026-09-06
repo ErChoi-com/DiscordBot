@@ -36,6 +36,35 @@ def _blocking(tag: str, order: list[str], lock: threading.Lock, duration: float 
     return tag
 
 
+def _gated(tag: str, order: list[str], lock: threading.Lock, started: threading.Event, release: threading.Event) -> str:
+    """Like _blocking, but announces that it is running and then waits to be let
+    go, so a test can sequence on those two facts instead of on a sleep long
+    enough to "probably" have happened. The sleep version failed under a loaded
+    machine -- the ordering it asserted was real, the timing assumption was not.
+    """
+    started.set()
+    assert release.wait(timeout=10), f"{tag} was never released"
+    with lock:
+        order.append(tag)
+    return tag
+
+
+async def _await_event(event: threading.Event, what: str, timeout: float = 10.0) -> None:
+    """Wait on a threading.Event without blocking the loop the tasks run on."""
+    await asyncio.wait_for(asyncio.to_thread(event.wait, timeout), timeout=timeout + 1)
+    assert event.is_set(), f"timed out waiting for {what}"
+
+
+async def _await_queued(scheduler: PriorityWorkScheduler, count: int, timeout: float = 10.0) -> None:
+    """Wait until `count` tasks are actually queued, rather than sleeping and
+    hoping the submission landed."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while scheduler.stats()["queued"] < count:
+        assert loop.time() < deadline, f"only {scheduler.stats()['queued']} of {count} tasks queued"
+        await asyncio.sleep(0.005)
+
+
 def test_watcher_manager_and_command_router_share_one_scheduler_by_default(tmp_path: Path) -> None:
     """The whole point of a shared scheduler is that both domains submit to the
     same queue -- if app.py's wiring regresses to two separate schedulers, the
@@ -68,19 +97,29 @@ def test_shared_scheduler_lets_interactive_work_preempt_queued_background_work(t
     order: list[str] = []
     lock = threading.Lock()
 
+    started = threading.Event()
+    release = threading.Event()
+
     async def _drive() -> None:
-        # Occupy the single worker so both submissions below queue up behind it.
-        blocker = asyncio.create_task(manager._tracked_to_thread(_blocking, "blocker", order, lock, 0.15))
-        await asyncio.sleep(0.02)
+        # Occupy the single worker so both submissions below queue up behind it,
+        # and hold it there until they demonstrably have.
+        blocker = asyncio.create_task(
+            manager._tracked_to_thread(_gated, "blocker", order, lock, started, release)
+        )
+        await _await_event(started, "the blocker to occupy the worker")
 
         background_task = asyncio.create_task(
             manager._tracked_to_thread(_blocking, "job_watcher_scrape", order, lock, 0.01, cost=50)
         )
-        await asyncio.sleep(0.01)
+        await _await_queued(scheduler, 1)
         interactive_task = asyncio.create_task(
             router._run_interactive(_blocking, "resumebuild", order, lock, 0.01, cost=1)
         )
+        await _await_queued(scheduler, 2)
 
+        # Both are queued behind the held worker, so what follows is the
+        # scheduler's ordering decision and nothing else.
+        release.set()
         await asyncio.gather(blocker, background_task, interactive_task)
 
     asyncio.run(_drive())
@@ -106,22 +145,103 @@ def test_drain_active_work_waits_for_in_flight_interactive_command(tmp_path: Pat
     async def _drive() -> None:
         order: list[str] = []
         lock = threading.Lock()
+        started = threading.Event()
+        release = threading.Event()
         interactive_task = asyncio.create_task(
-            router._run_interactive(_blocking, "resumebuild", order, lock, 0.1)
+            router._run_interactive(_gated, "resumebuild", order, lock, started, release)
         )
-        await asyncio.sleep(0.02)  # let it actually start
+        # Held mid-flight until released, rather than sleeping and assuming it
+        # started -- that assumption is what broke this test under load.
+        await _await_event(started, "the interactive command to start")
 
-        # If _run_interactive didn't hold work_guard(), this would return True
-        # immediately even though the command above is still mid-flight.
-        drained_immediately = manager._work_idle_event.is_set()
-        assert not drained_immediately
+        # If _run_interactive didn't hold work_guard(), this would be set even
+        # though the command above is still mid-flight.
+        assert not manager._work_idle_event.is_set()
 
+        release.set()
         drained = await manager.drain_active_work(timeout=5)
         assert drained is True
         await interactive_task
+        assert order == ["resumebuild"]
 
     asyncio.run(_drive())
     scheduler.shutdown()
+
+
+def test_resumebuild_completes_while_watcher_work_occupies_every_general_worker(
+    tmp_path: Path,
+) -> None:
+    """End-to-end reproduction of the outage, through the real wiring.
+
+    The ATS cycle submits one task per platform (16) into a pool of 12, and
+    those tasks run for hours because the 600s bound around them cancels an
+    await, not a thread. Every worker ends up held, and a .resumebuild
+    submitted in that window never gets one -- it was correctly ranked first
+    in the queue the entire time, which bought it nothing.
+
+    Here: WatcherManager fills every general worker via its own submission
+    path, then a command goes through CommandRouter._run_interactive. It must
+    finish without any watcher work being released.
+    """
+    config = _Config(tmp_path)
+    store = RuntimeStore(tmp_path / ".bot_state.json")
+    health = WatcherHealthTracker()
+    scheduler = PriorityWorkScheduler(max_workers=3, reserved_interactive=1)
+
+    manager = WatcherManager(client=object(), config=config, store=store, health=health, scheduler=scheduler)
+    router = CommandRouter(
+        client=object(), config=config, store=store, watcher_manager=manager, health=health, scheduler=scheduler
+    )
+
+    async def _drive() -> None:
+        release = threading.Event()
+        occupied = threading.Semaphore(0)
+
+        def _long_platform_scrape() -> str:
+            occupied.release()
+            assert release.wait(timeout=10), "watcher work was never released"
+            return "scrape"
+
+        # More submissions than the pool can hold, exactly like the platform
+        # fan-out that caused this.
+        watcher_tasks = [
+            asyncio.create_task(
+                manager._tracked_to_thread(_long_platform_scrape, label="ats_scrape:workable")
+            )
+            for _ in range(6)
+        ]
+
+        # Both general workers are now inside a scrape that will not return.
+        for _ in range(2):
+            await asyncio.to_thread(occupied.acquire)
+        stats = scheduler.stats()
+        assert stats["active"] == 2, stats
+        assert stats["queued"] == 4, stats
+
+        # The reserved worker carries the command through regardless.
+        result = await asyncio.wait_for(
+            router._run_interactive(lambda: "resume built", label="resume_rewrite"),
+            timeout=5,
+        )
+        assert result == "resume built"
+
+        # Proof the command did not simply wait for a scrape to finish: none
+        # of them have been allowed to return yet.
+        assert not release.is_set()
+        assert scheduler.stats()["active"] == 2
+
+        # The scheduler can also now say what is holding the pool, which is
+        # what turns "full" into a diagnosis.
+        holding = {entry["label"] for entry in scheduler.stats()["in_flight"]}
+        assert holding == {"ats_scrape:workable"}, holding
+
+        release.set()
+        await asyncio.gather(*watcher_tasks)
+
+    try:
+        asyncio.run(_drive())
+    finally:
+        scheduler.shutdown()
 
 
 def test_scheduler_sized_to_all_usable_cpu_cores() -> None:

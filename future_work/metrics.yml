@@ -1,0 +1,86 @@
+name: Metrics
+
+# Recomputes operating metrics from the committed job archives and commits the
+# report. Pure reporting - reads data/jba/jobs/**, writes docs/metrics.md and
+# data/metrics.json, touches nothing the bot reads at runtime.
+
+on:
+  schedule:
+    # 07:00 UTC daily, after the nightly scrape cycles have landed.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - "data/jba/jobs/**"
+      - "scripts/compute_metrics.py"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: metrics-${{ github.ref }}
+  # Not cancel-in-progress: this job commits and pushes, and killing it midway
+  # through that is a worse outcome than letting a redundant run finish.
+  cancel-in-progress: false
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      # compute_metrics.py is stdlib-only, so there is nothing to install.
+      # pipefail matters: without it the exit status is tee's, so a crash in
+      # the metrics script would pass this step silently.
+      - name: Compute metrics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/compute_metrics.py \
+            --json data/metrics.json \
+            --markdown docs/metrics.md | tee metrics-console.txt
+
+      - name: Job summary
+        run: |
+          {
+            echo '## Operating metrics'
+            echo
+            echo '```'
+            cat metrics-console.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          rm -f metrics-console.txt
+
+      # The bot itself git-commits archives from merge_data._git_commit_monthly,
+      # so it can land a commit between this checkout and this push. Metrics are
+      # derived and regenerated daily, so a lost race is self-healing - retry
+      # once, then leave it for tomorrow rather than failing the run.
+      - name: Commit report
+        shell: bash
+        run: |
+          set -uo pipefail
+          if git diff --quiet -- data/metrics.json docs/metrics.md; then
+            echo "Metrics unchanged - nothing to commit."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/metrics.json docs/metrics.md
+          git commit -m "chore(metrics): refresh operating metrics [skip ci]"
+
+          if git push; then
+            exit 0
+          fi
+          echo "Push rejected - refetching and retrying once."
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || {
+            echo "::warning::Rebase failed; skipping this run's metrics commit."
+            exit 0
+          }
+          git push || echo "::warning::Push still rejected; next run will regenerate."

@@ -1,0 +1,112 @@
+\documentclass[11pt]{article}
+\usepackage[letterpaper,
+top=0.5in,
+bottom=0.5in,
+left=0.5in,
+right=0.5in]{geometry}
+
+\usepackage{XCharter}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}
+\usepackage{comment}
+\raggedright
+\pagestyle{empty}
+
+\input{glyphtounicode}
+\pdfgentounicode=1
+
+% Section heading: bold, rule underneath, controlled spacing above/below
+\titleformat{\section}{\bfseries\large}{}{0pt}{}[\vspace{1pt}\titlerule]
+\titlespacing*{\section}{0pt}{8pt}{2pt}
+
+\renewcommand\labelitemi{$\vcenter{\hbox{\small$\bullet$}}$}
+% topsep: gap between entry title line and bullet list
+% itemsep: gap between individual bullets
+% parsep/partopsep: suppress extra paragraph padding
+\setlist[itemize]{itemsep=-2pt, leftmargin=12pt, topsep=2pt, parsep=0pt, partopsep=0pt}
+
+\begin{document}
+
+% ---------- NAME ----------
+\centerline{\Huge Ernest Choi}
+\vspace{3pt}
+
+% ---------- CONTACT ----------
+\centerline{%
+  \href{mailto:ernestljchoi@gmail.com}{ernestljchoi@gmail.com} |
+  \href{https://www.github.com/ErChoi-com}{github.com/ErChoi-com} |
+  \href{https://www.linkedin.com/in/ernest-choi-lj}{linkedin.com/in/ernest-choi-lj} |
+  647-713-8997
+}
+
+% ---------- PROJECTS ----------
+
+\section*{Projects}
+
+% [backend, ai]
+\textbf{AI Resume \& Job-Search Automation Bot} | \textit{Python} \hfill \href{https://github.com/ErChoi-com/DiscordBot}{github.com/ErChoi-com/DiscordBot} \\
+\begin{itemize}
+  \item Designed an \textbf{LLM}-driven resume and cover-letter pipeline with fallback across Google Gemini, Groq, and OpenRouter, prompting for structured \textbf{JSON} output backed by \textbf{SQLite} storage and a pytest test suite.
+  \item Built a \textbf{Discord.py} bot in \textbf{Python} that scrapes and deduplicates job postings through \textbf{REST APIs} and \textbf{Playwright} browser automation, scheduling the work with \textbf{asyncio} so interactive commands preempt background scraping.
+\end{itemize}
+
+% [oop]
+\textbf{Bookstore App} | \textit{Java, JavaFX} \\
+\begin{itemize}
+  \item Created a bookstore app in \textbf{Java} around OOP design principles, with persistent file-backed record storage.
+  \item Built a responsive \textbf{JavaFX} interface and wired it to the app's backend functions.
+\end{itemize}
+
+% [fullstack]
+\textbf{Web Messaging App} | \textit{JavaScript, Node.js, Python, SQL} \hfill \href{https://www.ernestchoi.com/terminalcards/roomEnter.html}{ernestchoi.com/terminalcards} \\
+\begin{itemize}
+  \item Built a collaborative web application in \textbf{JavaScript} and \textbf{Node.js}, utilizing \textbf{WebRTC} for real-time messaging and file sharing.
+  \item Implemented \textbf{Python}-driven autocomplete and in-browser code execution for sophisticated user applications.
+\end{itemize}
+% ---------- EXPERIENCE ----------
+
+\section*{Experience}
+
+\smallskip
+% [frontend]
+\textbf{Frontend Development Intern,} {MCG3D} -- Remote \hfill January 2026 -- March 2026 \\
+\begin{itemize}
+  \item Built production web applications in \textbf{React} and \textbf{TypeScript}, keeping the component architecture scalable and the interface fast and user-centric.
+  \item Integrated frontend interfaces with \textbf{Python} \textbf{Flask} services, utilizing AI tools to accelerate development and feature enhancement.
+  \item Deployed and tested containerized \textbf{Docker} applications to ensure stability across engineering systems.
+\end{itemize}
+
+\smallskip
+% [ml]
+\textbf{Machine Learning Intern,} {Goopter Commerce Solutions} -- Remote \hfill September 2025 -- December 2025 \\
+\begin{itemize}
+  \item Engineered a distributed data pipeline for \textbf{Python} services using \textbf{FastAPI} and \textbf{Kafka} to process enterprise financial data.
+  \item Built predictive models in \textbf{TensorFlow} to generate adaptive signals for quantitative trading applications.
+  \item Deployed analytics dashboards in \textbf{Tableau} and \textbf{Power BI}, surfacing real-time predictive insights from models trained with \textbf{PyTorch Lightning} and NumPy.
+\end{itemize}
+
+\smallskip
+% [general]
+\textbf{Technical Development Intern,} {City of Markham} -- Markham, Ontario \hfill July 2022 -- August 2024 \\
+\begin{itemize}
+  \item Validated and tested system changes against quality standards and functional requirements, reducing reported errors by 20\%.
+  \item Maintained clear \textbf{LaTeX} documentation of website workflows and operating processes, helping cut website downtime by 41\%.
+  \item Tracked project milestones and reported progress to management in \textbf{Microsoft Suite}, reducing coordination delays by 14\%.
+\end{itemize}
+% ---------- SKILLS ----------
+
+\section*{Skills}
+\textbf{Languages:} Java, Python, JavaScript/Node.js, C++, C, SQL, HTML, CSS \\
+\textbf{Frameworks/Libraries:} OpenGL, WebRTC, JavaFX, React, TypeScript, Flask, FastAPI, TensorFlow \\
+\textbf{Tools:} Git, PostgreSQL, Ubuntu Linux, Docker, Kafka, Tableau, Power BI, FPGA \\
+\textbf{Platforms:} GitHub, GitLab, Raspberry Pi, Arduino \\
+\textbf{Relevant Courses:} Digital Systems, Microprocessor Systems, Object Oriented Eng Analysis and Design, Electronic Circuits I
+
+% ---------- EDUCATION ----------
+\section*{Education}
+\textbf{Toronto Metropolitan University} -- Bachelor of Engineering in Computer Engineering \hfill 2023--2027
+
+\end{document}

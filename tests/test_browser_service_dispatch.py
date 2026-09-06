@@ -207,18 +207,28 @@ def test_late_arriving_priority_beats_already_queued_bulk_waiter():
                 gate.release()
 
         def _priority():
-            time.sleep(0.15)  # arrive strictly AFTER the bulk waiter parked
             ok = gate.acquire(timeout=5.0, priority=True)
             with lock:
                 order.append(f"priority:{ok}")
             if ok:
                 gate.release()
 
+        def _await(predicate, what):
+            deadline = time.monotonic() + 5.0
+            while not predicate():
+                assert time.monotonic() < deadline, f"timed out waiting for {what}"
+                time.sleep(0.005)
+
+        # Sequenced on the gate's own waiter counts, not on sleeps long enough
+        # to "probably" have parked -- those assumptions break on a loaded
+        # machine, which is how this failed a full-suite run while the gate was
+        # behaving correctly.
         t_bulk = threading.Thread(target=_bulk)
         t_priority = threading.Thread(target=_priority)
         t_bulk.start()
+        _await(lambda: gate.waiting == 1, "the bulk caller to park")
         t_priority.start()
-        time.sleep(0.4)  # both are now waiting; priority arrived second
+        _await(lambda: gate.priority_waiting == 1, "the priority caller to arrive second")
         gate.release()  # free the slot exactly once
         t_bulk.join(timeout=5)
         t_priority.join(timeout=5)

@@ -24,7 +24,15 @@ def test_concurrent_ensure_ready_runs_session_check_once(monkeypatch):
     browser_service._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     browser_service._context = object()
     browser_service._session_valid = True
-    browser_service._last_session_check = 0.0  # stale -> triggers the check
+    # Stale relative to *now*, not an absolute 0.0. The staleness test is
+    # `monotonic() - _last_session_check > _SESSION_CHECK_INTERVAL`, and on Linux
+    # monotonic() counts from boot -- so 0.0 only reads as stale once the machine
+    # has been up longer than the interval (30 min). It always is on a dev box
+    # and never is on a freshly booted CI runner, which is why this passed
+    # locally and failed in CI with `assert 0 == 1`: the check never ran.
+    browser_service._last_session_check = (
+        time.monotonic() - browser_service._SESSION_CHECK_INTERVAL - 1
+    )
 
     try:
         threads = [threading.Thread(target=browser_service.ensure_ready) for _ in range(4)]

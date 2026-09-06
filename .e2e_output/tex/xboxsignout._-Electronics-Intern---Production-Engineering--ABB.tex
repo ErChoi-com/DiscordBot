@@ -1,0 +1,107 @@
+\documentclass[11pt]{article}
+\usepackage[letterpaper,
+top=0.5in,
+bottom=0.5in,
+left=0.5in,
+right=0.5in]{geometry}
+
+\usepackage{XCharter}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}
+\usepackage{comment}
+\raggedright
+\pagestyle{empty}
+
+\input{glyphtounicode}
+\pdfgentounicode=1
+
+% Section heading: bold, rule underneath, controlled spacing above/below
+\titleformat{\section}{\bfseries\large}{}{0pt}{}[\vspace{1pt}\titlerule]
+\titlespacing*{\section}{0pt}{8pt}{2pt}
+
+\renewcommand\labelitemi{$\vcenter{\hbox{\small$\bullet$}}$}
+% topsep: gap between entry title line and bullet list
+% itemsep: gap between individual bullets
+% parsep/partopsep: suppress extra paragraph padding
+\setlist[itemize]{itemsep=-2pt, leftmargin=12pt, topsep=2pt, parsep=0pt, partopsep=0pt}
+
+\begin{document}
+
+% ---------- NAME ----------
+\centerline{\Huge Ernest Choi}
+\vspace{3pt}
+
+% ---------- CONTACT ----------
+\centerline{%
+  \href{mailto:ernestljchoi@gmail.com}{ernestljchoi@gmail.com} |
+  \href{https://www.github.com/ErChoi-com}{github.com/ErChoi-com} |
+  \href{https://www.linkedin.com/in/ernest-choi-lj}{linkedin.com/in/ernest-choi-lj} |
+  647-713-8997
+}
+
+% ---------- PROJECTS ----------
+
+\section*{Projects}
+
+% [embedded]
+\textbf{eebot Mobile Robot System} | \textit{C, Assembly, HCS12, PWM} \\ % no public repository
+\begin{itemize}
+  \item Developed embedded firmware in \textbf{Assembly} and \textbf{C} for a mobile robot built on the \textbf{HCS12} microcontroller, handling hardware verification and board-level integration in a Linux/Unix environment.
+  \item Implemented \textbf{PWM} motor control with timer-driven scheduling for mobile robot electronics, sustaining 50ms sensor sampling intervals to meet technical performance deadlines.
+\end{itemize}
+
+% [hardware, fpga]
+\textbf{General-Purpose Processor (ALU)} | \textit{VHDL, FPGA, Quartus II, RTL} \\ % no public repository
+\begin{itemize}
+  \item Designed and implemented a modular Arithmetic and Logic Unit (ALU) in \textbf{VHDL} on an \textbf{Altera FPGA}, integrating registers, a finite state machine, a $4\times16$ decoder, and a microcode-driven ALU core.
+  \item Verified digital logic designs through \textbf{Quartus II} simulation, waveform analysis, and static timing verification, ensuring quality standards were met for hardware.
+  \item Applied \textbf{RTL} design practice — timing analysis, modular integration, bitwise operations — to build and test digital logic at the register-transfer level.
+\end{itemize}
+% ---------- EXPERIENCE ----------
+
+\section*{Experience}
+
+\smallskip
+% [electrical]
+\textbf{Electrical Team Member,} {Metropolitan Aerospace Rocket Society (MARS)} -- Toronto, ON \hfill September 2023 -- Present \\
+\vspace{-9pt}
+\begin{itemize}
+  \item Designed, fabricated, and integrated \textbf{PCB} circuits using \textbf{Altium} and \textbf{KiCad} for custom STM32-based avionics flight computer with GPS telemetry, sensor integration, and pyrotechnic ignition systems
+  \item Optimized circuit configurations and \textbf{power distribution} to enhance power efficiency by 23\%, applying analysis to component selection for robust electrical systems.
+  \item Performed board bring-up, debugged electronic circuit boards using \textbf{oscilloscopes} and \textbf{logic analyzers}, and validated hardware functionality against strict quality standards.
+  \item Developed embedded firmware in \textbf{C/C++} and automated testing workflows with \textbf{Python} scripting for technical avionics systems.
+\end{itemize}
+
+\smallskip
+% [teaching]
+\textbf{Engineering Instructor,} {Obotz Robotics} -- Markham, Ontario \hfill September 2022 -- Present \\
+\begin{itemize}
+  \item Taught digital logic concepts and embedded \textbf{C} programming, fostering problem-solving skills and raising student robotics problem-completion scores by 35\%.
+  \item Coached students in designing and building custom \textbf{Arduino} hardware for robotics, leading to 75th percentile placements in technical competitions.
+  \item Communicated students' technical progress to parents in clear, accessible language.
+\end{itemize}
+
+\smallskip
+% [general]
+\textbf{Technical Development Intern,} {City of Markham} -- Markham, Ontario \hfill July 2022 -- August 2024 \\
+\begin{itemize}
+  \item Maintained clear documentation for website workflows, contributing to continuous improvement and reducing website downtime by 41\%.
+  \item Tracked project milestones and reported progress to management using Microsoft Office, which reduced coordination delays by 14\% and supported production workflows.
+\end{itemize}
+% ---------- SKILLS ----------
+
+\section*{Skills}
+\textbf{Languages:} JavaScript/Node.js, Java, Python, C++, C, SQL, HTML, CSS \\
+\textbf{Frameworks/Libraries:} OpenGL, WebRTC, JavaFX, React, TypeScript, Flask, FastAPI, TensorFlow \\
+\textbf{Tools:} Microsoft Suite, Git, PostgreSQL, Ubuntu Linux, Docker, Kafka, Tableau, Power BI \\
+\textbf{Platforms:} GitHub, GitLab, Raspberry Pi, Arduino \\
+\textbf{Relevant Courses:} Object Oriented Eng Analysis and Design, Electronic Circuits I, Digital Systems, Microprocessor Systems
+
+% ---------- EDUCATION ----------
+\section*{Education}
+\textbf{Toronto Metropolitan University} -- Bachelor of Engineering in Computer Engineering \hfill 2023--2027
+
+\end{document}

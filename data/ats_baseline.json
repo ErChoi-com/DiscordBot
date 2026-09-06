@@ -1,0 +1,123 @@
+{
+  "updated": "2026-08-28T21:14:08",
+  "profiles": {
+    "ephlex": {
+      "profile": "ephlex",
+      "family": "pdftex",
+      "compile_status": "ok",
+      "ats_status": "ok",
+      "type3_ratio": 0.0908,
+      "extracted_chars": 2172,
+      "page_count": 1,
+      "found_email": true,
+      "repairs": [],
+      "findings": [],
+      "error": ""
+    },
+    "example": {
+      "profile": "example",
+      "family": "pdftex",
+      "compile_status": "ok",
+      "ats_status": "ok",
+      "type3_ratio": 0.0908,
+      "extracted_chars": 2172,
+      "page_count": 1,
+      "found_email": true,
+      "repairs": [
+        "closed unclosed \\begin{comment} environments"
+      ],
+      "findings": [],
+      "error": ""
+    },
+    "hakbar9845": {
+      "profile": "hakbar9845",
+      "family": "pdftex",
+      "compile_status": "ok",
+      "ats_status": "ok",
+      "type3_ratio": 0.0908,
+      "extracted_chars": 2172,
+      "page_count": 1,
+      "found_email": true,
+      "repairs": [],
+      "findings": [],
+      "error": ""
+    },
+    "rickydisappoints": {
+      "profile": "rickydisappoints",
+      "family": "pdftex",
+      "compile_status": "ok",
+      "ats_status": "ok",
+      "type3_ratio": 0.0009,
+      "extracted_chars": 4689,
+      "page_count": 2,
+      "found_email": true,
+      "repairs": [
+        "unwrapped braced resume list end macros",
+        "normalized smart quotes to LaTeX quote ligatures",
+        "dropped unavailable font packages: sourcesanspro"
+      ],
+      "findings": [],
+      "error": ""
+    },
+    "shane_itwarie": {
+      "profile": "shane_itwarie",
+      "family": "pdftex",
+      "compile_status": "ok",
+      "ats_status": "ok",
+      "type3_ratio": 0.0908,
+      "extracted_chars": 2172,
+      "page_count": 1,
+      "found_email": true,
+      "repairs": [
+        "closed unclosed \\begin{comment} environments"
+      ],
+      "findings": [],
+      "error": ""
+    },
+    "swiftisnew": {
+      "profile": "swiftisnew",
+      "family": "pdftex",
+      "compile_status": "ok",
+      "ats_status": "ok",
+      "type3_ratio": 0.0908,
+      "extracted_chars": 2172,
+      "page_count": 1,
+      "found_email": true,
+      "repairs": [
+        "closed unclosed \\begin{comment} environments"
+      ],
+      "findings": [],
+      "error": ""
+    },
+    "warehousemanager": {
+      "profile": "warehousemanager",
+      "family": "pdftex",
+      "compile_status": "error",
+      "ats_status": "unknown",
+      "type3_ratio": 0.0,
+      "extracted_chars": 0,
+      "page_count": null,
+      "found_email": false,
+      "repairs": [],
+      "findings": [
+        "no PDF bytes produced"
+      ],
+      "error": "This is pdfTeX, Version 3.141592653-2.6-1.40.28 (MiKTeX 25.12) (preloaded format=pdflatex.fmt)\n restricted \\write18 enabled.\nentering extended mode\n(ATS-Validation-Run.tex\nLaTeX2e <2025-11-01>\nL3 programming layer <2025-12-24>\n\n! LaTeX Error: Unicode character \u0540 (U+0540)\n               not set up fo"
+    },
+    "xboxsignout._": {
+      "profile": "xboxsignout._",
+      "family": "pdftex",
+      "compile_status": "ok",
+      "ats_status": "ok",
+      "type3_ratio": 0.0,
+      "extracted_chars": 5041,
+      "page_count": 2,
+      "found_email": true,
+      "repairs": [
+        "closed unclosed \\begin{comment} environments"
+      ],
+      "findings": [],
+      "error": ""
+    }
+  }
+}

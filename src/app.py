@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ from discord.ext import commands
 
 from commands.handlers import CommandRouter
 from config import load_config
-from services import job_service
+from services import job_service, platform_support
 from services.health import WatcherHealthTracker
 from services.priority_scheduler import PriorityWorkScheduler
 from services.resumes.resume import migrate_legacy_profile_keys_with_usernames
@@ -49,17 +50,13 @@ def unregister_current_process(pid_path: Path) -> None:
 
 
 def is_process_running(pid: int) -> bool:
+    """Delegate to platform_support, which run.py's side of this lock already
+    uses. Two differently implemented liveness checks on one lock is how the
+    two sides drift apart.
+    """
     if pid <= 0:
         return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    return platform_support.is_process_alive(pid)
 
 
 def read_runtime_lock_owner(lock_path: Path) -> int | None:
@@ -84,6 +81,28 @@ def read_runtime_lock_owner(lock_path: Path) -> int | None:
         return None
 
 
+def is_lock_owner_alive(pid: int) -> bool:
+    """Is `pid` still THIS bot, rather than a recycled pid?
+
+    A liveness check alone is not enough on Linux, where pids are recycled from
+    a 32768-default space within hours. A stranded .bot.lock naming a recycled
+    pid would otherwise make acquire_runtime_lock refuse forever: the bot exits,
+    the supervisor restarts it, and it refuses again -- silently, since that
+    path exits 0. run.py already corroborates this way; this is the same check
+    on the other side of the lock.
+
+    When the command line cannot be read (permissions, or a Windows query
+    failure) fall back to trusting liveness, so a readable-but-unknown process
+    is never assumed dead.
+    """
+    if not is_process_running(pid):
+        return False
+    cmdline = platform_support.process_cmdline(pid)
+    if cmdline is None:
+        return True
+    return "app.py" in cmdline
+
+
 def acquire_runtime_lock(lock_path: Path) -> bool:
     current_pid = os.getpid()
 
@@ -94,7 +113,7 @@ def acquire_runtime_lock(lock_path: Path) -> bool:
             owner_pid = read_runtime_lock_owner(lock_path)
             if owner_pid == current_pid:
                 return True
-            if owner_pid is not None and is_process_running(owner_pid):
+            if owner_pid is not None and is_lock_owner_alive(owner_pid):
                 return False
             try:
                 lock_path.unlink(missing_ok=True)
@@ -164,6 +183,17 @@ def bind_client_events(
         except OSError:
             pass
 
+    def _with_directive(command: str, instructions: str | None) -> str:
+        """Append a slash option as the ``(...)`` directive the router parses.
+
+        Slash commands are re-dispatched through the message router, so the
+        option has to travel as text. Inner parentheses are dropped rather than
+        escaped: the router's matcher is paren-free by design, and a stray ")"
+        would otherwise truncate the instruction mid-sentence.
+        """
+        cleaned = " ".join(str(instructions or "").replace("(", " ").replace(")", " ").split())
+        return f"{command} ({cleaned})" if cleaned else command
+
     async def _run_slash_command(
         interaction: discord.Interaction,
         content: str,
@@ -185,14 +215,36 @@ def bind_client_events(
         await _run_slash_command(interaction, "/status")
 
     @client.tree.command(name="resumebuild", description="Generate a tailored resume from a job listing message")
-    @discord.app_commands.describe(message_id="Job listing message ID from ErnestBot")
-    async def slash_resumebuild(interaction: discord.Interaction, message_id: int | None = None) -> None:
-        await _run_slash_command(interaction, "/resumebuild", reference_message_id=message_id)
+    @discord.app_commands.describe(
+        message_id="Job listing message ID from ErnestBot",
+        instructions="Free-form steer passed to the model (e.g. 'lead with the embedded work')",
+    )
+    async def slash_resumebuild(
+        interaction: discord.Interaction,
+        message_id: int | None = None,
+        instructions: str | None = None,
+    ) -> None:
+        await _run_slash_command(
+            interaction,
+            _with_directive("/resumebuild", instructions),
+            reference_message_id=message_id,
+        )
 
     @client.tree.command(name="resumecoverbuild", description="Generate a cover letter covering what the tailored resume left out")
-    @discord.app_commands.describe(message_id="Job listing message ID from ErnestBot")
-    async def slash_resumecoverbuild(interaction: discord.Interaction, message_id: int | None = None) -> None:
-        await _run_slash_command(interaction, "/resumecoverbuild", reference_message_id=message_id)
+    @discord.app_commands.describe(
+        message_id="Job listing message ID from ErnestBot",
+        instructions="Free-form steer passed to the model (e.g. 'emphasise the tutoring work')",
+    )
+    async def slash_resumecoverbuild(
+        interaction: discord.Interaction,
+        message_id: int | None = None,
+        instructions: str | None = None,
+    ) -> None:
+        await _run_slash_command(
+            interaction,
+            _with_directive("/resumecoverbuild", instructions),
+            reference_message_id=message_id,
+        )
 
     @client.tree.command(name="resumecheck", description="Compile your current cached template into a PDF")
     async def slash_resumecheck(interaction: discord.Interaction) -> None:
@@ -213,16 +265,6 @@ def bind_client_events(
     @client.tree.command(name="jobsinit", description="Alias for jobsettings")
     async def slash_jobsinit(interaction: discord.Interaction) -> None:
         await _run_slash_command(interaction, "/jobsinit")
-
-    @client.tree.command(name="jobbanktest", description="Run a Job Bank test scrape with current settings")
-    async def slash_jobbanktest(interaction: discord.Interaction) -> None:
-        await _run_slash_command(interaction, "/jobbanktest")
-
-    @client.tree.command(name="jobbankfilters", description="Show, set, or clear additional Job Bank native filters")
-    @discord.app_commands.describe(query="Filter query text, or 'clear' to reset")
-    async def slash_jobbankfilters(interaction: discord.Interaction, query: str | None = None) -> None:
-        content = "/jobbankfilters" if not query else f"/jobbankfilters {query}"
-        await _run_slash_command(interaction, content)
 
     @client.tree.command(name="redditsettings", description="Open Reddit watcher settings panel")
     async def slash_redditsettings(interaction: discord.Interaction) -> None:
@@ -251,6 +293,33 @@ def bind_client_events(
         if selector:
             content = f"{content} | {selector}"
         await _run_slash_command(interaction, content)
+
+    @client.tree.command(name="bestjobs", description="Best archive matches for a resume profile")
+    @discord.app_commands.describe(
+        window="Time window to rank over (default: day)",
+        count="How many matches to show (1-50, default: 10)",
+        profile="Member @mention or resume cache folder to rank for (guild owner only)",
+    )
+    @discord.app_commands.choices(
+        window=[
+            discord.app_commands.Choice(name="Today", value="day"),
+            discord.app_commands.Choice(name="Past week", value="week"),
+        ]
+    )
+    async def slash_bestjobs(
+        interaction: discord.Interaction,
+        window: discord.app_commands.Choice[str] | None = None,
+        count: int | None = None,
+        profile: str | None = None,
+    ) -> None:
+        # Re-dispatched as text through the router, like every other slash
+        # command here, so the argument parsing has exactly one home.
+        parts = ["/bestjobs", (window.value if window else "day")]
+        if count is not None:
+            parts.append(str(count))
+        if profile:
+            parts.append(profile)
+        await _run_slash_command(interaction, " ".join(parts))
 
     @client.event
     async def on_ready() -> None:
@@ -335,6 +404,34 @@ def bind_client_events(
         )
 
 
+def install_shutdown_signal_handler() -> bool:
+    """Route SIGTERM into the same clean-exit path as Ctrl-C.
+
+    Without this the graceful shutdown below is dead code under any supervisor.
+    Python's default SIGTERM disposition terminates the process outright, so
+    `finally:` blocks never run: the scrape/send drain is skipped, Chrome is
+    killed with its cookie DB unflushed, and .bot.lock/.bot.pid are stranded --
+    on every `systemctl stop` and every RuntimeMaxSec restart.
+
+    Raising KeyboardInterrupt hands control to discord.py's existing
+    Client.run() handling, which awaits client.close() -- the very hook
+    _graceful_close is installed on. Returns whether a handler was installed.
+    """
+    if not hasattr(signal, "SIGTERM"):
+        return False
+
+    def _on_sigterm(_signum, _frame):
+        print("[shutdown] SIGTERM received; draining before exit.", flush=True)
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGTERM, _on_sigterm)
+    except (ValueError, OSError):
+        # Not the main thread, or the platform refused the handler.
+        return False
+    return True
+
+
 def run_bot() -> None:
     config = load_config()
     if not config.discord_token:
@@ -413,6 +510,8 @@ def run_bot() -> None:
             await _original_close()
 
     client.close = _graceful_close  # type: ignore[method-assign]
+
+    install_shutdown_signal_handler()
 
     register_current_process(config.pid_path)
     try:

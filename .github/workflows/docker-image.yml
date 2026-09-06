@@ -1,0 +1,183 @@
+name: Docker image
+
+# Builds the container image and proves it can actually do the work.
+#
+# This exists because the image's risk is not in the Python -- that resolves
+# offline and ci.yml already runs the suite. The risk is the apt
+# layer and the two things the bot shells out to: whether Chromium launches as
+# an unprivileged container process with --no-sandbox, and whether the TeX Live
+# trees are complete enough that pdflatex emits Type 1 text rather than the Type
+# 3 bitmaps that exit 0 and fail silently. Neither can be checked by reading the
+# Dockerfile, so the job builds the image and runs deploy/docker_smoke.py in it.
+#
+# Deliberately NOT on every push. The TeX trees are ~2GB and the build is slow;
+# nothing about the image changes when only src/ does, so it runs on the files
+# that actually define the image, plus on demand.
+on:
+  workflow_dispatch:
+  # push as well as pull_request: this repo commits straight to main, so a
+  # pull_request-only trigger would essentially never fire.
+  # The two path lists are duplicated on purpose: GitHub Actions' workflow
+  # parser does not support YAML anchors, so &x / *x would fail to load here
+  # even though every general-purpose YAML parser accepts it.
+  push:
+    branches: [main, master]
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "docker-compose.yml"
+      - "requirements.txt"
+      - "requirements-semantic.txt"
+      - "deploy/docker-entrypoint.sh"
+      - "deploy/docker_smoke.py"
+      - ".github/workflows/docker-image.yml"
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "docker-compose.yml"
+      - "requirements.txt"
+      - "requirements-semantic.txt"
+      - "deploy/docker-entrypoint.sh"
+      - "deploy/docker_smoke.py"
+      - ".github/workflows/docker-image.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Preflight - the image needs these files to be committed
+        # The container is coupled to source that may still be untracked. A
+        # checkout missing run.py builds a perfectly good image whose CMD does
+        # not exist, and the failure surfaces later as "can't open file
+        # '/app/run.py'" from the entrypoint test, or an ImportError from the
+        # smoke test -- neither of which points at the actual cause. Fail here
+        # instead, naming the file.
+        #
+        # This list is not hand-picked: it is every module reachable by walking
+        # imports from run.py, src/app.py and deploy/docker_smoke.py that is not
+        # tracked in git. A hand-written version of it missed three files.
+        run: |
+          missing=0
+          for f in \
+            run.py \
+            src/app.py \
+            src/config.py \
+            src/services/platform_support.py \
+            src/services/capacity.py \
+            src/services/quota.py \
+            src/services/job_match.py \
+            src/services/job_level.py \
+            src/services/jba/description_cache.py \
+            src/services/resumes/ats_check.py \
+            deploy/docker_smoke.py \
+            deploy/docker-entrypoint.sh \
+            requirements.txt ; do
+            if [ ! -f "$f" ]; then
+              echo "::error file=$f::$f is not in this checkout -- the image needs it"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || {
+            echo "The Docker setup depends on source that is not committed yet."
+            exit 1
+          }
+          echo "all required source present"
+
+      - name: Free disk space
+        # The image is ~5.7GB built, and the build also holds downloaded .debs
+        # and cache, so it needs roughly 8-10GB. A hosted runner starts with
+        # around 14GB free, which is enough only if nothing else goes wrong --
+        # and "no space left on device" midway through apt is a confusing way to
+        # find that out.
+        #
+        # dotnet + ghc alone free ~2.6GB. The Android SDK and the hosted tool
+        # cache are far larger and equally useless here; none of these are used
+        # by a Python + apt build.
+        run: |
+          echo "before:"; df -h / | tail -1
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/lib/android \
+            /opt/hostedtoolcache \
+            /usr/local/share/boost \
+            /usr/share/swift || true
+          echo "after:"; df -h / | tail -1
+
+      - name: Build image
+        # UID/GID must match the runner user that owns the checkout, or the
+        # container cannot write into the bind mount used by the smoke step --
+        # the same constraint that applies on any Linux host.
+        run: |
+          docker build \
+            --build-arg WITH_LATEX=1 \
+            --build-arg WITH_SEMANTIC=0 \
+            --build-arg UID=$(id -u) \
+            --build-arg GID=$(id -g) \
+            -t discordbot:ci .
+
+      - name: Report image size
+        run: docker image ls discordbot:ci
+
+      - name: Smoke test
+        # Mounted like docker-compose.yml does, because that is how it runs in
+        # production: the image supplies the interpreter and the binaries, the
+        # bind mount supplies the source, .git and the state paths.
+        #
+        # No token is passed, deliberately. The entrypoint only demands one when
+        # the command is the bot itself, and this is a one-off -- so this step
+        # also proves that gate works. Nothing here logs in to Discord.
+        #
+        # --shm-size mirrors docker-compose.yml. Chromium's default /dev/shm in
+        # a container is 64MB; --disable-dev-shm-usage covers the worst of it
+        # but testing under the production value is the point of this step.
+        run: |
+          docker run --rm \
+            --shm-size=1g \
+            -v "$PWD:/app" \
+            discordbot:ci \
+            python deploy/docker_smoke.py
+
+      - name: Entrypoint refuses to start the bot without a token
+        # Must be the bot command: the token check is gated on it, so a one-off
+        # like `python -c ...` is now (correctly) allowed through and would not
+        # test anything. It never actually reaches run.py -- the preflight exits
+        # first, which is the point.
+        #
+        # Deliberately NOT mounting the repo. On a runner it would be harmless --
+        # .env is gitignored, so a CI checkout has none -- but the same command
+        # run against a real checkout mounts a real .env, the token check passes,
+        # and it starts an actual second bot on the user's token. That happened
+        # once during development. The image alone never contains .env
+        # (.dockerignore), so the unmounted form tests the guard and cannot
+        # start anything, wherever it is run.
+        #
+        # Assert the reason, not just a non-zero exit: exit-code-only would pass
+        # just as happily if the image were missing or the mount failed, which is
+        # the opposite of what this proves.
+        run: |
+          set +e
+          output=$(docker run --rm discordbot:ci python run.py 2>&1)
+          rc=$?
+          set -e
+          echo "$output"
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::entrypoint started without a token"; exit 1
+          fi
+          echo "$output" | grep -q "No /app/.env and no discordtoken" || {
+            echo "::error::exited $rc but not for the expected reason"; exit 1
+          }
+          echo "entrypoint correctly refused to start, for the right reason"

@@ -12,6 +12,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from services import capacity, platform_support
+from services.resumes.ats_check import TYPE3_UNREADABLE_RATIO, audit_pdf_ats
+
 LATEX_WRAPPER_PACKAGE = "pdflatex"
 RESUMES_CACHE_ROOT = Path(__file__).resolve().parent / "resumes_cache"
 TEMPLATE_PATH = RESUMES_CACHE_ROOT / "template.tex"
@@ -38,21 +41,25 @@ def _bounded_env_int(name: str, default: int, *, minimum: int, maximum: int) -> 
 
 # Keep per-engine compile timeout high enough for complex templates while
 # preventing individual runs from stalling too long.
-LATEX_ENGINE_TIMEOUT_SECONDS = _bounded_env_int(
+# Stretched on slower hardware: pdflatex is single-threaded and CPU-bound, so a
+# budget tuned on a desktop can cut off a legitimate compile on a small host.
+LATEX_ENGINE_TIMEOUT_SECONDS = int(capacity.timeout(_bounded_env_int(
 	"LATEX_ENGINE_TIMEOUT_SECONDS",
 	75,
 	minimum=30,
 	maximum=180,
-)
+)))
 
 # Keep total compile budget generous for engine fallback + rerun pass,
 # but bounded so command handling remains responsive.
-LATEX_TOTAL_TIMEOUT_SECONDS = _bounded_env_int(
+# Must stretch with the per-engine budget above, otherwise the total would cut
+# off the engine fallback + rerun pass that the per-engine budget now allows.
+LATEX_TOTAL_TIMEOUT_SECONDS = int(capacity.timeout(_bounded_env_int(
 	"LATEX_TOTAL_TIMEOUT_SECONDS",
 	180,
 	minimum=60,
 	maximum=420,
-)
+)))
 
 LATEX_AUTOFIX_MAX_RETRIES = _bounded_env_int(
 	"LATEX_AUTOFIX_MAX_RETRIES",
@@ -157,6 +164,7 @@ PROFILE_KEY_SANITIZE_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
 PROFILE_ID_SUFFIX_PATTERN = re.compile(r"^(?P<prefix>.+)-(?P<id>\d+)$")
 XELATEX_HINT_PATTERN = re.compile(r"\\usepackage(?:\[[^\]]*\])?\{[^}]*fontspec[^}]*\}|\\setmainfont\{|\\newfontfamily\{", re.IGNORECASE)
 LUALATEX_HINT_PATTERN = re.compile(r"\\usepackage(?:\[[^\]]*\])?\{[^}]*unicode-math[^}]*\}|\\directlua\{|\\begin\{luacode\}", re.IGNORECASE)
+LUA_ONLY_HINT_PATTERN = re.compile(r"\\directlua\{|\\begin\{luacode\}", re.IGNORECASE)
 LATEX_RERUN_HINT_PATTERN = re.compile(r"Rerun to get cross-references right|Label\(s\) may have changed", re.IGNORECASE)
 LATEX_PAGE_COUNT_PATTERN = re.compile(r"Output written on [^(]*\((\d+)\s+pages?", re.IGNORECASE)
 LATEX_ALIGNMENT_ERROR_PATTERN = re.compile(r"Misplaced alignment tab character\s*&", re.IGNORECASE)
@@ -165,6 +173,37 @@ LATEX_BRACE_ERROR_PATTERN = re.compile(
 	re.IGNORECASE,
 )
 LATEX_MISSING_STYLE_PATTERN = re.compile(r"File\s+`([^`]+\.sty)'\s+not\s+found|File\s+([^\s]+\.sty)\s+not\s+found", re.IGNORECASE)
+# A font the engine cannot load or build.  Distinct from a missing .sty: the
+# package is installed, but its font files are absent and cannot be generated
+# (e.g. MiKTeX "Sorry, but miktex-makemf did not succeed").  The error names a
+# font file, never the package that asked for it, so nothing was stripped and
+# the build died -- even though dropping the font package and falling back to
+# the default typeface yields a perfectly readable resume.
+LATEX_FONT_FAILURE_PATTERN = re.compile(
+	r"pdfTeX error[^\n]*\(file\s+[^)]+\)\s*:\s*Font"
+	r"|Font\s+\S+\s+not\s+loadable"
+	r"|miktex-makemf\s+did\s+not\s+succeed"
+	r"|Font\s+shape\s+`[^']+'\s+undefined",
+	re.IGNORECASE,
+)
+LATEX_FONT_FILE_PATTERN = re.compile(r"\(file\s+([^)]+?)\s*\)\s*:\s*Font", re.IGNORECASE)
+# Font packages common in resume templates.  Used only as a fallback when the
+# failing font name cannot be matched back to a declared package.
+KNOWN_FONT_PACKAGES = frozenset(
+	{
+		"arev", "avant", "bookman", "charter", "chancery", "cmbright", "concrete",
+		"courier", "crimson", "ebgaramond", "fbb", "fourier", "helvet", "kpfonts",
+		"lato", "libertine", "libertinus", "lmodern", "mathpazo", "mathptmx",
+		"newpxtext", "newtxtext", "nimbusserif", "opensans", "palatino", "roboto",
+		"sourcecodepro", "sourcesanspro", "sourceserifpro", "tgadventor",
+		"tgbonum", "tgheros", "tgpagella", "tgtermes", "times", "utopia",
+		"xcharter",
+	}
+)
+# Ordering for "did the salvage retry actually help?".  Only ever used to
+# compare two renders of the same document, never as a quality gate.
+ATS_QUALITY_RANK = {"unreadable": 0, "unknown": 1, "degraded": 2, "ok": 3}
+
 GLYPHTOUNICODE_INPUT_PATTERN = re.compile(r"^\s*\\input\{glyphtounicode\}\s*$", re.IGNORECASE)
 PDF_GLYPH_UNICODE_PATTERN = re.compile(r"^\s*\\pdfglyphtounicode\b.*$", re.IGNORECASE)
 PDF_GENTOUNICODE_PATTERN = re.compile(r"^\s*\\pdfgentounicode\b.*$", re.IGNORECASE)
@@ -230,6 +269,12 @@ class LatexCompileResult:
 	repair_attempts: int = 0
 	lint_findings: list[str] = field(default_factory=list)
 	page_count: int | None = None
+	# Post-compile ATS readability audit of the produced PDF.  "unknown" means
+	# the bytes could not be parsed (stubs in tests), and is treated as a
+	# pass-through rather than a failure.
+	ats_status: str = "unknown"
+	ats_findings: list[str] = field(default_factory=list)
+	ats_degradations: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -496,13 +541,18 @@ def extract_template_requirements(template_text: str) -> list[str]:
 	return sorted(dict.fromkeys(required))
 
 
-def recommended_latex_python_package() -> str:
-	return LATEX_WRAPPER_PACKAGE
-
-
 def _run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
 	try:
-		return subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+		return subprocess.run(
+			command,
+			capture_output=True,
+			text=True,
+			encoding="utf-8",
+			errors="replace",
+			stdin=subprocess.DEVNULL,  # same reason as _run_latex_command
+			timeout=15,
+			check=False,
+		)
 	except subprocess.TimeoutExpired as exc:
 		return subprocess.CompletedProcess(
 			command,
@@ -515,32 +565,10 @@ def _run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def _find_latex_executable(command_name: str) -> str | None:
-	resolved = shutil.which(command_name)
-	if resolved:
-		return resolved
-
-	# Windows installs (notably MiKTeX) are often available but not on PATH.
-	if os.name != "nt":
-		return None
-
-	exe_name = command_name if command_name.lower().endswith(".exe") else f"{command_name}.exe"
-	local_app_data = Path(os.environ.get("LOCALAPPDATA", ""))
-	program_files = Path(os.environ.get("ProgramFiles", ""))
-	program_files_x86 = Path(os.environ.get("ProgramFiles(x86)", ""))
-
-	candidate_dirs = [
-		local_app_data / "Programs" / "MiKTeX" / "miktex" / "bin" / "x64",
-		local_app_data / "MiKTeX" / "miktex" / "bin" / "x64",
-		program_files / "MiKTeX" / "miktex" / "bin" / "x64",
-		program_files_x86 / "MiKTeX" / "miktex" / "bin" / "x64",
-	]
-
-	for directory in candidate_dirs:
-		candidate = directory / exe_name
-		if candidate.exists() and candidate.is_file():
-			return str(candidate)
-
-	return None
+	# Delegates to the platform shim: PATH first, then the install locations that
+	# are commonly off PATH (MiKTeX on Windows, TeX Live on Linux -- the latter
+	# matters because systemd hands a service a minimal PATH).
+	return platform_support.find_latex_executable(command_name)
 
 
 def check_template_compile_environment(
@@ -584,12 +612,36 @@ def check_template_compile_environment(
 	)
 
 
+def _template_engine_family(template_text: str) -> str:
+	"""Classify a template by the font machinery it uses.
+
+	This is not a preference, it is a hard constraint.  A ``fontspec`` template
+	cannot compile under pdflatex at all ("Fatal Package fontspec Error"), and a
+	Type1-font template (XCharter, ``[T1]{fontenc}``) compiled under xelatex
+	silently degrades to Type 3 bitmap fonts whose text extracts as glyph names
+	-- a PDF that looks perfect and is unreadable to an ATS.  Each engine is
+	correct for its own family and broken for the other, so the families must
+	never be crossed as a fallback.
+	"""
+	if LUA_ONLY_HINT_PATTERN.search(template_text):
+		return "luatex"
+	if XELATEX_HINT_PATTERN.search(template_text) or LUALATEX_HINT_PATTERN.search(template_text):
+		return "unicode"
+	return "pdftex"
+
+
 def _preferred_latex_engines(template_text: str) -> list[str]:
-	if XELATEX_HINT_PATTERN.search(template_text):
-		return ["xelatex", "lualatex", "pdflatex"]
-	if LUALATEX_HINT_PATTERN.search(template_text):
-		return ["lualatex", "xelatex", "pdflatex"]
-	return ["pdflatex", "xelatex", "lualatex"]
+	family = _template_engine_family(template_text)
+	if family == "luatex":
+		# \directlua / luacode is lualatex-only; xelatex cannot run it.
+		return ["lualatex"]
+	if family == "unicode":
+		# fontspec/unicode-math load system fonts and embed them with a
+		# ToUnicode map under either Unicode engine.  Both are in-family.
+		return ["xelatex", "lualatex"]
+	# pdftex family: pdflatex only.  Falling back to a Unicode engine here is
+	# the cross-family case that produces silently unreadable PDFs.
+	return ["pdflatex"]
 
 
 def _available_latex_engines(environment: LatexCompileEnvironment, template_text: str) -> list[tuple[str, str]]:
@@ -1049,6 +1101,9 @@ def _run_chktex(cwd: Path, tex_name: str, chktex_path: str) -> tuple[list[str], 
 			command,
 			capture_output=True,
 			text=True,
+			encoding="utf-8",
+			errors="replace",
+			stdin=subprocess.DEVNULL,  # same reason as _run_latex_command
 			timeout=20,
 			check=False,
 			cwd=str(cwd),
@@ -1549,6 +1604,8 @@ def _classify_latex_compile_failure(
 		return "ampersand"
 	if LATEX_MISSING_STYLE_PATTERN.search(combined):
 		return "missing-style"
+	if LATEX_FONT_FAILURE_PATTERN.search(combined):
+		return "font-unavailable"
 	if LATEX_BRACE_ERROR_PATTERN.search(combined):
 		return "brace"
 	if "Emergency stop" in combined and ("\\resumeItemList" in latex_document or "\\resumeSubHeadingList" in latex_document):
@@ -1568,6 +1625,100 @@ def _extract_missing_style_files(stdout_text: str, stderr_text: str) -> list[str
 		if entry and entry not in missing:
 			missing.append(entry)
 	return missing
+
+
+def _declared_usepackage_names(latex_document: str) -> list[str]:
+	names: list[str] = []
+	for match in re.finditer(r"\\usepackage(?:\[[^\]]*\])?\{([^}]*)\}", latex_document):
+		for raw in match.group(1).split(","):
+			name = raw.strip()
+			if name and name not in names:
+				names.append(name)
+	return names
+
+
+def _font_match_key(text: str) -> str:
+	"""Reduce a font or package name to a comparable stem.
+
+	The engine reports a font *file* (``SourceSans3-It-tlf-t1--base``) while the
+	preamble names a *package* (``sourcesanspro``).  Lowercasing and dropping
+	digits and separators turns the first token of the former into
+	``sourcesans``, which is a substring of the latter -- enough to connect them
+	without hardcoding a mapping table.
+	"""
+	return re.sub(r"[^a-z]", "", text.lower())
+
+
+def _strip_font_packages_for_failed_font(
+	latex_document: str,
+	stdout_text: str,
+	stderr_text: str,
+) -> tuple[str, list[str]]:
+	"""Drop the font package whose font the engine could not load or build.
+
+	Removing it makes the document fall back to the engine's default typeface.
+	The resume then looks different from what its author designed, but it
+	compiles and -- verified against a real failing profile -- extracts as clean
+	Type 1 text.  A readable resume in the wrong font beats no resume at all.
+	"""
+	combined = "\n".join(part for part in (stderr_text, stdout_text) if part)
+	declared = _declared_usepackage_names(latex_document)
+	if not declared:
+		return latex_document, []
+
+	targets: list[str] = []
+	for match in LATEX_FONT_FILE_PATTERN.finditer(combined):
+		# "SourceSans3-It-tlf-t1--base" -> "SourceSans3"
+		head = re.split(r"[-_.]", match.group(1).strip())[0]
+		key = _font_match_key(head)
+		if len(key) < 4:
+			continue
+		for name in declared:
+			if key in _font_match_key(name) and name not in targets:
+				targets.append(name)
+
+	if not targets:
+		# Nothing matched by name: fall back to dropping any declared package
+		# that is a known font package.
+		targets = [name for name in declared if _font_match_key(name) in KNOWN_FONT_PACKAGES]
+
+	if not targets:
+		return latex_document, []
+
+	updated, removed = _strip_missing_style_usepackages(
+		latex_document, [f"{name}.sty" for name in targets]
+	)
+	if not removed or updated == latex_document:
+		return latex_document, []
+	removed_label = ", ".join(sorted(set(removed)))
+	return updated, [f"dropped unavailable font packages: {removed_label}"]
+
+
+FONTENC_T1_PATTERN = re.compile(r"^[^%\n]*\\usepackage\s*\[[^\]]*\bT1\b[^\]]*\]\s*\{fontenc\}", re.MULTILINE)
+LMODERN_PATTERN = re.compile(r"^[^%\n]*\\usepackage(?:\s*\[[^\]]*\])?\s*\{lmodern\}", re.MULTILINE)
+
+
+def _ensure_type1_fallback_font(latex_document: str) -> tuple[str, list[str]]:
+	"""Give a T1-encoded document a Type 1 font it can actually use.
+
+	``\\usepackage[T1]{fontenc}`` with no T1 Type 1 font installed does not
+	fail.  MiKTeX generates EC bitmap (``.pk``) fonts on the fly, so the engine
+	exits 0 and every glyph in the PDF becomes a Type 3 bitmap with no
+	ToUnicode map -- it prints correctly and extracts as nothing.  Latin Modern
+	is the T1-encoded Type 1 companion to the default typeface, so loading it
+	keeps the document looking essentially unchanged while making the text
+	real, selectable characters.
+	"""
+	if not FONTENC_T1_PATTERN.search(latex_document) or LMODERN_PATTERN.search(latex_document):
+		return latex_document, []
+
+	insertion = "\\usepackage{lmodern}\n"
+	match = FONTENC_T1_PATTERN.search(latex_document)
+	line_start = latex_document.rfind("\n", 0, match.start()) + 1
+	updated = latex_document[:line_start] + insertion + latex_document[line_start:]
+	if updated == latex_document:
+		return latex_document, []
+	return updated, ["loaded lmodern so T1 text renders as Type 1 instead of bitmaps"]
 
 
 def _apply_targeted_latex_auto_fix(
@@ -1643,6 +1794,14 @@ def _apply_targeted_latex_auto_fix(
 			return _apply_general_latex_repairs(latex_document)
 		removed_label = ", ".join(sorted(set(removed)))
 		return updated, [f"stripped missing style packages: {removed_label}"]
+
+	if failure_kind == "font-unavailable":
+		updated, repairs = _strip_font_packages_for_failed_font(
+			latex_document, stdout_text, stderr_text
+		)
+		if repairs:
+			return updated, repairs
+		return _apply_general_latex_repairs(latex_document)
 
 	if failure_kind == "generic-latex-error":
 		return _apply_general_latex_repairs(latex_document)
@@ -1792,9 +1951,18 @@ def compile_latex_to_pdf(
 
 		engines = _available_latex_engines(environment, sanitized_tex)
 		if not engines:
+			# Engines are constrained to the template's family, so this can fire
+			# even when some other engine is installed.  Say which one is needed
+			# rather than implying nothing is available -- compiling with the
+			# wrong-family engine is what produces unreadable PDFs.
+			family = _template_engine_family(sanitized_tex)
+			needed = ", ".join(_preferred_latex_engines(sanitized_tex))
 			return LatexCompileResult(
 				status="unavailable",
-				message="LaTeX compile environment is not ready: no LaTeX engine found (pdflatex/xelatex/lualatex)",
+				message=(
+					f"LaTeX compile environment is not ready: this template needs a "
+					f"{family}-family engine ({needed}), which is not installed."
+				),
 				log_path=resolved_log_path,
 			)
 
@@ -1849,6 +2017,10 @@ def compile_latex_to_pdf(
 				tex_path.name,
 			]
 			retry_count = 0
+			# A compile can succeed and still be unreadable (see the salvage
+			# block in the success branch).  At most one salvage per engine.
+			bitmap_salvage_done = False
+			unreadable_fallback: tuple[bytes, int | None, object, list[str]] | None = None
 			while True:
 				if time.monotonic() >= deadline:
 					last_excerpt = "Compilation budget exhausted before trying remaining engines."
@@ -1929,17 +2101,94 @@ def compile_latex_to_pdf(
 					if page_match:
 						page_count = int(page_match.group(1))
 
+					pdf_bytes = pdf_path.read_bytes()
+					if not pdf_bytes:
+						# pdflatex reports "No pages of output" and leaves a
+						# zero-byte .pdf behind rather than deleting it, so
+						# exists() is not enough.  Returning "ok" here would hand
+						# the caller an empty attachment and call it a success.
+						last_excerpt = f"{engine_name} produced an empty PDF (no pages of output)."[-1500:]
+						break
+
+					# Exit code 0 says the compile ran, not that an ATS can read
+					# the result.  Audit the actual bytes.  Report-only for now:
+					# the status is recorded and logged, never used to reject a
+					# PDF, so this cannot regress a build that works today.
+					ats_audit = audit_pdf_ats(pdf_bytes)
+					if ats_audit.status != "unknown":
+						attempt_logs.append(f"[{engine_name}:ats] {ats_audit.summary()}")
+
+					if unreadable_fallback is not None:
+						# This is the render produced *after* dropping the font
+						# packages.  If it is no more readable than what the
+						# author designed, their typography wins -- a salvage
+						# that does not salvage anything is pure loss.
+						prev_bytes, prev_pages, prev_audit, prev_labels = unreadable_fallback
+						unreadable_fallback = None
+						if ATS_QUALITY_RANK.get(ats_audit.status, 1) <= ATS_QUALITY_RANK.get(
+							getattr(prev_audit, "status", "unknown"), 1
+						):
+							attempt_logs.append(
+								f"[{engine_name}:ats] dropping font packages did not improve "
+								f"readability; keeping the original render"
+							)
+							pdf_bytes, page_count, ats_audit = prev_bytes, prev_pages, prev_audit
+							for label in prev_labels:
+								if label in repairs_applied:
+									repairs_applied.remove(label)
+					elif (
+						# Gate on the bitmap signal itself, not on "unreadable".
+						# A short resume also audits as unreadable, and dropping
+						# the author's font would not add a single character to
+						# it -- it would just lose their typography for nothing.
+						max(ats_audit.type3_char_ratio, ats_audit.no_tounicode_char_ratio)
+						>= TYPE3_UNREADABLE_RATIO
+						and not bitmap_salvage_done
+						and retry_count < bounded_retries
+						and time.monotonic() < deadline
+					):
+						# When a font package's Type 1 files are not installed,
+						# MiKTeX quietly generates PK bitmaps instead of failing.
+						# The engine exits 0, the PDF looks perfect, and every
+						# glyph is a Type 3 bitmap with no ToUnicode map -- an
+						# ATS reads nothing.  There is no error text to classify;
+						# the only evidence is in the bytes we just audited.
+						bitmap_salvage_done = True
+						salvaged_tex, salvage_repairs = _strip_font_packages_for_failed_font(
+							engine_tex, "", ""
+						)
+						salvaged_tex, lmodern_repairs = _ensure_type1_fallback_font(salvaged_tex)
+						salvage_repairs = list(salvage_repairs) + lmodern_repairs
+						if salvage_repairs and salvaged_tex != engine_tex:
+							unreadable_fallback = (
+								pdf_bytes, page_count, ats_audit, list(salvage_repairs)
+							)
+							retry_count += 1
+							repair_attempts += 1
+							for label in salvage_repairs:
+								if label not in repairs_applied:
+									repairs_applied.append(label)
+							attempt_logs.append(
+								f"[{engine_name}:repair#{retry_count}] Applied auto-fixes "
+								f"(unreadable-bitmap-fonts): {', '.join(salvage_repairs)}"
+							)
+							engine_tex = salvaged_tex
+							continue
+
 					_write_compile_log(resolved_log_path, "\n\n".join(attempt_logs), "")
 					return LatexCompileResult(
 						status="ok",
 						message=f"Compiled LaTeX resume to PDF using {engine_name}.",
-						pdf_bytes=pdf_path.read_bytes(),
+						pdf_bytes=pdf_bytes,
 						pdf_name=f"{pdf_stem}.pdf",
 						log_path=resolved_log_path,
 						repairs_applied=repairs_applied.copy(),
 						repair_attempts=repair_attempts,
 						lint_findings=lint_findings,
 						page_count=page_count,
+						ats_status=ats_audit.status,
+						ats_findings=list(ats_audit.findings),
+						ats_degradations=list(ats_audit.degradations),
 					)
 
 				last_excerpt = ((final_stderr or "").strip() or (final_stdout or "").strip())[-1500:] or None
@@ -1990,10 +2239,25 @@ def compile_latex_to_pdf(
 
 def _run_latex_command(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
 	try:
+		# Decode explicitly as UTF-8 with replacement.  text=True uses the
+		# locale codec (cp1252 on Windows), which raises UnicodeDecodeError in
+		# subprocess's reader thread when an engine echoes a non-ASCII source
+		# line.  The exception is swallowed by that thread, so stdout arrives
+		# empty and the failure classifier sees nothing to work with.
 		return subprocess.run(
 			command,
 			capture_output=True,
 			text=True,
+			encoding="utf-8",
+			errors="replace",
+			# Never inherit stdin.  -interaction=nonstopmode only covers TeX's
+			# own error prompts; MiKTeX's package installer is a separate prompt
+			# that reads stdin, and an inherited stdin lets it block forever --
+			# past this timeout, because the kill-then-drain path waits on a
+			# pipe the stalled child still holds.  Observed as a full-suite hang
+			# that burned 9.8 CPU-hours in compile_latex_to_pdf.  With DEVNULL
+			# the prompt reads EOF and the engine fails fast instead.
+			stdin=subprocess.DEVNULL,
 			timeout=LATEX_ENGINE_TIMEOUT_SECONDS,
 			check=False,
 			cwd=str(cwd),
