@@ -15,4 +15,15 @@ pdflatex
 # callers treat as pass-through -- so the Type 3 bitmap gate and the lmodern
 # salvage it drives both disappear silently.
 pypdf
+# Read by tests/test_workflow_wiring.py, which is the check that the four ATS
+# registries and the workflow's platform lists agree. Undeclared the same way
+# pypdf was: it is in requirements-lock.txt and in every developer venv, so it
+# worked everywhere except the one place that installs requirements.txt alone.
+#
+# The cost was the whole suite, not one test. A missing import is a collection
+# error, and pytest aborts the session on those -- so CI ran 0 tests in 3.85s
+# and reported "failure", which reads identically to a real regression. Local
+# runs hid it twice over: the venv has PyYAML, and the verification discipline
+# in the handoff passes --continue-on-collection-errors, which CI does not.
+PyYAML
 # Semantic job matching is optional and heavy (torch); see requirements-semantic.txt.
