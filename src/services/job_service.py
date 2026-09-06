@@ -1614,6 +1614,38 @@ ZIPRECRUITER_SEARCH_URL = "https://www.ziprecruiter.com/jobs-search"
 # Do not "modernize" these to the bare alias. Rotating across three engines
 # also absorbs the occasional single-fingerprint block.
 ZIPRECRUITER_IMPERSONATIONS = ("chrome124", "firefox133", "safari")
+
+# Which of the above last cleared the WAF, so the next fetch starts there.
+#
+# The order above is a fixed preference, and the WAF's is not: measured
+# 2026-09-06, chrome124 now draws a 403 on every attempt while safari clears
+# 3/3 -- the reverse of what the comment above recorded when it was written.
+# Nothing was broken by that, because the rotation still reached a working
+# fingerprint, but every page of every search paid a doomed request plus a
+# backoff sleep first, and each page repeats it.
+#
+# Remembering the winner keeps the rotation exactly as it is -- still three
+# engines, still in the same order once the remembered one is tried -- while
+# making the common case one request instead of two. It also means the next
+# time the WAF's preference moves, this follows it without an edit, which a
+# reordered tuple would not.
+_ziprecruiter_last_good: str | None = None
+_ziprecruiter_last_good_lock = threading.Lock()
+
+
+def _ziprecruiter_impersonation_order() -> tuple[str, ...]:
+    """Configured order, with the last fingerprint that worked moved first."""
+    with _ziprecruiter_last_good_lock:
+        good = _ziprecruiter_last_good
+    if not good or good not in ZIPRECRUITER_IMPERSONATIONS:
+        return ZIPRECRUITER_IMPERSONATIONS
+    return (good, *(i for i in ZIPRECRUITER_IMPERSONATIONS if i != good))
+
+
+def _note_ziprecruiter_impersonation(impersonate: str) -> None:
+    global _ziprecruiter_last_good
+    with _ziprecruiter_last_good_lock:
+        _ziprecruiter_last_good = impersonate
 ZIPRECRUITER_RESULTS_PER_PAGE = 20
 ZIPRECRUITER_MAX_PAGES = 5
 _ZIPRECRUITER_LD_JSON_RE = re.compile(
@@ -1732,8 +1764,9 @@ def _ziprecruiter_fetch_page(
     """Fetch one search page, rotating TLS fingerprints until one clears."""
     from curl_cffi import requests as curl_requests
 
-    last_attempt = len(ZIPRECRUITER_IMPERSONATIONS) - 1
-    for attempt, impersonate in enumerate(ZIPRECRUITER_IMPERSONATIONS):
+    order = _ziprecruiter_impersonation_order()
+    last_attempt = len(order) - 1
+    for attempt, impersonate in enumerate(order):
         proxy = pick_proxy(proxy_pool, cursor + attempt)
         proxies = {"http": proxy, "https": proxy} if proxy else None
         try:
@@ -1749,6 +1782,7 @@ def _ziprecruiter_fetch_page(
                 ZIPRECRUITER_SEARCH_URL, params=params, timeout=30, proxies=proxies
             )
             if response.status_code == 200:
+                _note_ziprecruiter_impersonation(impersonate)
                 return response.content.decode("utf-8", "replace")
             print(f"[ziprecruiter] {impersonate} -> HTTP {response.status_code}")
         except Exception as exc:

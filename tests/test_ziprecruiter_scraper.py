@@ -290,3 +290,117 @@ def test_missing_curl_cffi_degrades_quietly(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", blocked)
     assert scrape_ziprecruiter_postings("python", "Toronto") == []
+
+
+# --- remembering which fingerprint cleared the WAF ----------------------------
+#
+# The rotation always worked, so nothing here is about returning rows. It is
+# about not paying for a request that is known to fail: measured 2026-09-06 the
+# configured first choice draws a 403 on every attempt, and every page of every
+# search opened with it, then slept a backoff, then tried the next one. Two
+# live runs back to back: 3.3s, then 1.5s once the winner is remembered.
+
+
+@pytest.fixture(autouse=True)
+def _forget_the_remembered_fingerprint():
+    """The winner is a module global, so without this the fake WAF in one test
+    picks the starting fingerprint the next test observes -- and this suite
+    runs in a randomised order, so that would fail intermittently and only on
+    some seeds. Cleared on both sides: a test may arrive with it already set."""
+    job_service._ziprecruiter_last_good = None
+    yield
+    job_service._ziprecruiter_last_good = None
+
+
+def _search_fingerprints(log) -> list[str]:
+    """Fingerprints used for the search itself, ignoring the cookie warm-up."""
+    return [entry[0] for entry in log if "jobs-search" in entry[1]]
+
+
+def test_the_fingerprint_that_cleared_is_tried_first_next_time(monkeypatch, search_html):
+    """The point of the whole change: the second search does not re-pay for the
+    fingerprint the first one already found to be blocked."""
+    blocked = ZIPRECRUITER_IMPERSONATIONS[0]
+
+    def responder(impersonate, url, params):
+        if impersonate == blocked:
+            return _FakeResponse(403, "Just a moment...")
+        return _FakeResponse(200, search_html)
+
+    log = _install_fake_curl(monkeypatch, responder)
+
+    scrape_ziprecruiter_postings("python", "Toronto", results_wanted=3, hours_old=0)
+    first = _search_fingerprints(log)
+    assert first[0] == blocked, "the configured order is still the cold start"
+    winner = first[-1]
+
+    log.clear()
+    rows = scrape_ziprecruiter_postings("python", "Toronto", results_wanted=3, hours_old=0)
+    assert _search_fingerprints(log) == [winner], "one request, and it is the winner"
+    assert len(rows) == 3, "and it still returns the rows"
+
+
+def test_a_remembered_fingerprint_that_stops_working_is_not_sticky(monkeypatch, search_html):
+    """The WAF's preference moves -- that is why this is remembered rather than
+    reordered in the tuple. When the remembered one starts being refused the
+    rotation must carry on past it and remember the replacement."""
+    state = {"blocked": ZIPRECRUITER_IMPERSONATIONS[0]}
+
+    def responder(impersonate, url, params):
+        if impersonate == state["blocked"]:
+            return _FakeResponse(403, "Just a moment...")
+        return _FakeResponse(200, search_html)
+
+    log = _install_fake_curl(monkeypatch, responder)
+    scrape_ziprecruiter_postings("python", "Toronto", results_wanted=3, hours_old=0)
+    winner = _search_fingerprints(log)[-1]
+
+    state["blocked"] = winner
+    log.clear()
+    rows = scrape_ziprecruiter_postings("python", "Toronto", results_wanted=3, hours_old=0)
+    tried = _search_fingerprints(log)
+    assert tried[0] == winner, "starts from what last worked"
+    assert len(tried) > 1 and len(rows) == 3, "and falls through to one that clears"
+
+    state["blocked"] = "no fingerprint at all"
+    log.clear()
+    scrape_ziprecruiter_postings("python", "Toronto", results_wanted=3, hours_old=0)
+    assert _search_fingerprints(log) == [tried[1]], "the replacement is remembered"
+
+
+def test_every_fingerprint_still_gets_a_turn_from_any_starting_point(monkeypatch):
+    """Remembering reorders the rotation; it must not shorten it. A fully
+    blocked search has to try all three no matter which one it starts from,
+    and try each exactly once."""
+    for start in ZIPRECRUITER_IMPERSONATIONS:
+        job_service._note_ziprecruiter_impersonation(start)
+        log = _install_fake_curl(
+            monkeypatch, lambda *a: _FakeResponse(403, "Just a moment...")
+        )
+        assert scrape_ziprecruiter_postings("python", "Toronto", results_wanted=5) == []
+        tried = _search_fingerprints(log)
+        assert tried[0] == start
+        assert sorted(tried) == sorted(ZIPRECRUITER_IMPERSONATIONS), (
+            f"starting from {start} must still cover the rotation exactly once"
+        )
+
+
+def test_a_blocked_fingerprint_is_never_recorded_as_the_winner(monkeypatch):
+    """Otherwise a total outage teaches the scraper to open with whichever
+    fingerprint happened to fail last, and the memory becomes noise."""
+    _install_fake_curl(monkeypatch, lambda *a: _FakeResponse(403, "Just a moment..."))
+    scrape_ziprecruiter_postings("python", "Toronto", results_wanted=5)
+    assert job_service._ziprecruiter_last_good is None
+
+
+def test_a_fingerprint_no_longer_configured_is_ignored(monkeypatch, search_html):
+    """The memory outlives edits to the tuple. If an entry is dropped or
+    renamed, the stale name must not be requested from curl_cffi -- which
+    raises on an unknown target -- nor silently drop a real fingerprint."""
+    job_service._note_ziprecruiter_impersonation("chrome99")
+    log = _install_fake_curl(monkeypatch, lambda *a: _FakeResponse(200, search_html))
+    scrape_ziprecruiter_postings("python", "Toronto", results_wanted=3, hours_old=0)
+
+    tried = _search_fingerprints(log)
+    assert "chrome99" not in tried
+    assert tried[0] == ZIPRECRUITER_IMPERSONATIONS[0], "falls back to the configured order"
