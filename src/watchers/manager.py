@@ -94,6 +94,18 @@ ATS_CYCLE_TIMEOUT_CAP_S = 14400
 # so daily runs converge on the fleet rather than re-asking it.
 ATS_VALIDATION_BUDGET_S = 900.0
 
+# Wall clock the daily company harvest may spend. The same size as validation
+# above, and for the stronger reason: harvesting is what finds companies nobody
+# has heard of yet, so it is tempting to let it run long. It must not. It sits
+# ahead of validation in the rollover, so its budget and validation's are spent
+# back to back before the day's first scrape.
+#
+# A short budget costs nothing here because the harvester resumes. A run cut
+# off part way leaves its crawl unrecorded, so the next day starts the same
+# crawl again and reaches further into the fleet; a new Common Crawl snapshot
+# appears roughly monthly, which is weeks of daily runs to work through one.
+ATS_HARVEST_BUDGET_S = 900.0
+
 
 def ats_cycle_timeout(platform_count: int, workers: int) -> int:
     """Long enough for every platform to get a turn on THIS host.
@@ -893,6 +905,76 @@ class WatcherManager:
             # scrape that was about to run.
             print(f"[ats-scrape] could not refresh company lists ({exc})")
 
+    async def _harvest_companies(self) -> None:
+        """Sweep the archive index for company boards nobody has found yet.
+
+        Discovery is the one stage of this pipeline that nothing ever started.
+        The weekly cron in .github/workflows/ats-harvest.yml cannot fire:
+        GitHub reads `schedule:` only from the default branch, and that
+        workflow lives on a feature branch -- the same reason its own comment
+        gives for why workflow_dispatch does not work there either. What has
+        actually run a harvest is a push touching one of three paths, or a
+        person. So the stage the fleet exists to feed ran by hand, which is
+        the failure this repo keeps finding: a step that works perfectly and
+        runs only when someone remembers it. data/ats_discovery_state.json is
+        the fossil of the last one -- written once, referenced by nothing.
+
+        Cheap on the days there is nothing to do, which is nearly all of them.
+        --only-new-crawls compares the newest crawl id against what this
+        directory has already been swept for and returns without making a
+        single request when they match. Common Crawl publishes roughly
+        monthly, so that is the answer on twenty-nine mornings out of thirty,
+        and it is what makes running this unconditionally affordable.
+
+        Bounded, and the bound is safe only because the harvester resumes: a
+        run the budget cuts short records nothing as swept, so tomorrow starts
+        the same crawl and reaches further into the fleet. Without that, a
+        budget would quietly convert "slow" into "permanently unharvested".
+
+        ccbulk only. Wayback is an order of magnitude slower, and the one
+        platform that needs it -- Lever, which blocks CCBot -- is better
+        served by a CI run with hours to spend than by a rollover with
+        fifteen minutes.
+
+        Ahead of validation, for the reason validation gives for sitting after
+        the sync: a board discovered this morning should be probed before it
+        costs a scrape cycle's worth of requests.
+        """
+        script = Path(self.config.base_dir) / "scripts" / "harvest_ats.py"
+        if not script.exists():
+            return
+        try:
+            def _harvest() -> tuple[int, str]:
+                proc = subprocess.run(
+                    [sys.executable, str(script),
+                     "--crawls", "1",
+                     "--index", "ccbulk",
+                     "--only-new-crawls",
+                     "--total-budget-seconds", str(ATS_HARVEST_BUDGET_S)],
+                    cwd=str(self.config.base_dir),
+                    capture_output=True, text=True,
+                )
+                return proc.returncode, (proc.stdout or "").strip()
+
+            rc, out = await self._tracked_to_thread(
+                _harvest, label=scheduler_labels.ATS_COMPANY_HARVEST
+            )
+            tail = out.splitlines()[-1] if out else ""
+            if rc == 0:
+                print("[ats-scrape] company harvest ran"
+                      + (f": {tail}" if tail else ""))
+            else:
+                # Includes the harvester's "every platform yielded nothing"
+                # exit, which means the index or the queries broke rather than
+                # that there are no companies. Either way the fleet still has
+                # everything it had yesterday; a harvest is only ever additive.
+                print(f"[ats-scrape] company harvest exited {rc}; keeping the "
+                      "fleet as it is")
+        except Exception as exc:
+            # Discovery is what tomorrow's scrape is made of, not today's.
+            # Losing it must not cost the scrape that is about to run.
+            print(f"[ats-scrape] could not harvest companies ({exc})")
+
     async def _validate_company_slugs(self) -> None:
         """Ask the boards themselves which ones still exist.
 
@@ -1053,9 +1135,14 @@ class WatcherManager:
                 scrapes_today = 0
                 if rolled_over:
                     await self._refresh_company_lists()
-                    # After the sync, not before: a slug discovered upstream
-                    # today should be probed before it costs a cycle, and a
-                    # company discovered today should be orderable today.
+                    # Second, because the sync only collects what other people
+                    # found. This is the only step that discovers a company
+                    # nobody has seen, and until it ran here it ran nowhere.
+                    await self._harvest_companies()
+                    # After both, not before: a slug discovered upstream or
+                    # harvested here today should be probed before it costs a
+                    # cycle, and a company discovered today should be orderable
+                    # today.
                     await self._validate_company_slugs()
                     await self._refresh_geo_index()
                     # Last: it reads what the three above just wrote, and it is

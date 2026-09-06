@@ -840,6 +840,41 @@ def harvest_platform(
 # keeps it out of the per-platform globs.
 CRAWL_CACHE_NAME = "_crawls.json"
 
+# Crawl ids this output directory has already been swept for. Deliberately NOT
+# published with the harvest: it records what a particular runner has done, and
+# CI and the bot sweep the same crawls into different directories. Publishing it
+# would let one runner's progress silently cancel the other's work.
+SWEPT_CACHE_NAME = "_swept.json"
+
+
+def _load_swept(path: Path) -> set[str]:
+    """Crawl ids already swept into this directory; unreadable reads as none.
+
+    An unreadable record must mean "sweep it again", never "skip it": the cost
+    of re-sweeping a crawl is time, and the cost of wrongly skipping one is a
+    month of companies nobody discovers.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if isinstance(data, dict):
+        data = data.get("crawls", [])
+    if not isinstance(data, list):
+        return set()
+    return {c for c in data if isinstance(c, str)}
+
+
+def _save_swept(path: Path, crawls: Iterable[str]) -> None:
+    """Record crawl ids as swept. Best effort: losing this costs a re-sweep."""
+    merged = sorted(_load_swept(path) | {c for c in crawls if isinstance(c, str)})
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"crawls": merged}, indent=2) + "\n",
+                        encoding="utf-8")
+    except OSError as exc:
+        print(f"[harvest] could not record swept crawls: {exc}", file=sys.stderr)
+
 
 def _parse_collinfo(raw: bytes) -> list[str]:
     try:
@@ -1889,6 +1924,19 @@ def main(argv: list[str] | None = None) -> int:
                         choices=["commoncrawl", "ccbulk", "wayback"],
                         help="which archive(s) to sweep (repeatable; "
                              "default: both)")
+    parser.add_argument("--only-new-crawls", action="store_true",
+                        help="skip crawls already swept into --out, and exit 0 "
+                             "without making a request when there is nothing "
+                             "new. Lets a caller that runs on a fixed schedule "
+                             "stay cheap between Common Crawl releases instead "
+                             "of re-sweeping the same crawl every day for the "
+                             "month it stays the newest one.")
+    parser.add_argument("--total-budget-seconds", type=float, default=None,
+                        help="stop starting new platforms once this much wall "
+                             "clock has gone. Bounds a scheduled run so it "
+                             "cannot delay whatever is queued behind it. A "
+                             "truncated run records nothing as swept, so the "
+                             "next one resumes the same crawl.")
     args = parser.parse_args(argv)
 
     # ccbulk before commoncrawl: it reads the same index from static files on a
@@ -1948,6 +1996,29 @@ def main(argv: list[str] | None = None) -> int:
                 indexes = [i for i in indexes
                            if i not in ("commoncrawl", "ccbulk")]
 
+        # "Nothing new" is the normal answer, not an error. Common Crawl
+        # publishes roughly monthly, so anything on a daily schedule finds the
+        # same newest crawl on twenty-nine days out of thirty. Saying so in
+        # milliseconds, without a single index request, is what lets a caller
+        # run unconditionally instead of having to know the release calendar.
+        swept_path = args.out / SWEPT_CACHE_NAME
+        if args.only_new_crawls and crawls:
+            already = _load_swept(swept_path)
+            fresh = [c for c in crawls if c not in already]
+            if len(fresh) != len(crawls):
+                log(f"[harvest] {len(crawls) - len(fresh)} crawl(s) already "
+                    f"swept into {args.out.name}; {len(fresh)} left")
+            crawls = fresh
+            if not crawls and "wayback" not in indexes:
+                log("[harvest] no unswept crawls - nothing to do")
+                if args.json:
+                    print(json.dumps({
+                        "indexes": indexes, "crawls": [],
+                        "elapsed_seconds": 0.0, "dry_run": args.dry_run,
+                        "platforms": {}, "skipped": "no unswept crawls",
+                    }, indent=2))
+                return 0
+
         platforms = [PLATFORM_BY_NAME[n] for n in args.platforms] \
             if args.platforms else list(PLATFORMS)
 
@@ -1958,8 +2029,22 @@ def main(argv: list[str] | None = None) -> int:
         t_start = time.monotonic()
         summary: dict[str, dict[str, object]] = {}
         any_success = False
+        budget_s = args.total_budget_seconds
+        truncated = False
 
         for platform in platforms:
+            # Checked between platforms, never inside one. A platform stopped
+            # half way still writes what it found -- the harvest is a union, so
+            # a partial sweep is smaller, not wrong -- but cutting a platform
+            # off mid-sweep would make its per-run counts meaningless to the
+            # yield guard that reads them.
+            if budget_s is not None and time.monotonic() - t_start >= budget_s:
+                truncated = True
+                remaining = platforms[platforms.index(platform):]
+                log(f"[harvest] budget of {budget_s:.0f}s spent; stopping "
+                    f"before {', '.join(p.name for p in remaining)}")
+                break
+
             existing = load_existing(args.out / f"{platform.name}.json")
             found: set[str] = set()
             errors: list[str] = []
@@ -2016,6 +2101,15 @@ def main(argv: list[str] | None = None) -> int:
                 any_success = True
             if found and not args.dry_run:
                 write_slugs(args.out / f"{platform.name}.json", merged)
+
+        # Only a run that finished retires a crawl. A truncated sweep has read
+        # some platforms and not others, so recording it would retire the crawl
+        # with the rest never harvested -- and because the record is what makes
+        # the next run skip, that loss would be permanent rather than deferred.
+        # A dry run and a run that found nothing are excluded on the same
+        # grounds: neither is evidence the crawl was actually read.
+        if crawls and any_success and not truncated and not args.dry_run:
+            _save_swept(swept_path, crawls)
 
     finally:
         lock_ctx.__exit__(None, None, None)

@@ -27,6 +27,11 @@ GEONAMES_SYNC = "geonames_sync"
 GEO_INDEX_REFRESH = "geo_index_refresh"
 # A bounded network sweep of the fleet, nothing like the two above it.
 ATS_SLUG_VALIDATION = "ats_slug_validation"
+# Reads static archive index files, and only on the days a new Common Crawl
+# snapshot exists -- so most runs return in milliseconds having made no request
+# at all. Its own bucket because pooling those with the days it really sweeps
+# would give the scheduler a median that describes neither.
+ATS_COMPANY_HARVEST = "ats_company_harvest"
 # Reads a week of archive rather than the network; its own bucket so a slow
 # archive read is not mistaken for a slow sweep.
 ATS_YIELD_CHECK = "ats_yield_check"
