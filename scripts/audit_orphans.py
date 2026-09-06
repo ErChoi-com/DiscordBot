@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import collections
 import re
 import sys
 from pathlib import Path
@@ -37,9 +38,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SOURCE_DIRS = ("src", "scripts")
 
-# Marker a maintainer puts on the line above a def to record a deliberate
-# orphan and why. Anything else is a finding.
-ORPHAN_OK = re.compile(r"#\s*orphan-ok:\s*(.+)")
+# Marker a maintainer puts above a def to record a deliberate orphan and why.
+# Anything else is a finding. The colon is optional but the reason is not: the
+# marker on its own records nothing, and a silenced finding with no reason is
+# the state this script was written to end.
+ORPHAN_OK = re.compile(r"#\s*orphan-ok[:\s]\s*(\S.*)")
 
 
 def _sources() -> dict[Path, str]:
@@ -60,34 +63,75 @@ def _public_functions(tree: ast.Module) -> list[tuple[str, int]]:
 
 
 def _excused(text: str, lineno: int) -> str | None:
-    """The reason on an `# orphan-ok:` comment above the def, if there is one."""
+    """The reason on an `# orphan-ok:` comment above the def, if there is one.
+
+    The whole contiguous comment block is scanned, not a fixed number of lines:
+    a reason worth recording is usually several lines of why, and a marker that
+    only counts when it sits within three lines of the def rewards terse notes
+    over useful ones. Decorator lines are walked through for the same reason.
+    """
     lines = text.splitlines()
-    for i in range(max(0, lineno - 4), lineno):
-        m = ORPHAN_OK.search(lines[i] if i < len(lines) else "")
-        if m:
-            return m.group(1).strip()
+    i = lineno - 2  # 1-indexed lineno -> the line above the def
+    while i >= 0:
+        stripped = lines[i].strip()
+        if stripped.startswith("#"):
+            m = ORPHAN_OK.search(stripped)
+            if m:
+                return m.group(1).strip()
+        elif stripped.startswith("@") or not stripped:
+            pass
+        else:
+            break
+        i -= 1
     return None
+
+
+def _referenced_names(tree: ast.Module) -> collections.Counter:
+    """Every name this module actually uses, counted from the syntax tree.
+
+    A regex over the raw text cannot tell a call from a mention. Comments and
+    prose are where this repo records *why* something is unwired, so the moment
+    a deliberate orphan is documented -- "the release half of
+    acquire_browser_work_slot" -- the regex sees a second occurrence and the
+    orphan stops being reported. Explaining a finding made it disappear.
+
+    Exact string literals still count. Nothing here is dispatched by name today,
+    but getattr(module, "some_function") is a real pattern and reporting one of
+    those as uncalled would be a false accusation; a docstring is never exactly
+    equal to a function name, so this costs nothing.
+    """
+    used: collections.Counter = collections.Counter()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            used[node.id] += 1
+        elif isinstance(node, ast.Attribute):
+            used[node.attr] += 1
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            used[node.value.strip()] += 1
+    return used
 
 
 def find_orphans(sources: dict[Path, str] | None = None) -> list[tuple[str, str]]:
     """(location, name) for every uncalled public function. Sorted."""
     sources = sources if sources is not None else _sources()
-    found: list[tuple[str, str]] = []
+    trees: dict[Path, ast.Module] = {}
     for path, text in sources.items():
         try:
-            tree = ast.parse(text)
+            trees[path] = ast.parse(text)
         except SyntaxError:
             continue
+
+    used: collections.Counter = collections.Counter()
+    for tree in trees.values():
+        used.update(_referenced_names(tree))
+
+    found: list[tuple[str, str]] = []
+    for path, tree in trees.items():
+        text = sources[path]
         for name, lineno in _public_functions(tree):
-            if _excused(text, lineno):
+            if used[name] or _excused(text, lineno):
                 continue
-            pattern = re.compile(rf"\b{re.escape(name)}\b")
-            # Every occurrence anywhere, minus the def itself. A single hit is
-            # the definition, so it is called by nobody.
-            hits = sum(len(pattern.findall(t)) for t in sources.values())
-            if hits <= 1:
-                rel = path.relative_to(REPO).as_posix()
-                found.append((rel, name))
+            found.append((path.relative_to(REPO).as_posix(), name))
     return sorted(found)
 
 
