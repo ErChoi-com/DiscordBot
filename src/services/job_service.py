@@ -174,6 +174,18 @@ def semantic_inference_threads() -> int:
     """Threads for model inference: a third of the host, capped, never zero."""
     return max(1, min(SEMANTIC_INFERENCE_THREADS_MAX, int(capacity.cpu_limit()) // 3))
 
+
+def semantic_encode_batch() -> int:
+    """Texts per encode call: memory-proportional, not just CPU-proportional.
+
+    Thirty-odd short strings through MiniLM is nothing on the 16 GB box this
+    was tuned on, but on a 1 GB VPS -- where the scrape pools are already
+    competing for that memory -- the same batch is a real allocation. This is
+    local torch work, not a politeness ceiling, so it is one of the pools
+    allowed to scale up on bigger hardware too.
+    """
+    return capacity.workers(SEMANTIC_ENCODE_BATCH, minimum=4, maximum=128)
+
 # ── Dedup FIFO constants (overridden at startup) ──────────────────────────────
 DEDUP_MAX_FIFO_FILES: int = 6
 DEDUP_MAX_ENTRIES_PER_FILE: int = 500
@@ -2610,8 +2622,11 @@ def semantic_filter_items(
     if model is None:
         return items
     try:
+        # Sized before the lock is taken: it reads the host's memory, which is
+        # no business of the one call at a time this lock exists to enforce.
+        batch = semantic_encode_batch()
         with _SEMANTIC_INFERENCE_LOCK:
-            embeddings = model.encode(texts, normalize_embeddings=True, batch_size=SEMANTIC_ENCODE_BATCH)
+            embeddings = model.encode(texts, normalize_embeddings=True, batch_size=batch)
         # Normalised, so cosine is the dot product. Spelled out rather than
         # through numpy: it is thirty rows of 384 floats, and numpy is a
         # dependency of the optional model rather than of this module.
