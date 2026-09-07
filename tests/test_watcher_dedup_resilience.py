@@ -298,7 +298,7 @@ def test_manager_record_dedup_updates_only_target_channel_folder(tmp_path: Path)
     before_a = (dir_a / "listing_0.json").read_text(encoding="utf-8")
     before_b = (dir_b / "listing_0.json").read_text(encoding="utf-8")
 
-    assert manager._record_dedup_after_send(111, "job", "[Site] Target A\nhttps://example.invalid/a") is True
+    assert asyncio.run(manager._record_dedup_after_send(111, "job", "[Site] Target A\nhttps://example.invalid/a")) is True
 
     after_a = (dir_a / "listing_0.json").read_text(encoding="utf-8")
     after_b = (dir_b / "listing_0.json").read_text(encoding="utf-8")
@@ -326,7 +326,7 @@ def test_manager_job_write_does_not_touch_reddit_folder_same_channel(tmp_path: P
     before_job = (dir_job / "listing_0.json").read_text(encoding="utf-8")
     before_reddit = (dir_reddit / "listing_0.json").read_text(encoding="utf-8")
 
-    assert manager._record_dedup_after_send(333, "job", "[Site] Job Only\nhttps://example.invalid/job") is True
+    assert asyncio.run(manager._record_dedup_after_send(333, "job", "[Site] Job Only\nhttps://example.invalid/job")) is True
 
     after_job = (dir_job / "listing_0.json").read_text(encoding="utf-8")
     after_reddit = (dir_reddit / "listing_0.json").read_text(encoding="utf-8")
@@ -1006,3 +1006,43 @@ def test_enforcement_on_scrambled_data_produces_monotonic_sequence(tmp_path: Pat
             f"global position {i - 1}→{i} not descending: "
             f"{all_timestamps[i - 1]} < {all_timestamps[i]}"
         )
+
+
+def test_dedup_file_work_does_not_run_on_the_event_loop_thread(tmp_path: Path, monkeypatch) -> None:
+    """loop_watch caught the loop thread globbing and rewriting the dedup FIFO
+    files on the ticks that ran late; both the check and the record now run on
+    a worker while the per-channel send lock keeps their order."""
+    import threading
+
+    state_path = tmp_path / ".bot_state.json"
+    store = RuntimeStore(state_path)
+    channel_id = 9090
+    store.channel_job_settings = {channel_id: {"enabled": True}}
+    channel = _SendableChannel()
+    manager = WatcherManager(client=_ChannelClient(channel), config=_make_config(tmp_path), store=store, health=_health())
+
+    threads: dict[str, int] = {}
+
+    def _check(content, listing_file, months_threshold=1):
+        threads["check"] = threading.get_ident()
+        return False
+
+    def _record(content, listing_file):
+        threads["record"] = threading.get_ident()
+        return True
+
+    monkeypatch.setattr(job_service, "is_message_duplicate", _check)
+    monkeypatch.setattr(job_service, "record_message_for_dedup", _record)
+
+    async def _go():
+        monkeypatch.setattr(manager, "should_skip_duplicate_message", _never_skip)
+        return await manager.send_watcher_message(channel_id, "[Site] Job\nhttps://example.invalid/x")
+
+    async def _never_skip(*args, **kwargs):
+        return False
+
+    assert asyncio.run(_go()) is True
+    loop_thread = threading.main_thread().ident
+    assert threads["check"] != loop_thread, "the duplicate check ran on the loop thread"
+    assert threads["record"] != loop_thread, "the dedup record ran on the loop thread"
+    assert channel.sent, "and the message was still sent"

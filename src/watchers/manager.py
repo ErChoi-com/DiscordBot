@@ -479,7 +479,13 @@ class WatcherManager:
 
     async def _is_duplicate_message(self, channel_id: int, channel: Any, content: str, watcher_type: str = "job") -> bool:
         listing_file = self._attached_listing_file(channel_id, watcher_type)
-        if job_service.is_message_duplicate(
+        # Off the loop: the check globs the dedup directory and parses up to
+        # six FIFO files of five hundred rows, per message. loop_watch caught
+        # the loop thread inside exactly that (scandir, read_text) on the
+        # ticks that ran late; the per-channel send lock still serialises
+        # check, send and record, so nothing about ordering changes.
+        if await asyncio.to_thread(
+            job_service.is_message_duplicate,
             content,
             listing_file,
             months_threshold=self.dedup_months_threshold(),
@@ -489,10 +495,14 @@ class WatcherManager:
         return await self.should_skip_duplicate_message(channel_id, channel, content, watcher_type=watcher_type)
 
 
-    def _record_dedup_after_send(self, channel_id: int, watcher_type: str, content: str) -> bool:
-        """Persist watcher dedup record only after a successful message send."""
+    async def _record_dedup_after_send(self, channel_id: int, watcher_type: str, content: str) -> bool:
+        """Persist watcher dedup record only after a successful message send.
+
+        Off the loop for the same reason as the check: recording rewrites the
+        FIFO files (loop_watch caught _write_fifo_rows on the loop thread).
+        """
         listing_file = self._attached_listing_file(channel_id, watcher_type)
-        recorded = job_service.record_message_for_dedup(content, listing_file)
+        recorded = await asyncio.to_thread(job_service.record_message_for_dedup, content, listing_file)
         if not recorded:
             print(f"Watcher dedup record failed for {channel_id}/{watcher_type}")
         return recorded
@@ -519,7 +529,7 @@ class WatcherManager:
                 return False
 
             await channel.send(text)
-            self._record_dedup_after_send(channel_id, watcher_type, key)
+            await self._record_dedup_after_send(channel_id, watcher_type, key)
             self.remember_message(channel_id, key, watcher_type=watcher_type)
             return True
 
@@ -562,7 +572,7 @@ class WatcherManager:
 
             text = f"{title}\n{permalink}".strip()
             await channel.send(content=(text or None), embeds=embeds)
-            self._record_dedup_after_send(channel_id, "reddit", dedupe_key)
+            await self._record_dedup_after_send(channel_id, "reddit", dedupe_key)
             self.remember_message(channel_id, dedupe_key, watcher_type="reddit")
             return True
 
