@@ -1503,6 +1503,9 @@ def _scrape_workday(slug: str, keywords: str, location: str, max_jobs: int) -> l
     # PLATFORM_WORKERS[workday] in flight, same as _enrich_rows.
     detail_workers = capacity.workers(5, minimum=2)
     gate = _enrich_gate(WORKDAY)
+    # As for icims: the archive check keys on the job URL, which the search
+    # response already gave us, so it runs before the detail fetch, not after.
+    candidates = _needs_enrichment(candidates)
 
     def _gated_detail(detail_url: str, hdrs: dict[str, str]) -> dict[str, str]:
         with gate:
@@ -1748,6 +1751,11 @@ def _scrape_icims(slug: str, keywords: str, location: str, max_jobs: int) -> lis
     # PLATFORM_WORKERS[icims] in flight, same as _enrich_rows.
     meta_workers = capacity.workers(5, minimum=2)
     gate = _enrich_gate(ICIMS)
+    # Postings the archive already holds would be dropped after their page
+    # was fetched; skip the fetch. On a board asked every cycle that is
+    # nearly every posting, and the page fetch is what made an icims board
+    # cost more than its whole budget's worth of other platforms' boards.
+    candidates = _needs_enrichment(candidates)
 
     def _gated_meta(url: str) -> dict[str, str]:
         with gate:
@@ -2640,6 +2648,12 @@ def _enrich_rows(rows: list[dict[str, Any]], fetch: Any) -> None:
     if not rows:
         return
     gate = _enrich_gate(str(rows[0].get("_source_site") or ""))
+    # Rows the archive already holds keep their listing values and are
+    # dropped later by _drop_already_archived; fetching their pages first
+    # bought nothing.
+    rows = _needs_enrichment(rows)
+    if not rows:
+        return
 
     def _gated(url: str) -> dict[str, str]:
         with gate:
@@ -3114,6 +3128,31 @@ _SCRAPERS: dict[str, Any] = {
     ORACLE: _scrape_oracle,
     PERSONIO: _scrape_personio,
 }
+
+
+def _needs_enrichment(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`rows` minus the postings the archive already holds.
+
+    Enrichment is a page fetch per posting, and _drop_already_archived then
+    discards every row the archive has seen -- which, on a board asked every
+    cycle, is nearly all of them. Paying for the fetch first and dropping the
+    row after is the cost that put icims at a sitemap plus hundreds of pages
+    per board. The identity the archive keys on (the ATS job id, or the URL)
+    is on the row before enrichment, so the same check can run before it.
+
+    Same failure posture as _drop_already_archived: an unavailable archive
+    means everything is enriched, never that anything is skipped.
+    """
+    if not rows or not ATS_ARCHIVE_DEDUP_ENABLED:
+        return rows
+    try:
+        from services.jba import archive_index
+
+        archive_index.ensure_index()
+        kept, _dropped = archive_index.filter_new_listings(rows)
+    except Exception:
+        return rows
+    return kept
 
 
 def _drop_already_archived(platform: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

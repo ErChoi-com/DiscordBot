@@ -41,6 +41,28 @@ def _isolate_resume_telemetry(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_archive_index(tmp_path, monkeypatch):
+    """Keep the ATS archive index out of the real data/jba/jobs/.
+
+    Every ATS scraper now consults archive_index before enriching a posting
+    (ats_service._needs_enrichment), so any test that drives a scraper reaches
+    the module-level index path -- the same archive_index.db the live bot
+    builds and writes. Pointed at a tmp dir here, the index is empty, every
+    synthetic posting reads as new, and nothing touches production state.
+    test_archive_index.py's own fixtures still apply on top.
+    """
+    try:
+        from services.jba import archive_index
+    except ImportError:
+        yield
+        return
+    jobs_dir = tmp_path / "jba_jobs"
+    monkeypatch.setattr(archive_index, "_JOBS_DIR", jobs_dir, raising=False)
+    monkeypatch.setattr(archive_index, "_INDEX_PATH", jobs_dir / "archive_index.db", raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_interaction_event_log(tmp_path, monkeypatch):
     """Keep interaction telemetry out of the real .interaction_events.log.
 
