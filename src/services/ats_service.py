@@ -169,6 +169,80 @@ def _make_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
     return h
 
 
+_HTTP_LOCAL = threading.local()
+
+
+class _PreloadedTLSAdapter(requests.adapters.HTTPAdapter):
+    """An HTTPS adapter that verifies with one CA store loaded once.
+
+    requests hands urllib3 the CA-bundle *path* for every connection
+    (cert_verify sets conn.ca_certs), and urllib3 then creates a fresh
+    SSLContext and parses the whole bundle inside ssl_wrap_socket -- per
+    connection, not per Session. A pooled Session only helps hosts we
+    reconnect to, and most ATS platforms are one host per company. The
+    py-spy dump's 166 threads in ssl_wrap_socket were this line.
+
+    So the pool is given one context, verified against the same default
+    bundle, and the per-connection path is withheld when verification is the
+    default. An explicit bundle (verify="/path", or REQUESTS_CA_BUNDLE, which
+    requests turns into a path) still reaches urllib3 unchanged.
+    """
+
+    _context: Any = None
+    _context_lock = threading.Lock()
+
+    @classmethod
+    def context(cls) -> Any:
+        with cls._context_lock:
+            if cls._context is None:
+                from urllib3.util.ssl_ import create_urllib3_context
+
+                ctx = create_urllib3_context()
+                ctx.load_verify_locations(requests.utils.DEFAULT_CA_BUNDLE_PATH)
+                cls._context = ctx
+            return cls._context
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):  # type: ignore[override]
+        pool_kwargs.setdefault("ssl_context", self.context())
+        return super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+    def cert_verify(self, conn, url, verify, cert):  # type: ignore[override]
+        super().cert_verify(conn, url, verify, cert)
+        if verify is True:
+            # Verification stays on (cert_reqs is still CERT_REQUIRED); the
+            # store that does it is the preloaded context's, not a reload.
+            conn.ca_certs = None
+            conn.ca_cert_dir = None
+
+
+def _http() -> requests.Session:
+    """The calling thread's requests.Session, created on first use.
+
+    A bare requests.get builds a Session, an adapter and an SSLContext -- and
+    reloads the CA bundle -- for every call, then throws them away. A py-spy
+    dump of the live bot found 166 of 541 threads inside ssl_wrap_socket for
+    exactly that reason. One Session per worker thread keeps the context and
+    the pooled connections for the life of the thread; per thread rather than
+    one shared Session so no lock sits in front of every fetch and so a
+    thread's connection pool is only ever used by that thread.
+    """
+    session = getattr(_HTTP_LOCAL, "session", None)
+    if session is None:
+        session = requests.Session()
+        session.mount("https://", _PreloadedTLSAdapter())
+        _HTTP_LOCAL.session = session
+    return session
+
+
+def _http_get(url: str, **kwargs: Any) -> requests.Response:
+    """GET through the thread's Session. The one seam tests stub for HTTP."""
+    return _http().get(url, **kwargs)
+
+
+def _http_post(url: str, **kwargs: Any) -> requests.Response:
+    return _http().post(url, **kwargs)
+
+
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 _JBA_DIR = _DATA_DIR / "ats_companies"
 _DEAD_SLUG_DIR = _DATA_DIR / "dead_slugs"
@@ -1018,7 +1092,7 @@ def _scrape_greenhouse(slug: str, keywords: str, location: str, max_jobs: int) -
     resp = None
     for attempt in range(3):
         try:
-            resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp = _http_get(url, headers=headers, timeout=REQUEST_TIMEOUT)
         except Exception:
             return []
         if resp.status_code == 200:
@@ -1087,7 +1161,7 @@ def _scrape_lever(slug: str, keywords: str, location: str, max_jobs: int) -> lis
         url = f"https://{host}/v0/postings/{slug}"
         for attempt in range(3):
             try:
-                resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+                resp = _http_get(url, headers=headers, timeout=REQUEST_TIMEOUT)
             except Exception:
                 return []
             if resp.status_code == 200:
@@ -1251,7 +1325,7 @@ def _fetch_workday_detail(detail_url: str, headers: dict[str, str]) -> dict[str,
     """
     out = {"date_posted": "", "description": ""}
     try:
-        resp = requests.get(detail_url, headers=headers, timeout=REQUEST_TIMEOUT)
+        resp = _http_get(detail_url, headers=headers, timeout=REQUEST_TIMEOUT)
     except Exception:
         return out
     if resp.status_code != 200:
@@ -1269,7 +1343,7 @@ def _fetch_workday_detail(detail_url: str, headers: dict[str, str]) -> dict[str,
 
 def _fetch_workday_date(detail_url: str, headers: dict[str, str]) -> str:
     try:
-        resp = requests.get(detail_url, headers=headers, timeout=REQUEST_TIMEOUT)
+        resp = _http_get(detail_url, headers=headers, timeout=REQUEST_TIMEOUT)
         if resp.status_code != 200:
             return ""
         info = resp.json().get("jobPostingInfo") or {}
@@ -1311,7 +1385,7 @@ def _scrape_workday(slug: str, keywords: str, location: str, max_jobs: int) -> l
         }
 
         try:
-            resp = requests.post(api_url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp = _http_post(api_url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
         except Exception:
             break
 
@@ -1383,9 +1457,23 @@ def _scrape_workday(slug: str, keywords: str, location: str, max_jobs: int) -> l
 
     # Nested pool: bounded (accepted exception to scheduler-visible concurrency;
     # the caller holds one PriorityWorkScheduler slot for this whole fan-out).
+    #
+    # This scraper used to submit _fetch_workday_detail straight to the nested
+    # pool, bypassing _enrich_gate -- the per-platform Semaphore that caps
+    # in-flight requests against one vendor at PLATFORM_WORKERS. A py-spy dump
+    # of the live bot found 70 threads inside _fetch_workday_detail at once:
+    # outer scheduler pool x this nested pool, unbounded, all hitting Workday.
+    # Routing each submission through the gate keeps that fan-out at
+    # PLATFORM_WORKERS[workday] in flight, same as _enrich_rows.
     detail_workers = capacity.workers(5, minimum=2)
+    gate = _enrich_gate(WORKDAY)
+
+    def _gated_detail(detail_url: str, hdrs: dict[str, str]) -> dict[str, str]:
+        with gate:
+            return _fetch_workday_detail(detail_url, hdrs)
+
     with ThreadPoolExecutor(max_workers=detail_workers) as pool:
-        futures = {pool.submit(_fetch_workday_detail, row["detail_url"], headers): row["detail_url"] for row in candidates}
+        futures = {pool.submit(_gated_detail, row["detail_url"], headers): row["detail_url"] for row in candidates}
         url_to_detail: dict[str, dict[str, str]] = _collect_results(
             futures, capacity.timeout(_fanout_budget(len(candidates), detail_workers))
         )
@@ -1468,7 +1556,7 @@ def _fetch_icims_metadata(job_url: str) -> dict[str, str]:
     resp = None
     for attempt in range(2):
         try:
-            resp = requests.get(fetch_url, headers=hdrs, timeout=REQUEST_TIMEOUT)
+            resp = _http_get(fetch_url, headers=hdrs, timeout=REQUEST_TIMEOUT)
         except Exception:
             resp = None
         if resp is not None and resp.status_code == 200:
@@ -1541,7 +1629,7 @@ def _scrape_icims(slug: str, keywords: str, location: str, max_jobs: int) -> lis
         sitemap_url = f"https://{host}.icims.com/sitemap.xml"
         for attempt in range(3):
             try:
-                resp = requests.get(sitemap_url, headers=headers, timeout=REQUEST_TIMEOUT)
+                resp = _http_get(sitemap_url, headers=headers, timeout=REQUEST_TIMEOUT)
             except Exception:
                 return []
             if resp.status_code == 200:
@@ -1614,9 +1702,23 @@ def _scrape_icims(slug: str, keywords: str, location: str, max_jobs: int) -> lis
 
     # Nested pool: bounded (accepted exception to scheduler-visible concurrency;
     # the caller holds one PriorityWorkScheduler slot for this whole fan-out).
+    #
+    # This scraper used to submit _fetch_icims_metadata straight to the nested
+    # pool, bypassing _enrich_gate -- the per-platform Semaphore that caps
+    # in-flight requests against one vendor at PLATFORM_WORKERS. A py-spy dump
+    # of the live bot found 215 threads inside _fetch_icims_metadata at once:
+    # outer scheduler pool x this nested pool, unbounded, all hitting iCIMS.
+    # Routing each submission through the gate keeps that fan-out at
+    # PLATFORM_WORKERS[icims] in flight, same as _enrich_rows.
     meta_workers = capacity.workers(5, minimum=2)
+    gate = _enrich_gate(ICIMS)
+
+    def _gated_meta(url: str) -> dict[str, str]:
+        with gate:
+            return _fetch_icims_metadata(url)
+
     with ThreadPoolExecutor(max_workers=meta_workers) as pool:
-        futures = {pool.submit(_fetch_icims_metadata, row["job_url"]): row["job_url"] for row in candidates}
+        futures = {pool.submit(_gated_meta, row["job_url"]): row["job_url"] for row in candidates}
         url_to_meta: dict[str, dict[str, str]] = _collect_results(
             futures, capacity.timeout(_fanout_budget(len(candidates), meta_workers))
         )
@@ -1672,7 +1774,7 @@ def _fetch_bamboohr_detail(job_url: str) -> dict[str, str]:
     alone rather than blanking them.
     """
     try:
-        resp = requests.get(
+        resp = _http_get(
             f"{job_url.rstrip('/')}/detail",
             headers=_make_headers(),
             timeout=REQUEST_TIMEOUT,
@@ -1714,7 +1816,7 @@ def _scrape_bamboohr(slug: str, keywords: str, location: str, max_jobs: int) -> 
     resp = None
     for attempt in range(3):
         try:
-            resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp = _http_get(url, headers=headers, timeout=REQUEST_TIMEOUT)
         except requests.exceptions.SSLError:
             if attempt < 2:
                 time.sleep(retry_backoff_delay(attempt))
@@ -2007,7 +2109,7 @@ def _fetch_board_json(platform: str, slug: str, url: str) -> Any:
     headers = _make_headers()
     for attempt in range(3):
         try:
-            resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp = _http_get(url, headers=headers, timeout=REQUEST_TIMEOUT)
         except Exception:
             return None
         if resp.status_code == 200:
@@ -2318,7 +2420,7 @@ def _fetch_jobposting_meta(job_url: str) -> dict[str, str]:
     resp = None
     for attempt in range(2):
         try:
-            resp = requests.get(job_url, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp = _http_get(job_url, headers=headers, timeout=REQUEST_TIMEOUT)
         except Exception:
             resp = None
         if resp is not None and resp.status_code == 200:
@@ -2381,7 +2483,7 @@ def _fetch_rippling_created(job_url: str) -> dict[str, str]:
                             "resolved": ""}
     headers = _make_headers({"Accept": "text/html,application/xhtml+xml"})
     try:
-        resp = requests.get(job_url, headers=headers, timeout=REQUEST_TIMEOUT)
+        resp = _http_get(job_url, headers=headers, timeout=REQUEST_TIMEOUT)
     except Exception:
         return meta
     if resp.status_code != 200:
@@ -2428,7 +2530,7 @@ def _fetch_smartrecruiters_detail(job_url: str) -> dict[str, str]:
         return meta
     company, posting_id = parts[-2], parts[-1]
     try:
-        resp = requests.get(
+        resp = _http_get(
             f"https://api.smartrecruiters.com/v1/companies/{company}/postings/{posting_id}",
             headers=_make_headers(), timeout=REQUEST_TIMEOUT)
     except Exception:
@@ -2564,7 +2666,7 @@ def _fetch_board_html(platform: str, slug: str, url: str) -> str:
     headers = _make_headers({"Accept": "text/html,application/xhtml+xml"})
     for attempt in range(3):
         try:
-            resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp = _http_get(url, headers=headers, timeout=REQUEST_TIMEOUT)
         except Exception:
             return ""
         if resp.status_code == 200:
@@ -2904,7 +3006,7 @@ def _scrape_personio(slug: str, keywords: str, location: str, max_jobs: int) -> 
 
     url = f"https://{slug}.jobs.personio.de/xml?language=en"
     try:
-        resp = requests.get(url, headers=_make_headers(), timeout=REQUEST_TIMEOUT)
+        resp = _http_get(url, headers=_make_headers(), timeout=REQUEST_TIMEOUT)
     except Exception:
         return []
 

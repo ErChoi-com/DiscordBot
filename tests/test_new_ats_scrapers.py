@@ -442,7 +442,7 @@ def _resp(monkeypatch, text, status=200):
     class R:
         status_code = status
     R.text = text
-    monkeypatch.setattr(a.requests, "get", lambda *args, **kw: R())
+    monkeypatch.setattr(a, "_http_get", lambda *args, **kw: R())
 
 
 def test_jobposting_metadata_skips_the_organization_block(monkeypatch):
@@ -632,7 +632,7 @@ def test_smartrecruiters_detail_joins_its_sections(monkeypatch):
                 "companyDescription": {"text": "About Acme."},
                 "jobDescription": {"text": "You will build things."},
                 "qualifications": {"text": "Four years."}}}}
-    monkeypatch.setattr(a.requests, "get", lambda *args, **kw: R())
+    monkeypatch.setattr(a, "_http_get", lambda *args, **kw: R())
     meta = a._fetch_smartrecruiters_detail(
         "https://jobs.smartrecruiters.com/acme/744000094978215")
     assert "You will build things." in meta["description"]
@@ -755,7 +755,7 @@ def test_bamboohr_does_not_mark_dead_on_an_anti_bot_page(monkeypatch):
         status_code = 200
         url = "https://acme.bamboohr.com/careers/list"
         headers = {"Content-Type": "text/html"}
-    monkeypatch.setattr(a.requests, "get", lambda *args, **kw: R())
+    monkeypatch.setattr(a, "_http_get", lambda *args, **kw: R())
     assert a._scrape_bamboohr("acme", "", "", 5) == []
     assert marked == [], "an unreadable page was recorded as a closure"
 
@@ -771,7 +771,7 @@ def test_bamboohr_marks_dead_when_the_tenant_host_is_left(monkeypatch):
         status_code = 200
         url = "https://www.bamboohr.com/"
         headers = {"Content-Type": "text/html"}
-    monkeypatch.setattr(a.requests, "get", lambda *args, **kw: R())
+    monkeypatch.setattr(a, "_http_get", lambda *args, **kw: R())
     a._scrape_bamboohr("nosuchco", "", "", 5)
     assert marked == ["nosuchco"]
 
@@ -789,7 +789,7 @@ def test_ashby_marks_a_missing_org_dead(monkeypatch):
         @staticmethod
         def json():
             return {"data": {"jobBoard": None}}
-    monkeypatch.setattr(a.requests, "post", lambda *args, **kw: R())
+    monkeypatch.setattr(a, "_http_post", lambda *args, **kw: R())
     assert a._scrape_ashby("nosuchco", "", "", 5) == []
     assert marked == ["nosuchco"]
 
@@ -807,7 +807,7 @@ def test_ashby_does_not_clear_a_dead_mark_on_a_bare_200(monkeypatch):
         @staticmethod
         def json():
             return {"data": {"jobBoard": None}}
-    monkeypatch.setattr(a.requests, "post", lambda *args, **kw: R())
+    monkeypatch.setattr(a, "_http_post", lambda *args, **kw: R())
     a._scrape_ashby("nosuchco", "", "", 5)
     assert alive == []
 
@@ -934,7 +934,7 @@ def test_icims_drops_unavailable_placeholders(monkeypatch):
         text = body
         url = "https://x.icims.com/jobs/1/job"
 
-    monkeypatch.setattr(a.requests, "get", lambda *args, **kwargs: Resp())
+    monkeypatch.setattr(a, "_http_get", lambda *args, **kwargs: Resp())
     meta = a._fetch_icims_metadata("https://x.icims.com/jobs/1/job")
     assert meta["location"] == "CA, US"
     assert "UNAVAILABLE" not in meta["location"]
@@ -1032,7 +1032,7 @@ def test_lever_reads_commitment_as_employment_type(monkeypatch):
         def json(self):
             return payload
 
-    monkeypatch.setattr(a.requests, "get", lambda *args, **kwargs: Resp())
+    monkeypatch.setattr(a, "_http_get", lambda *args, **kwargs: Resp())
     monkeypatch.setattr(a.time, "sleep", lambda *_: None)
     rows = a._scrape_lever("acme", "", "", 5)
     assert rows and rows[0]["employment_type"] == "Internship"
@@ -1104,7 +1104,7 @@ def _board(monkeypatch, payload):
         def json(self):
             return payload
 
-    monkeypatch.setattr(a.requests, "get", lambda *args, **kwargs: Resp())
+    monkeypatch.setattr(a, "_http_get", lambda *args, **kwargs: Resp())
     monkeypatch.setattr(a.time, "sleep", lambda *_: None)
 
 

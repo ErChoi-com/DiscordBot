@@ -82,7 +82,7 @@ def _serve_oracle(monkeypatch, pages):
             return _Resp(200, _oracle_payload([]))
         return _Resp(200, _oracle_payload(pages[i]))
 
-    monkeypatch.setattr(A.requests, "get", _get)
+    monkeypatch.setattr(A, "_http_get", _get)
     return calls
 
 
@@ -198,7 +198,7 @@ def test_a_row_without_an_id_is_dropped_rather_than_given_a_broken_url():
     payload = {"items": [{"requisitionList": [
         {"Title": "No id", "PostedDate": _today(0), "PrimaryLocation": "Austin"}]}]}
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(A.requests, "get", lambda url, **kw: _Resp(200, payload))
+        mp.setattr(A, "_http_get", lambda url, **kw: _Resp(200, payload))
         rows = A._scrape_oracle("host.example.com", "", "", 0)
     assert rows == []
 
@@ -229,7 +229,7 @@ def _serve_personio(monkeypatch, status=200, text=_XML):
         calls.append(url)
         return _Resp(status, None, text)
 
-    monkeypatch.setattr(A.requests, "get", _get)
+    monkeypatch.setattr(A, "_http_get", _get)
     return calls
 
 
@@ -307,7 +307,7 @@ def test_an_empty_but_valid_feed_is_not_an_error(monkeypatch):
 def test_a_network_failure_is_swallowed(monkeypatch):
     def _boom(url, **kw):
         raise OSError("connection reset")
-    monkeypatch.setattr(A.requests, "get", _boom)
+    monkeypatch.setattr(A, "_http_get", _boom)
     assert A._scrape_personio("acme", "", "", 0) == []
 
 

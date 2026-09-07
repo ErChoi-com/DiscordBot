@@ -89,7 +89,7 @@ def _install_icims(monkeypatch, jobs: dict[str, str | None], sitemap_urls=None):
             return _Resp(429, "")
         return _Resp(200, page)
 
-    monkeypatch.setattr(ats_service.requests, "get", fake_get)
+    monkeypatch.setattr(ats_service, "_http_get", fake_get)
     monkeypatch.setattr(ats_service.time, "sleep", lambda *_: None)
 
 
@@ -131,7 +131,7 @@ def test_icims_unreadable_page_is_retried_before_giving_up(monkeypatch):
             return _Resp(429, "")
         return _Resp(200, _job_page("Senior Engineer", "Toronto", "ON", "CA"))
 
-    monkeypatch.setattr(ats_service.requests, "get", fake_get)
+    monkeypatch.setattr(ats_service, "_http_get", fake_get)
     monkeypatch.setattr(ats_service.time, "sleep", lambda *_: None)
 
     rows = ats_service._scrape_icims("acme", "engineer", "Canada", 10)
@@ -233,7 +233,7 @@ def test_successful_fetch_clears_a_stale_dead_mark(monkeypatch):
         "absolute_url": "https://boards.greenhouse.io/acme/jobs/1",
         "updated_at": "2026-08-01",
     }]})
-    monkeypatch.setattr(ats_service.requests, "get", lambda *a, **k: _Resp(200, body))
+    monkeypatch.setattr(ats_service, "_http_get", lambda *a, **k: _Resp(200, body))
 
     rows = ats_service._scrape_greenhouse("acme", "engineer", "Canada", 10)
 
@@ -436,7 +436,7 @@ def test_icims_metadata_is_fetched_from_the_in_iframe_variant(monkeypatch):
             return _Resp(200, _SHELL_PAGE)
         return _Resp(200, _job_page("Senior Engineer", "Toronto", "ON", "CA"))
 
-    monkeypatch.setattr(ats_service.requests, "get", recording_get)
+    monkeypatch.setattr(ats_service, "_http_get", recording_get)
     monkeypatch.setattr(ats_service.time, "sleep", lambda *_: None)
 
     rows = ats_service._scrape_icims("acme", "engineer", "Canada", 10)
