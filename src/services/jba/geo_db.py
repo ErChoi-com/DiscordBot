@@ -18,10 +18,26 @@ _DATA_DIR = _THIS_DIR.parent.parent.parent / "data"
 GEO_DB_PATH = _DATA_DIR / "geo.db"
 
 
+# Journal mode is a property of the FILE, not of a connection, so it survives
+# every close and only ever needs setting once. Re-asserting it on each open
+# was not free: switching journal mode rewrites the database header and so
+# needs an exclusive lock, which a single other open connection is enough to
+# deny. Reads share the file happily; this one pragma did not, and it was the
+# only reason a read path could fail at all.
+_WAL_SETUP_TIMEOUT_S = 2.0
+
+
 def _open(db_path: Path = GEO_DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    try:
+        # Best effort. If another connection holds the file, keep whatever mode
+        # it already has -- delete-mode reads and writes are both correct, just
+        # less concurrent, which is strictly better than failing to open.
+        conn.execute(f"PRAGMA busy_timeout={int(_WAL_SETUP_TIMEOUT_S * 1000)}")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.Error:
+        pass
     return conn
 
 

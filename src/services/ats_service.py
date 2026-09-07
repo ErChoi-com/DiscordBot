@@ -526,6 +526,17 @@ _geo_admin1_name: dict = {}
 _iso_country_codes: set[str] = set()
 _ca_us_subdiv_codes: dict[str, str] = {}
 _geo_loaded = False
+# pycountry's tables come from an installed package and cannot fail the way
+# geo.db can, so they are tracked separately -- otherwise a retry of the db
+# load would walk pycountry's ~5k subdivisions again for nothing.
+_countries_loaded = False
+_geo_failures = 0
+_geo_next_retry = 0.0
+# Long enough that a genuinely missing geo.db costs one cheap failed connect
+# every couple of minutes rather than one per lookup, short enough that a
+# process which started during a momentary lock is matching on cities again
+# within a scrape cycle instead of never.
+GEO_RETRY_INTERVAL_S = 120.0
 # _ensure_geo_loaded is first reached from inside the per-slug thread pools, so
 # without this every worker on a cold process starts its own 632k-row load, and
 # because _geo_loaded only flips at the end, threads could read a half-populated
@@ -538,12 +549,17 @@ def _ensure_geo_loaded() -> None:
     with _geo_lock:
         if _geo_loaded:
             return
+        global _geo_next_retry
+        now = time.monotonic()
+        if _geo_failures and now < _geo_next_retry:
+            return
+        _geo_next_retry = now + GEO_RETRY_INTERVAL_S
         _load_geo_into_globals()
 
 
 def _load_geo_into_globals() -> None:
-    global _geo_cities, _geo_admin1_name, _geo_loaded
-    global _iso_country_codes, _ca_us_subdiv_codes
+    global _geo_cities, _geo_admin1_name, _geo_loaded, _countries_loaded
+    global _iso_country_codes, _ca_us_subdiv_codes, _geo_failures
     import pycountry
 
     try:
@@ -554,19 +570,38 @@ def _load_geo_into_globals() -> None:
         # error surfaces as "no such table: geo_cities" on first lookup and
         # would otherwise propagate out of every ATS location filter.
         # Degrade to country-only matching instead of taking the scrape down.
-        print(
-            f"[ats] geo.db unavailable ({exc}). City/region matching disabled; "
-            "run: python scripts/build_geo_db.py"
-        )
+        #
+        # Degrade, but do NOT latch. _geo_loaded used to be set here too, so a
+        # single failure disabled city matching for the life of the process --
+        # and the cheapest way to get one is a momentary lock at startup, which
+        # is transient and was being treated as permanent. Measured: the bot
+        # lost city matching for a whole run to a five-second contention that
+        # had cleared minutes later.
         _geo_cities, _geo_admin1_name = {}, {}
+        if not _geo_failures:
+            print(
+                f"[ats] geo.db unavailable ({exc}). City/region matching off for "
+                f"now; retrying every {int(GEO_RETRY_INTERVAL_S)}s. If this "
+                "persists, run: python scripts/build_geo_db.py"
+            )
+        _geo_failures += 1
+    else:
+        if _geo_failures:
+            print(
+                f"[ats] geo.db recovered after {_geo_failures} failed attempt(s); "
+                f"city/region matching is back on ({len(_geo_cities):,} cities)"
+            )
+        _geo_failures = 0
+        _geo_loaded = True
 
-    _iso_country_codes.update(c.alpha_2 for c in pycountry.countries)
-    for _sub in pycountry.subdivisions:
-        if _sub.country_code in ("CA", "US"):
-            _short = _sub.code.split("-", 1)[1]
-            if _short not in _ca_us_subdiv_codes:
-                _ca_us_subdiv_codes[_short] = _sub.country_code
-    _geo_loaded = True
+    if not _countries_loaded:
+        _iso_country_codes.update(c.alpha_2 for c in pycountry.countries)
+        for _sub in pycountry.subdivisions:
+            if _sub.country_code in ("CA", "US"):
+                _short = _sub.code.split("-", 1)[1]
+                if _short not in _ca_us_subdiv_codes:
+                    _ca_us_subdiv_codes[_short] = _sub.country_code
+        _countries_loaded = True
 
 _country_lookup_cache: dict[str, str | None] = {}
 
