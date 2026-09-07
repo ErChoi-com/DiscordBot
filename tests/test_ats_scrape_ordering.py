@@ -5,9 +5,10 @@ to ask which region matters. The union of what every enabled channel wants is
 the honest answer, and it keeps a channel scoped to one country from starving a
 channel scoped to another.
 
-The ordering itself is a stable partition -- every slug still gets submitted, so
-the scrape does the same work and makes no extra request. It only decides who is
-inside the part that ran when a cycle is cut off at its budget.
+The ordering itself is a stable partition: it decides who is at the front, and
+it never drops or duplicates a board. How many of the ordered boards a cycle is
+then asked is a separate decision (the cap, test_ats_fanout_cap.py), held open
+here so these tests see the whole permutation.
 
 This is also the first caller of `scrape_ats_platform(company_slugs=...)`, a
 parameter that has existed unused since it was written.
@@ -46,6 +47,18 @@ def _rotation_state_in_tmp(monkeypatch, tmp_path):
         WatcherManager,
         "_ats_rotation_state_path",
         lambda self: tmp_path / "rotation.json",
+    )
+@pytest.fixture(autouse=True)
+def _uncapped(monkeypatch):
+    """These tests are about which boards are preferred, not how many are asked. The cap that sizes
+    each cycle's ask has its own file (test_ats_fanout_cap.py); here it is
+    held open, so a narrow host does not truncate a 100-slug fleet and turn
+    a rotation assertion into a sizing one.
+    """
+    monkeypatch.setattr(
+        WatcherManager,
+        "_fanout_cap",
+        lambda self, platform, fleet_size, head_size: fleet_size,
     )
 
 
@@ -122,8 +135,9 @@ def test_preferred_boards_are_asked_first(monkeypatch):
 
 
 def test_ordering_never_drops_a_board(monkeypatch):
-    """The property that makes this safe to put in front of the scraper: the
-    fleet handed back is the same fleet, so the cycle submits the same work.
+    """The ordering is a permutation: with the cap held open the fleet handed
+    back is the same fleet. Only the cap, tested separately, decides how much
+    of that permutation a cycle is asked.
     """
     from services import ats_service
     from services.jba import geo_priority

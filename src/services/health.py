@@ -107,6 +107,13 @@ class ATSScrapeHealth:
     total_jobs_logged: int = 0
     per_platform: dict[str, ATSPlatformHealth] = field(default_factory=dict)
     task_alive: bool = False
+    # The last cycle that ended in an error rather than a result, if any. A
+    # cycle can fail as a whole (its gather timing out) with every platform
+    # still reporting individually, so per_platform alone cannot say that the
+    # cycle itself did not finish -- and it still consumed one of the day's
+    # scrapes, which is why scrapes_today moves on this path too.
+    last_cycle_error: str = ""
+    last_cycle_error_at: float = 0.0
 
     # Every platform that exists, not only those that have reported. Without
     # it `.health` is a log of what happened to run rather than a roll-call:
@@ -348,6 +355,19 @@ class WatcherHealthTracker:
         self._ats.scrapes_today = scrapes_today
         self._ats.daily_cap = daily_cap
         self._ats.total_jobs_logged += total_jobs
+
+    def record_ats_cycle_error(self, error: str, scrapes_today: int, daily_cap: int) -> None:
+        """A cycle that ended in an error still ran and still counts.
+
+        Not record_ats_scrape_complete with zero jobs: that would stamp
+        last_scrape_at and read as a cycle that finished and found nothing,
+        which is the quiet-versus-failed confusion the platform-level record
+        already had to be cured of.
+        """
+        self._ats.last_cycle_error = str(error) or "error"
+        self._ats.last_cycle_error_at = time.time()
+        self._ats.scrapes_today = scrapes_today
+        self._ats.daily_cap = daily_cap
 
     def get_ats_health(self) -> ATSScrapeHealth:
         return self._ats
@@ -739,6 +759,12 @@ def build_channel_health_embed(
         f"Today: **{ats.scrapes_today}/{ats.daily_cap}** scrapes",
         f"Session total: **{ats.total_jobs_logged:,}** jobs logged",
     ]
+    if ats.last_cycle_error and ats.last_cycle_error_at >= ats.last_scrape_at:
+        # Only while it is the most recent thing the loop did: a cycle that
+        # has since completed is the newer fact, and the error is history.
+        ats_lines.append(
+            f"❌ Last cycle errored {_fmt_ago(ats.last_cycle_error_at)}: {ats.last_cycle_error}"
+        )
     ats_embed.add_field(name="Status", value="\n".join(ats_lines), inline=False)
 
     plat_lines = _ats_platform_lines(ats)

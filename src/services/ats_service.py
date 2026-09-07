@@ -938,6 +938,39 @@ def _fanout_budget(count: int, workers: int) -> float:
     return REQUEST_TIMEOUT * (waves + 1)
 
 
+def fanout_capacity(budget_s: float, workers: int) -> int:
+    """How many fetches `workers` are guaranteed to drain inside *budget_s*.
+
+    The inverse of _fanout_budget, and the only place the two are related:
+    _fanout_budget says how long a count would take in the worst case, this
+    says how large a count that same worst case lets a budget afford. It is
+    deliberately pessimistic -- every fetch spending its whole REQUEST_TIMEOUT
+    -- because it is used as a floor for the first cycle on a platform that
+    has not reported yet, and a floor that could overrun is not a floor.
+    Never less than one wave: a budget too small for a single round still
+    gets to ask one.
+    """
+    waves = int(max(budget_s, 0) // REQUEST_TIMEOUT) - 1
+    return max(1, workers) * max(1, waves)
+
+
+def fanout_workers(platform: str, fleet_size: int) -> int:
+    """The pool width scrape_ats_platform actually runs *platform* at.
+
+    One definition, read by the scrape and by whoever sizes the fleet handed
+    to it, so the two cannot drift: a caller that assumed the nominal
+    PLATFORM_WORKERS while the pool had been scaled down for the host would
+    hand over more than the pool can drain. capacity.workers scales the tuned
+    ceiling down on small hardware and never up, since these values are also
+    politeness limits per platform. minimum=2, not 4: the manager fans several
+    platforms out concurrently, so this floor is paid once per platform.
+    """
+    return max(1, min(
+        capacity.workers(PLATFORM_WORKERS.get(platform, 10), minimum=2),
+        max(int(fleet_size), 1),
+    ))
+
+
 def _collect_results(futures: dict, timeout: float | None) -> dict:
     """Drain a {future: key} map into {key: result}, bounded by *timeout*.
 
@@ -3045,12 +3078,8 @@ def scrape_ats_platform(
         return []
 
     max_per_company = results_wanted if results_wanted > 0 else 10_000
-    # capacity.workers scales the tuned ceiling down on small hardware; it never
-    # scales up, since these values are also politeness limits per platform.
-    # minimum=2, not 4: watchers/manager.py fans all ~6 ATS platforms out
-    # concurrently, so this floor is paid once per platform. A floor of 4 meant
-    # a 1-core host still ran 24 simultaneous HTTP threads.
-    workers = min(capacity.workers(PLATFORM_WORKERS.get(platform, 10), minimum=2), len(company_slugs))
+    # See fanout_workers for why the width is computed there and nowhere else.
+    workers = fanout_workers(platform, len(company_slugs))
     all_rows: list[dict[str, Any]] = []
 
     # Nested pool: bounded (accepted exception to scheduler-visible concurrency;

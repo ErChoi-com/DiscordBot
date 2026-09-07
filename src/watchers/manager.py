@@ -93,6 +93,15 @@ ATS_PLATFORM_TIMEOUT_S = 600
 ATS_PLATFORM_DRAIN_MARGIN_S = 120
 ATS_PLATFORM_FANOUT_BUDGET_S = ATS_PLATFORM_TIMEOUT_S - ATS_PLATFORM_DRAIN_MARGIN_S
 
+# How much more of its fleet a platform is offered after a cycle in which it
+# finished everything it was given. The fan-out is sized to what the last
+# cycle actually completed (see ats_fanout_cap), so this is the only way the
+# ask ever grows; a cut-off shrinks it straight back to what fit. Gentle,
+# because the price of overshooting is not the cancelled queue -- that is
+# free -- but the in-flight slugs the pool must still drain past the budget,
+# each a board fetch plus an enrichment pass over its postings.
+ATS_FANOUT_GROWTH = 1.25
+
 # Absolute ceiling on a cycle however narrow the host. The loop scrapes four
 # times a day, so a cycle has six hours of room; this leaves it most of that
 # while still guaranteeing the loop returns to its own scheduling.
@@ -135,6 +144,73 @@ def ats_cycle_timeout(platform_count: int, workers: int) -> int:
     """
     waves = max(1, math.ceil(max(platform_count, 1) / max(workers, 1)))
     return min(waves * ATS_PLATFORM_TIMEOUT_S, ATS_CYCLE_TIMEOUT_CAP_S)
+
+def ats_fanout_cap(
+    fleet_size: int,
+    head_size: int,
+    floor: int,
+    last_submitted: int,
+    last_completed: int,
+    growth: float = ATS_FANOUT_GROWTH,
+) -> int:
+    """How many of a platform's boards to ask this cycle.
+
+    The fan-out used to be handed the whole fleet and cut off at its budget.
+    That is the right shape when a fleet nearly fits and the wrong one when
+    it does not: 135,475 slugs across eighteen platforms, of which 1,633 are
+    known to post in a wanted country, meant every cycle submitted ~98% work
+    it would cancel, the cancelled tail's in-flight survivors held their
+    scheduler workers for 3-4x the budget, and the next cycle's platforms
+    queued behind them until their own bound expired before they started --
+    "timed out (0/0 companies reached)" on all eighteen, every cycle.
+
+    So the ask is sized to what fits, from the only evidence there is:
+
+    - The geo-preferred head is always asked whole. It is the head because it
+      is the part that yields.
+    - No cycle recorded yet: head plus *floor*, where the floor is what the
+      pool is guaranteed to drain inside its budget even if every fetch hangs
+      (fanout_capacity). Pessimistic on purpose; it is a first guess.
+    - The last cycle was cut off: ask what it completed. That is a direct
+      measurement of what the budget affords on this host against this
+      vendor today.
+    - The last cycle finished everything it was given: ask for *growth* more,
+      so a platform that fits keeps widening until it finds its edge.
+
+    Never below the head, never above the fleet, never below head plus floor.
+    The tail slice this leaves is still rotated by _rotate_tail, so a smaller
+    ask does not mean the same companies each cycle -- it means the whole
+    fleet is walked in more, shorter steps, each of which actually completes.
+    """
+    fleet_size = max(0, int(fleet_size))
+    head_size = max(0, min(int(head_size), fleet_size))
+    base = head_size + max(0, int(floor))
+    if last_submitted <= 0:
+        target = base
+    elif last_completed >= last_submitted:
+        target = max(base, math.ceil(last_completed * max(1.0, growth)))
+    else:
+        target = max(base, int(last_completed))
+    return max(head_size, min(target, fleet_size))
+
+
+def fanout_reached(fan: dict[str, int]) -> str:
+    """Coverage for a log line, distinguishing "reached nothing" from
+    "never got as far as fanning out".
+
+    Zero submitted means the platform's thread had not reached its fan-out
+    when the bound expired: still queued behind other work, or still ordering
+    its fleet. Printing that as "0/0 companies reached" made it read as a
+    scrape that ran and found no one, which is the opposite of what happened
+    and sent the last diagnosis looking inside the scraper for an hour that
+    was spent in the scheduler queue.
+    """
+    submitted = int(fan.get("submitted", 0))
+    completed = int(fan.get("completed", 0))
+    if submitted <= 0:
+        return "no fan-out recorded: still queued or still ordering the fleet when the bound expired"
+    return f"{completed:,}/{submitted:,} companies reached"
+
 
 def exception_text(exc: BaseException) -> str:
     """A never-empty description of *exc*.
@@ -797,7 +873,19 @@ class WatcherManager:
             for country in self._priority_countries():
                 preferred |= geo_priority.slugs_for(country)
             head, tail = geo_priority.partition(fleet, preferred)
-            return head + self._rotate_tail(platform, tail, len(head))
+            # Rotate the whole tail before slicing it: the rotation records
+            # how far the last cycle got and resumes there, so the slice this
+            # cycle asks is the one after the slice the last cycle finished.
+            tail = self._rotate_tail(platform, tail, len(head))
+            fan = self._ats_last_fanout(platform)
+            cap = self._fanout_cap(platform, len(fleet), len(head))
+            ordered = head + tail[: max(0, cap - len(head))]
+            print(
+                f"[ats-scrape] {platform}: asking {len(ordered):,} of {len(fleet):,} boards "
+                f"({len(head):,} preferred, {len(ordered) - len(head):,} on rotation; "
+                f"last cycle reached {fan['completed']:,}/{fan['submitted']:,})"
+            )
+            return ordered
         except Exception as exc:
             # Ordering is an optimisation; losing it must not cost the scrape.
             print(f"[ats-scrape] {platform}: could not order the fleet ({exc})")
@@ -806,6 +894,21 @@ class WatcherManager:
     def _ats_rotation_state_path(self) -> Path:
         base = getattr(getattr(self, "config", None), "base_dir", None)
         return Path(base or ".") / _ATS_ROTATION_STATE
+
+    def _fanout_cap(self, platform: str, fleet_size: int, head_size: int) -> int:
+        """ats_fanout_cap for this platform, from what its last fan-out reached.
+
+        The floor is what the pool this platform will actually run at can
+        drain inside the fan-out budget with every fetch stalled -- asked of
+        the scraper itself (fanout_workers) so the width assumed here is the
+        width used there.
+        """
+        from services import ats_service
+
+        workers = ats_service.fanout_workers(platform, fleet_size)
+        floor = ats_service.fanout_capacity(ATS_PLATFORM_FANOUT_BUDGET_S, workers)
+        fan = self._ats_last_fanout(platform)
+        return ats_fanout_cap(fleet_size, head_size, floor, fan["submitted"], fan["completed"])
 
     def _rotate_tail(self, platform: str, tail: list[str], head_size: int) -> list[str]:
         """`tail`, resumed from the point the previous cycle actually reached.
@@ -1238,6 +1341,7 @@ class WatcherManager:
             def _scrape_one(platform: str) -> list[dict[str, Any]]:
                 return self._scrape_one_platform(platform)
 
+            cycle_started_ts = datetime.now(timezone.utc).timestamp()
             try:
                 async def _scrape_one_bounded(platform: str) -> list[dict[str, Any]]:
                     try:
@@ -1254,8 +1358,7 @@ class WatcherManager:
                         fan = self._ats_last_fanout(platform)
                         print(
                             f"[ats-scrape] {platform} timed out or errored: "
-                            f"{exception_text(exc)} "
-                            f"({fan['completed']:,}/{fan['submitted']:,} companies reached)"
+                            f"{exception_text(exc)} ({fanout_reached(fan)})"
                         )
                         health_tracker.record_ats_platform_result(
                             platform, 0, error=exception_text(exc),
@@ -1309,7 +1412,23 @@ class WatcherManager:
                     _sync_geonames, label=scheduler_labels.GEONAMES_SYNC
                 )
             except Exception as exc:
-                print(f"[ats-scrape] Scrape cycle error: {exc}")
+                # An errored cycle still ran: its platforms' threads are alive
+                # and cannot be cancelled. Retrying at once, which is what
+                # leaving the pacing state untouched did, re-queued every
+                # platform behind the last cycle's survivors -- eighteen aged
+                # tasks behind ten busy workers, and each one "timed out
+                # (0/0 companies reached)" before it started. A cycle that
+                # errored after it had already counted itself is not counted
+                # twice.
+                if last_scrape_ts < cycle_started_ts:
+                    scrapes_today += 1
+                    last_scrape_ts = datetime.now(timezone.utc).timestamp()
+                # Told to health as well, so `.health` shows a cycle that
+                # errored instead of a day that quietly has fewer scrapes.
+                self.health.record_ats_cycle_error(
+                    exception_text(exc), scrapes_today, ATS_SCRAPES_PER_DAY
+                )
+                print(f"[ats-scrape] Scrape cycle error: {exception_text(exc)}")
 
     def _scrape_one_platform(self, platform: str) -> list[dict[str, Any]]:
         """Scrape one platform and record what it managed to reach.

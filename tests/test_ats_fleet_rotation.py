@@ -152,6 +152,20 @@ def _clean_fanout(monkeypatch):
     return counts
 
 
+@pytest.fixture(autouse=True)
+def _uncapped(monkeypatch):
+    """These tests are about where the walk resumes, not how far it steps. The cap that sizes
+    each cycle's ask has its own file (test_ats_fanout_cap.py); here it is
+    held open, so a narrow host does not truncate a 100-slug fleet and turn
+    a rotation assertion into a sizing one.
+    """
+    monkeypatch.setattr(
+        WatcherManager,
+        "_fanout_cap",
+        lambda self, platform, fleet_size, head_size: fleet_size,
+    )
+
+
 def _fleet(monkeypatch, platform, slugs):
     from services import ats_service
     monkeypatch.setattr(ats_service, "load_company_lists", lambda: {platform: list(slugs)})
