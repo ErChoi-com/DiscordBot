@@ -228,21 +228,30 @@ class PriorityWorkScheduler:
                 and task.tier != INTERACTIVE
                 and platform_support.set_current_thread_background(True)
             )
+            failure: BaseException | None = None
+            result: Any = None
             try:
                 result = task.fn(*task.args, **task.kwargs)
             except BaseException as exc:  # noqa: BLE001 - propagate to the awaiting caller
-                task.future.set_exception(exc)
-            else:
-                task.future.set_result(result)
+                failure = exc
             finally:
                 if lowered:
                     platform_support.set_current_thread_background(False)
+                # Bookkeeping before the future is resolved, not after: a
+                # caller woken by the result must find the learned cost and
+                # the counters already updated. Resolving first left a window
+                # in which they were not, and raising the worker's priority
+                # back is a scheduling point that widened it to a certainty.
                 if task.label is not None:
                     self._history_for(task.label).record(time.monotonic() - started)
                 with self._cv:
                     self._in_flight.pop(task.seq, None)
                     self._active_count -= 1
                     self._completed_count += 1
+            if failure is not None:
+                task.future.set_exception(failure)
+            else:
+                task.future.set_result(result)
 
     def _history_for(self, label: str) -> _DurationHistory:
         with self._history_lock:
