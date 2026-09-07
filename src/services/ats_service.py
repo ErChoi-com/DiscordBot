@@ -3019,7 +3019,16 @@ def scrape_ats_platform(
     results_wanted: int = 20,
     company_slugs: list[str] | None = None,
     levels: list[str] | tuple[str, ...] | None = None,
+    max_seconds: float | None = None,
 ) -> list[dict[str, Any]]:
+    """Scrape one ATS platform's fleet.
+
+    *max_seconds* caps how long the fan-out will WAIT for its fetches. Without
+    it the wait is _fanout_budget(), which is derived from the size of the
+    fleet -- and the fleet grows every time the harvest runs. Measured against
+    the live lists: 2.2h for lever, 5.9h for bamboohr, 20.5h for workable,
+    against a caller that allows 600s. See the fan-out below.
+    """
     scraper = _SCRAPERS.get(platform)
     if not scraper:
         return []
@@ -3051,9 +3060,29 @@ def scrape_ats_platform(
             pool.submit(scraper, slug, keywords, location, max_per_company): slug
             for slug in company_slugs
         }
-        per_slug = _collect_results(
-            futures, capacity.timeout(_fanout_budget(len(company_slugs), workers))
-        )
+        # _fanout_budget answers "how long would asking everyone take", which
+        # is the right question only if we are allowed that long. We are not:
+        # the caller bounds a platform at ATS_PLATFORM_TIMEOUT_S, and the two
+        # numbers had no relationship at all. Measured against the live fleet
+        # lists, the fan-out budget ran from 13x that bound (lever, 2.2h) to
+        # 123x (workable, 20.5h) -- and the observed thread lifetimes matched
+        # the budgets, not the bound: breezy ran 18,020s against a budget of
+        # 20,610s.
+        #
+        # The outer bound could not correct it, because asyncio.wait_for
+        # cancels the await and not the thread: the awaiting side returned []
+        # at 600s while the thread kept its scheduler worker for hours. That is
+        # what starved the job watchers, and it is also why "it worked earlier
+        # today" -- the budget grows with the fleet, so every harvest makes it
+        # worse.
+        #
+        # Capped after capacity.timeout, not before: that call STRETCHES a
+        # budget for slower hardware, so capping first would let the stretch
+        # walk straight back past the cap.
+        budget = capacity.timeout(_fanout_budget(len(company_slugs), workers))
+        if max_seconds is not None:
+            budget = min(budget, max(1.0, float(max_seconds)))
+        per_slug = _collect_results(futures, budget)
         # How much of the fleet this cycle actually reached. _collect_results
         # only printed the cancelled count, and reasoning about coverage from
         # that alone is how "43-100% of companies reached" was once misread as
