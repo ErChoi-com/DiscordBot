@@ -124,3 +124,32 @@ def test_no_environment_means_default_verification(monkeypatch):
     session = a._http()
     assert session.verify is True
     assert session.proxies == {}
+
+
+# ── each thread keeps a small pool, so idle host connections close ───────────
+
+def test_the_thread_session_keeps_a_small_pool(monkeypatch):
+    """Measured at the start of a fan-out: 1,161 established connections from
+    this process, most of them idle keep-alives to company hosts a thread
+    would never ask again, and the gateway heartbeat's ack ~42s late while
+    the loop was clear."""
+    monkeypatch.setattr(a, "_HTTP_LOCAL", threading.local())
+    session = a._http()
+    for scheme in ("https://x/", "http://x/"):
+        adapter = session.get_adapter(scheme)
+        assert adapter._pool_connections == a.HTTP_POOL_HOSTS_PER_THREAD
+        assert adapter._pool_maxsize == a.HTTP_POOL_PER_HOST
+    assert a.HTTP_POOL_HOSTS_PER_THREAD <= 2 and a.HTTP_POOL_PER_HOST <= 2
+
+
+def test_moving_to_a_new_host_evicts_the_oldest_hosts_pool(monkeypatch):
+    """The point of the small pool, exercised against urllib3 itself: with
+    two host pools, asking a third host closes the first host's pool."""
+    monkeypatch.setattr(a, "_HTTP_LOCAL", threading.local())
+    pm = a._http().get_adapter("https://x/").poolmanager
+    pools = [pm.connection_from_host(f"company-{i}.example", 443, scheme="https") for i in range(3)]
+    assert len(pm.pools) <= a.HTTP_POOL_HOSTS_PER_THREAD
+    # Evicted means forgotten: asking the first host again builds a new pool
+    # (and, with nothing else referencing the old one, its sockets close).
+    assert pm.connection_from_host("company-0.example", 443, scheme="https") is not pools[0]
+    assert pm.connection_from_host("company-2.example", 443, scheme="https") is pools[2]

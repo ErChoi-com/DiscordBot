@@ -171,6 +171,11 @@ def _make_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
 
 _HTTP_LOCAL = threading.local()
 
+# Per worker thread: how many hosts' connection pools are kept, and how many
+# connections each may hold. See _http for the measurement behind them.
+HTTP_POOL_HOSTS_PER_THREAD = 2
+HTTP_POOL_PER_HOST = 2
+
 
 class _PreloadedTLSAdapter(requests.adapters.HTTPAdapter):
     """An HTTPS adapter that verifies with one CA store loaded once.
@@ -229,7 +234,20 @@ def _http() -> requests.Session:
     session = getattr(_HTTP_LOCAL, "session", None)
     if session is None:
         session = requests.Session()
-        session.mount("https://", _PreloadedTLSAdapter())
+        # Two host pools of two connections, not requests' ten of ten. A
+        # worker thread makes one request at a time, and on most platforms
+        # every company is its own host, so a wider pool only keeps idle
+        # keep-alive connections open to hosts the thread will never ask
+        # again. Measured at the start of a fan-out: 1,161 established TCP
+        # connections from this process, and the gateway's heartbeat ack
+        # arriving ~42s late while the loop itself was clear -- the shape of
+        # a packet lost under that load and retransmitted with backoff. Two,
+        # so a scraper that alternates between a board host and a detail host
+        # keeps both; the previous host's connection closes as it moves on.
+        session.mount("https://", _PreloadedTLSAdapter(
+            pool_connections=HTTP_POOL_HOSTS_PER_THREAD, pool_maxsize=HTTP_POOL_PER_HOST))
+        session.mount("http://", requests.adapters.HTTPAdapter(
+            pool_connections=HTTP_POOL_HOSTS_PER_THREAD, pool_maxsize=HTTP_POOL_PER_HOST))
         _configure_from_environment(session)
         _HTTP_LOCAL.session = session
     return session
