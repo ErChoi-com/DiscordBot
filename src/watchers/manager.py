@@ -991,13 +991,16 @@ class WatcherManager:
         if not tail:
             return []
         path = self._ats_rotation_state_path()
+        # Read before the lock: the fallback inside _ats_last_fanout reads the
+        # same state file under the same (non-reentrant) lock.
+        completed = self._ats_last_fanout(platform)["completed"]
         with _ATS_ROTATION_LOCK:
             state = ats_traversal.load_state(path)
             entry = state.get("platforms", {}).get(platform) or {}
             # The rotation the previous cycle was handed, reconstructed so
             # "it reached N" can be turned back into "it stopped here".
             previous = ats_traversal.rotate(tail, entry.get("last_digest"))
-            reached = max(0, self._ats_last_fanout(platform)["completed"] - head_size)
+            reached = max(0, completed - head_size)
             cursor = ats_traversal.cursor_after(previous, reached)
             if cursor is None:
                 # No cycle has reported yet, or it reached nothing past the
@@ -1036,25 +1039,72 @@ class WatcherManager:
         except Exception:
             return {}
 
-    @staticmethod
-    def _ats_last_fanout(platform: str) -> dict[str, int]:
+    def _ats_last_fanout(self, platform: str) -> dict[str, int]:
         """Submitted/completed company counts from that platform's last fan-out.
 
         Zeroes when the scraper never got as far as fanning out (an unknown
         platform, or an empty company list). Zero submitted reads as "no cycle
         recorded" downstream rather than "reached nothing", which are different
         and were previously indistinguishable.
+
+        This process's own record first; failing that, the one the previous
+        process left in the rotation state. The counts size the next ask
+        (ats_fanout_cap), and this bot is restarted daily by its supervisor
+        and more often by hand -- a restart that forgot them re-asked icims
+        the 600 boards the floor promised, after a cycle had just measured
+        that 103 fit. The cursor already survived restarts for the same
+        reason; the counts now travel with it.
         """
         try:
             from services import ats_service
 
             fan = ats_service.LAST_FANOUT.get(platform) or {}
+            if int(fan.get("submitted", 0)) > 0:
+                return {
+                    "submitted": int(fan.get("submitted", 0)),
+                    "completed": int(fan.get("completed", 0)),
+                }
+        except Exception:
+            pass
+        try:
+            from services import ats_traversal
+
+            with _ATS_ROTATION_LOCK:
+                state = ats_traversal.load_state(self._ats_rotation_state_path())
+            saved = (state.get("platforms", {}).get(platform) or {}).get("fanout") or {}
             return {
-                "submitted": int(fan.get("submitted", 0)),
-                "completed": int(fan.get("completed", 0)),
+                "submitted": max(0, int(saved.get("submitted", 0))),
+                "completed": max(0, int(saved.get("completed", 0))),
             }
         except Exception:
             return {"submitted": 0, "completed": 0}
+
+    def _remember_fanout(self, platform: str, fan: dict[str, int]) -> None:
+        """Write the fan-out's counts into the rotation state, for the next process.
+
+        Only a fan-out that happened: zero submitted means the scrape never
+        got that far, and recording it would overwrite a real measurement
+        with "nothing known". Failures are swallowed for the same reason the
+        rotation's are: remembering is an optimisation, and losing it costs
+        one floor-sized cycle, not the scrape.
+        """
+        if int(fan.get("submitted", 0)) <= 0:
+            return
+        try:
+            from services import ats_traversal
+
+            path = self._ats_rotation_state_path()
+            with _ATS_ROTATION_LOCK:
+                state = ats_traversal.load_state(path)
+                entry = state.setdefault("platforms", {}).setdefault(platform, {})
+                entry["fanout"] = {
+                    "submitted": int(fan["submitted"]),
+                    "completed": int(fan.get("completed", 0)),
+                    "at": datetime.now(timezone.utc).timestamp(),
+                }
+                ats_traversal.save_state(path, state)
+        except Exception as exc:
+            print(f"[ats-scrape] {platform}: could not record the fan-out ({exc})")
 
     @staticmethod
     def _is_new_utc_day(today: str, current_date: str | None) -> bool:
@@ -1517,6 +1567,7 @@ class WatcherManager:
             )
             new_count = log_jobs(result) if result else 0
             fan = self._ats_last_fanout(platform)
+            self._remember_fanout(platform, fan)
             if result:
                 print(
                     f"[ats-scrape] {platform}: {len(result):,} scraped, "
@@ -1533,6 +1584,7 @@ class WatcherManager:
             # after reaching 9,000 of 10,000 companies is a different failure
             # from one that reached 12.
             fan = self._ats_last_fanout(platform)
+            self._remember_fanout(platform, fan)
             print(f"[ats-scrape] {platform} error: {exception_text(exc)}")
             self.health.record_ats_platform_result(
                 platform, 0, error=exception_text(exc),

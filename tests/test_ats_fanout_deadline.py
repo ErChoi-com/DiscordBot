@@ -156,6 +156,7 @@ def _watcher(recorder: dict):
     return SimpleNamespace(
         _ordered_slugs=lambda platform: ["a", "b"],
         _ats_last_fanout=lambda platform: {"submitted": 2, "completed": 2},
+        _remember_fanout=lambda platform, fan: None,
         health=SimpleNamespace(record_ats_platform_result=lambda *a, **k: recorder.setdefault("health", (a, k))),
     )
 
