@@ -123,7 +123,11 @@ def test_the_loop_uses_the_named_budgets_not_bare_numbers():
     timeouts moved.
     """
     import inspect
-    compact = " ".join(inspect.getsource(M.WatcherManager._run_ats_scrape_loop).split())
+    # The cycle bound moved with the gather into _gather_ats_platforms (the
+    # ATS slot gate); the platform bound is still applied in the loop.
+    loop_src = inspect.getsource(M.WatcherManager._run_ats_scrape_loop)
+    gather_src = inspect.getsource(M.WatcherManager._gather_ats_platforms)
+    compact = " ".join((loop_src + gather_src).split())
     assert "timeout=ATS_PLATFORM_TIMEOUT_S" in compact
     assert "timeout=ats_cycle_timeout(" in compact
     assert "timeout=600" not in compact
