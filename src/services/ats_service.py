@@ -1150,7 +1150,11 @@ def _scrape_greenhouse(slug: str, keywords: str, location: str, max_jobs: int) -
         return []
 
     rows: list[dict[str, Any]] = []
-    for job in data.get("jobs") or []:
+    # Before the loop, because the loop converts every body to text.
+    fresh = _fresh_only(GREENHOUSE, slug, [j for j in (data.get("jobs") or []) if isinstance(j, dict)],
+                        lambda j: j.get("absolute_url"),
+                        lambda j: j.get("first_published") or j.get("updated_at"))
+    for job in fresh:
         title = str(job.get("title") or "").strip()
         if not title:
             continue
@@ -1182,6 +1186,15 @@ def _scrape_greenhouse(slug: str, keywords: str, location: str, max_jobs: int) -
 
 
 # ── Lever ───────────────────────────────────────────────────────────────────
+
+def _lever_posted(posting: dict[str, Any]) -> str:
+    """createdAt (epoch milliseconds) as ISO, or '' when absent."""
+    created_ms = posting.get("createdAt")
+    if isinstance(created_ms, (int, float)) and created_ms > 0:
+        from datetime import datetime, timezone
+        return datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc).isoformat()
+    return ""
+
 
 def _scrape_lever(slug: str, keywords: str, location: str, max_jobs: int) -> list[dict[str, Any]]:
     if _is_dead(LEVER, slug):
@@ -1228,6 +1241,8 @@ def _scrape_lever(slug: str, keywords: str, location: str, max_jobs: int) -> lis
         return []
 
     rows: list[dict[str, Any]] = []
+    postings = _fresh_only(LEVER, slug, [p for p in postings if isinstance(p, dict)],
+                           lambda p: p.get("hostedUrl"), _lever_posted)
     for posting in postings:
         title = str(posting.get("text") or "").strip()
         if not title:
@@ -1242,11 +1257,7 @@ def _scrape_lever(slug: str, keywords: str, location: str, max_jobs: int) -> lis
             continue
         if not _matches_location(loc, location):
             continue
-        created_ms = posting.get("createdAt")
-        date_posted = ""
-        if isinstance(created_ms, (int, float)) and created_ms > 0:
-            from datetime import datetime, timezone
-            date_posted = datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc).isoformat()
+        date_posted = _lever_posted(posting)
         row: dict[str, Any] = {
             "title": title,
             "company": slug,
@@ -1326,7 +1337,7 @@ def _scrape_ashby(slug: str, keywords: str, location: str, max_jobs: int) -> lis
         return (job.get("title"), loc,
                 job.get("jobUrl") or job.get("applyUrl"),
                 job.get("publishedAt"),
-                job.get("descriptionPlain") or _html_to_text(job.get("descriptionHtml")),
+                job.get("descriptionPlain") or (lambda: _html_to_text(job.get("descriptionHtml"))),
                 job.get("employmentType"))
 
     # isListed False means the posting exists but is not on the public board.
@@ -2000,9 +2011,17 @@ def _html_to_text(raw: Any) -> str:
     text = str(raw or "")
     if not text:
         return ""
-    text = html.unescape(text)
-    text = re.sub(r"<[^>]+>", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
+    # Cheapest checks first: most bodies that arrive as plain text need only
+    # the whitespace pass, and html.unescape is pure Python per entity.
+    if "&" in text:
+        text = html.unescape(text)
+    if "<" in text:
+        text = _TAG_RE.sub(" ", text)
+    return _WS_RE.sub(" ", text).strip()
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
 
 
 def _normalise_posted(value: Any) -> str:
@@ -2193,7 +2212,7 @@ def _board_rows(platform: str, slug: str, jobs: Any, keywords: str, location: st
     `shape` reads a row's title, location, url and date out of that platform's
     own field names; everything after that is identical across platforms.
     """
-    rows: list[dict[str, Any]] = []
+    shaped_jobs: list[tuple] = []
     for job in jobs or []:
         if not isinstance(job, dict):
             continue
@@ -2201,6 +2220,9 @@ def _board_rows(platform: str, slug: str, jobs: Any, keywords: str, location: st
             shaped = shape(job)
             # A platform that carries the description in its listing returns a
             # fifth element; the rest return four and enrich later, if at all.
+            # The fifth element may be a callable: the conversion from HTML is
+            # the expensive part of shaping, and it is only paid below, for the
+            # postings the archive does not already hold.
             title, loc, job_url, posted = shaped[:4]
             description = shaped[4] if len(shaped) > 4 else ""
             # Sixth element: the platform's own employment-type field. Only
@@ -2219,6 +2241,17 @@ def _board_rows(platform: str, slug: str, jobs: Any, keywords: str, location: st
             continue
         if not _matches_location(loc, location):
             continue
+        shaped_jobs.append((title, loc, job_url, posted, description, employment_type))
+
+    rows: list[dict[str, Any]] = []
+    for title, loc, job_url, posted, description, employment_type in _fresh_only(
+        platform, slug, shaped_jobs, lambda s: s[2], lambda s: s[3]
+    ):
+        if callable(description):
+            try:
+                description = description()
+            except Exception:
+                description = ""
         rows.append({
             "title": title,
             "company": slug,
@@ -2944,7 +2977,7 @@ def _scrape_paylocity(slug: str, keywords: str, location: str, max_jobs: int) ->
         if job.get("IsRemote") and "remote" not in str(loc).lower():
             loc = _join_location(loc, "Remote")
         return (job.get("JobTitle"), loc, url, job.get("PublishedDate"),
-                _html_to_text(job.get("Description")))
+                lambda: _html_to_text(job.get("Description")))
 
     return _board_rows(PAYLOCITY, slug, jobs, keywords, location, max_jobs, shape)
 
@@ -3153,6 +3186,49 @@ def _needs_enrichment(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     except Exception:
         return rows
     return kept
+
+
+def _fresh_only(platform: str, slug: str, items: list[Any], url_of: Any,
+                posted_of: Any = None) -> list[Any]:
+    """`items` minus the postings the archive already holds, by their URL.
+
+    For the scrapers whose listing already carries the posting body. They
+    had no fetch to skip, but they converted every body from HTML to text
+    -- regex and entity decoding, pure Python, on the GIL -- and then
+    _drop_already_archived discarded the row. Greenhouse alone did that for
+    40,146 postings a cycle and kept 78. A GIL profile of the live bot put
+    _html_to_text at 39% of interpreter time while the Discord event loop
+    held it for 0.16%, and the gateway fell 42s behind every few minutes.
+
+    Items whose URL cannot be read are kept: nothing known is not evidence.
+    One archive query per board; same failure posture as the dedup itself.
+
+    `posted_of` supplies the posting date the row would carry, so the stub's
+    identity is the row's identity: an undated stub collides with *any*
+    prior sighting, a dated one only with the same date, and a genuine
+    re-post must survive here exactly as it would survive the dedup.
+    """
+    if not items or not ATS_ARCHIVE_DEDUP_ENABLED:
+        return list(items)
+    stubs: list[dict[str, Any]] = []
+    for item in items:
+        try:
+            url = str(url_of(item) or "").strip()
+        except Exception:
+            url = ""
+        posted = ""
+        if posted_of is not None:
+            try:
+                posted = _normalise_posted(posted_of(item))
+            except Exception:
+                posted = ""
+        stubs.append({"job_url": url, "company": slug, "_source_site": platform,
+                      "date_posted": posted, "_item": item})
+    keyed = [s for s in stubs if s["job_url"]]
+    kept_urls = {s["job_url"] for s in _needs_enrichment(keyed)} if keyed else set()
+    if not keyed:
+        return list(items)
+    return [s["_item"] for s in stubs if not s["job_url"] or s["job_url"] in kept_urls]
 
 
 def _drop_already_archived(platform: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -59,6 +59,16 @@ def _isolate_archive_index(tmp_path, monkeypatch):
     jobs_dir = tmp_path / "jba_jobs"
     monkeypatch.setattr(archive_index, "_JOBS_DIR", jobs_dir, raising=False)
     monkeypatch.setattr(archive_index, "_INDEX_PATH", jobs_dir / "archive_index.db", raising=False)
+    # The current week's sightings come from the live jobs.db, and a fixture
+    # built from a real board (applicantpro job 4194127) is in it: the
+    # prefilter dropped the fixture as "already archived" and a scraper test
+    # returned nothing. The same path is what log_jobs writes, which is how
+    # synthetic postings reached the real archive before.
+    try:
+        from services.jba import merge_data
+        monkeypatch.setattr(merge_data, "_DB_PATH", jobs_dir / "jobs.db", raising=False)
+    except ImportError:
+        pass
     yield
 
 
