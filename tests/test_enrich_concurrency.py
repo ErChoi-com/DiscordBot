@@ -124,30 +124,49 @@ def test_a_slow_vendor_does_not_hold_up_a_different_one(monkeypatch):
     monkeypatch.setitem(a.PLATFORM_WORKERS, "icims", 2)
     seen: list[str] = []
     lock = threading.Lock()
+    in_flight = 0
+    peak = 0
 
     def fetch(url: str) -> dict[str, str]:
+        nonlocal in_flight, peak
         with lock:
             seen.append(url.split("//")[1].split(".")[0])
-        time.sleep(0.05)
-        return {"date_posted": "2026-01-01"}
+            in_flight += 1
+            peak = max(peak, in_flight)
+        try:
+            # Long enough that every request a gate permits is still in flight
+            # when the others arrive. This is what makes `peak` meaningful; it
+            # is not a deadline, so a loaded machine only makes it safer.
+            time.sleep(0.20)
+            return {"date_posted": "2026-01-01"}
+        finally:
+            with lock:
+                in_flight -= 1
 
     threads = [
         threading.Thread(target=a._enrich_rows, args=(_rows("bamboohr", 4), fetch)),
         threading.Thread(target=a._enrich_rows, args=(_rows("icims", 4), fetch)),
     ]
-    t0 = time.monotonic()
     for t in threads:
         t.start()
     for t in threads:
         t.join(timeout=60)
-    elapsed = time.monotonic() - t0
 
     assert len(seen) == 8
     assert {"bamboohr", "icims"} <= set(seen)
-    # Serialised through one shared gate this would be ~8 * 0.05 = 0.4s; run as
-    # two independent ceilings of 2 it is ~0.1s. The bound is loose enough to
-    # survive a loaded machine and still fail a single global gate.
-    assert elapsed < 0.35, f"platforms appear to share a gate ({elapsed:.2f}s)"
+    # Counted, not timed. This assertion was originally "the whole thing
+    # finished in under 0.35s", which measures the machine as much as the code:
+    # at 100% CPU it failed three times out of three while the gates were
+    # working perfectly. What the test actually claims is that two vendors are
+    # not serialised through one ceiling, and that is a statement about how many
+    # requests are in flight at once -- so count them. One shared gate of 2 can
+    # never exceed 2 concurrent; two independent gates of 2 reach 4.
+    ceiling = a.capacity.workers(2, minimum=2)
+    assert peak >= 2 * ceiling, (
+        f"peak {peak} concurrent across both vendors; two independent ceilings "
+        f"of {ceiling} should reach {2 * ceiling}. Anything less means the two "
+        f"vendors are sharing one gate."
+    )
 
 
 # -- the gate must not cost what it was added to buy ------------------------
