@@ -230,8 +230,30 @@ def _http() -> requests.Session:
     if session is None:
         session = requests.Session()
         session.mount("https://", _PreloadedTLSAdapter())
+        _configure_from_environment(session)
         _HTTP_LOCAL.session = session
     return session
+
+
+def _configure_from_environment(session: requests.Session) -> None:
+    """Read the proxy and CA environment once, for the life of the Session.
+
+    With trust_env on, requests consults the environment on every request:
+    on Windows that is a registry walk for proxy settings plus a ~/.netrc
+    lookup per call, both of which showed up in the live profile beside the
+    TLS work. Nothing about the environment changes between two fetches from
+    the same worker thread, so it is captured here instead. What is kept:
+    HTTP(S)_PROXY / ALL_PROXY, and REQUESTS_CA_BUNDLE or CURL_CA_BUNDLE. What
+    is given up: per-URL NO_PROXY matching and netrc credentials, neither of
+    which any ATS vendor is reached through.
+    """
+    session.trust_env = False
+    proxies = requests.utils.getproxies()
+    if proxies:
+        session.proxies.update(proxies)
+    bundle = os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("CURL_CA_BUNDLE")
+    if bundle:
+        session.verify = bundle
 
 
 def _http_get(url: str, **kwargs: Any) -> requests.Response:
@@ -340,11 +362,26 @@ def _company_entry(entry: Any) -> str:
     return str(entry or "").strip()
 
 
+_company_cache_lock = threading.Lock()
+
+
 def load_company_lists() -> dict[str, list[str]]:
     global _company_cache
     if _company_cache is not None:
         return _company_cache
+    # One loader at a time, and a second check inside: the ATS cycle hands
+    # every platform to its own thread at once, and on a cold cache each of
+    # them parsed all 135k slugs from disk independently -- five identical
+    # "+5333 companies from local harvest" lines interleaved in the log, five
+    # copies of the fleet in memory until the last writer won.
+    with _company_cache_lock:
+        if _company_cache is not None:
+            return _company_cache
+        _company_cache = _load_company_lists_uncached()
+        return _company_cache
 
+
+def _load_company_lists_uncached() -> dict[str, list[str]]:
     cache: dict[str, list[str]] = {}
     for platform, filename in _PLATFORM_FILES.items():
         path = _JBA_DIR / filename
@@ -402,8 +439,7 @@ def load_company_lists() -> dict[str, list[str]]:
             " Run: python sync_ats_companies.py"
         )
 
-    _company_cache = cache
-    return _company_cache
+    return cache
 
 
 def _load_dead_slugs(platform: str) -> set[str]:

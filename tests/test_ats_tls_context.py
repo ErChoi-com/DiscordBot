@@ -91,3 +91,36 @@ def test_the_thread_session_mounts_the_adapter_for_https_only(monkeypatch):
     assert isinstance(session.get_adapter("https://boards.example/x"), a._PreloadedTLSAdapter)
     assert not isinstance(session.get_adapter("http://boards.example/x"), a._PreloadedTLSAdapter)
     assert isinstance(session.get_adapter("http://boards.example/x"), requests.adapters.HTTPAdapter)
+
+
+# ── the environment is read once per Session, not once per request ──────────
+
+def test_the_thread_session_does_not_reconsult_the_environment_per_request(monkeypatch):
+    """trust_env makes requests walk the Windows proxy registry and look up
+    ~/.netrc on every call; the profile showed both beside the TLS work."""
+    monkeypatch.setattr(a, "_HTTP_LOCAL", threading.local())
+    assert a._http().trust_env is False
+
+
+def test_a_proxy_environment_is_still_honoured_once(monkeypatch):
+    monkeypatch.setattr(a, "_HTTP_LOCAL", threading.local())
+    monkeypatch.setattr(a.requests.utils, "getproxies", lambda: {"https": "http://proxy.corp:3128"})
+    assert a._http().proxies["https"] == "http://proxy.corp:3128"
+
+
+def test_a_ca_bundle_environment_is_still_honoured_once(monkeypatch, tmp_path):
+    monkeypatch.setattr(a, "_HTTP_LOCAL", threading.local())
+    bundle = tmp_path / "corp.pem"
+    bundle.write_text("x")
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(bundle))
+    assert a._http().verify == str(bundle)
+
+
+def test_no_environment_means_default_verification(monkeypatch):
+    monkeypatch.setattr(a, "_HTTP_LOCAL", threading.local())
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+    monkeypatch.delenv("CURL_CA_BUNDLE", raising=False)
+    monkeypatch.setattr(a.requests.utils, "getproxies", lambda: {})
+    session = a._http()
+    assert session.verify is True
+    assert session.proxies == {}
