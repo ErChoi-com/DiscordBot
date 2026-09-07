@@ -1708,6 +1708,16 @@ class WatcherManager:
             return
         self._watchdog_task = asyncio.create_task(self._run_watchdog())
         print("[watchdog] Watcher supervisor started")
+        # The supervisor above runs *on* the loop, so it cannot see the loop
+        # stop. This one watches from a thread and prints the loop thread's
+        # stack when it stops ticking -- the gateway's "Can't keep up" names
+        # the effect and never the cause.
+        try:
+            from services import loop_watch
+
+            loop_watch.start()
+        except Exception as exc:
+            print(f"[watchdog] loop watch unavailable ({exc})")
 
     def start_job_watcher(self, channel_id: int) -> bool:
         existing = self.channel_job_tasks.get(channel_id)
