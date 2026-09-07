@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -218,14 +219,34 @@ def _upsert(conn: sqlite3.Connection, rows: list[tuple[str, str, str]]) -> None:
     )
 
 
+# When each index path was last checked for stale archives. The check opens
+# a connection and stats every zip under the build lock, which is fine a few
+# times a cycle and is not fine once per board: the enrichment prefilter made
+# it that, and a py-spy dump then found 38-68 threads inside this function at
+# every sample while the Discord gateway fell 42s behind. Archives change
+# about weekly, so a check made in the last minute is still the answer.
+_CHECK_INTERVAL_S = 60.0
+_last_checked: dict[Path, float] = {}
+
+
 def ensure_index(force: bool = False) -> int:
-    """Build or refresh the index. Returns the number of archives ingested."""
+    """Build or refresh the index. Returns the number of archives ingested.
+
+    Cheap when called often: after a check, calls in the next _CHECK_INTERVAL_S
+    return without touching the lock, the connection or the filesystem.
+    `force` always rebuilds.
+    """
+    if not force and time.monotonic() - _last_checked.get(_INDEX_PATH, -1e12) < _CHECK_INTERVAL_S:
+        return 0
     with _build_lock:
+        if not force and time.monotonic() - _last_checked.get(_INDEX_PATH, -1e12) < _CHECK_INTERVAL_S:
+            return 0
         conn = _connect()
         if conn is None:
             return 0
         try:
             sources = archive_files() if force else _stale_sources(conn)
+            _last_checked[_INDEX_PATH] = time.monotonic()
             if not sources:
                 return 0
 

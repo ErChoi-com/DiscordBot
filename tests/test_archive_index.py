@@ -286,6 +286,9 @@ def test_changed_archive_is_reindexed(archive):
     ])
     os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 10))
 
+    # A check made in the last minute stands (see _CHECK_INTERVAL_S); this
+    # test is about the staleness detection behind it, so let the minute pass.
+    archive_index._last_checked.clear()
     assert archive_index.ensure_index() == 1
     kept, dropped = archive_index.filter_new_listings([_job("https://x/2", posted="2026-06-02")])
     assert dropped == 1
