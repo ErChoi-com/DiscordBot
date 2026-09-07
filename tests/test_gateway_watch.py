@@ -162,23 +162,32 @@ def test_a_healthy_cycle_read_from_real_stamps_leaves_no_beat_outstanding():
 
 
 def test_the_threshold_follows_the_interval_the_gateway_gave_us():
-    assert gw.silence_threshold(41.25, floor=60.0) == pytest.approx(41.25 * gw.SILENCE_MARGIN)
-    # A shorter interval must tighten the threshold, not sit on the floor.
-    assert gw.silence_threshold(10.0, floor=60.0) == pytest.approx(11.5)
+    assert gw.silence_threshold(41.25, fallback=60.0) == pytest.approx(41.25 * gw.SILENCE_MARGIN)
+    # A gateway asking for a short interval must be judged on that interval.
+    # The fallback is not a floor; treating it as one would sleep through
+    # silences on exactly the connection that reports trouble soonest.
+    assert gw.silence_threshold(10.0, fallback=60.0) == pytest.approx(11.5)
 
 
-def test_an_unknown_interval_falls_back_to_the_floor():
-    """Before IDENTIFY there is no interval. Erring long means saying nothing
-    rather than saying something wrong."""
-    assert gw.silence_threshold(0.0, floor=60.0) == 60.0
-    assert gw.silence_threshold(None or 0, floor=60.0) == 60.0
+@pytest.mark.parametrize("interval", [0.0, 0, None, -1.0])
+def test_an_interval_we_cannot_use_falls_back(interval):
+    """Before IDENTIFY there is no interval at all. Erring long means saying
+    nothing rather than saying something wrong."""
+    assert gw.silence_threshold(interval, fallback=60.0) == 60.0
 
 
-def test_a_missed_beat_crosses_the_threshold_a_healthy_one_does_not():
+def test_one_interval_of_quiet_is_normal_and_two_is_not():
+    """Stated against the watch rather than against the arithmetic: the same
+    shard, quiet for one interval and then for two, must be judged
+    differently. This is the boundary the whole threshold exists to place."""
     interval = 41.25
-    healthy = gw.silence_threshold(interval, 60.0) > interval
-    missed = gw.silence_threshold(interval, 60.0) < interval * 2
-    assert healthy and missed, "one interval must be fine and two must not"
+    quiet_one, lines_one = _watch()
+    quiet_one.step(100.0, {"recv_gap": interval, "outstanding": 0.0, "interval": interval})
+    assert lines_one == [], "a shard that simply had nothing to say is not news"
+
+    quiet_two, lines_two = _watch()
+    quiet_two.step(100.0, {"recv_gap": interval * 2, "outstanding": 0.0, "interval": interval})
+    assert len(lines_two) == 1 and "nothing received" in lines_two[0]
 
 
 # ── silence is opened, measured and closed ───────────────────────────────────
@@ -225,19 +234,45 @@ def test_two_separate_silences_are_two_records():
 
 # ── the per-window summary ───────────────────────────────────────────────────
 
-def test_a_window_reports_its_peaks_and_then_starts_over():
+def test_the_window_pairs_the_receive_gap_with_the_worst_beat_not_with_itself():
+    """The defect this replaced: two independent maxima over the window read
+    as if they had happened together. They need not have, and the only
+    question worth asking -- was the socket quiet *while* the ack was missing
+    -- cannot be answered by a pair that never co-occurred.
+
+    Here the largest receive gap in the window (40s, early, harmless) is not
+    the one that belongs in the line; the gap at the moment the beat peaked
+    (0.5s) is, and it says the socket was busy while the ack alone went
+    missing."""
     watch, lines = _watch()
     watch.step(0.0, {"recv_gap": 0.0, "outstanding": 0.0, "interval": 41.25})
-    watch.step(30.0, {"recv_gap": 12.0, "outstanding": 41.5, "interval": 41.25})
-    watch.step(60.0, {"recv_gap": 1.0, "outstanding": 1.0, "interval": 41.25})
+    watch.step(20.0, {"recv_gap": 40.0, "outstanding": 0.0, "interval": 41.25})
+    watch.step(40.0, {"recv_gap": 0.5, "outstanding": 41.5, "interval": 41.25})
+    watch.step(61.0, {"recv_gap": 0.1, "outstanding": 0.0, "interval": 41.25})
     assert len(lines) == 1
-    assert "longest gap with nothing received was 12.0s" in lines[0]
-    assert "longest a beat went unacked was 41.5s" in lines[0]
+    assert "unacked for 41.5s" in lines[0]
+    assert "nothing had been received for 0.5s" in lines[0]
+    assert "40.0" not in lines[0], "the window's own largest gap is not the pair"
 
-    # The next window is measured on its own, not against the first.
+
+def test_the_other_reading_of_the_same_line_is_a_socket_that_went_quiet():
+    """The opposite diagnosis, from the same two numbers: a gap as long as the
+    wait means the ack was simply one of many frames that did not arrive."""
+    watch, lines = _watch()
+    watch.step(0.0, {"recv_gap": 0.0, "outstanding": 0.0, "interval": 41.25})
+    watch.step(45.0, {"recv_gap": 43.0, "outstanding": 42.0, "interval": 41.25})
+    watch.step(61.0, {"recv_gap": 0.1, "outstanding": 0.0, "interval": 41.25})
+    assert "unacked for 42.0s" in lines[-1] and "received for 43.0s" in lines[-1]
+
+
+def test_each_window_is_measured_on_its_own_not_against_the_last():
+    watch, lines = _watch()
+    watch.step(0.0, {"recv_gap": 0.0, "outstanding": 41.5, "interval": 41.25})
+    watch.step(61.0, {"recv_gap": 0.0, "outstanding": 0.0, "interval": 41.25})
+    assert "unacked for 41.5s" in lines[-1]
     watch.step(90.0, {"recv_gap": 3.0, "outstanding": 20.0, "interval": 41.25})
-    watch.step(121.0, {"recv_gap": 0.0, "outstanding": 0.0, "interval": 41.25})
-    assert "was 3.0s" in lines[-1] and "unacked was 20.0s" in lines[-1]
+    watch.step(122.0, {"recv_gap": 0.0, "outstanding": 0.0, "interval": 41.25})
+    assert "unacked for 20.0s" in lines[-1] and "received for 3.0s" in lines[-1]
 
 
 def test_a_window_is_printed_for_the_lag_discord_would_warn_about_and_no_other():
@@ -250,7 +285,7 @@ def test_a_window_is_printed_for_the_lag_discord_would_warn_about_and_no_other()
     assert lines == [], "an idle shard with no laggy beat must stay quiet"
 
     watch.step(122.0, {"recv_gap": 0.5, "outstanding": 10.1, "interval": 41.25})
-    assert len(lines) == 1 and "unacked was 10.1s" in lines[0]
+    assert len(lines) == 1 and "unacked for 10.1s" in lines[0]
 
 
 def test_a_window_with_no_readings_at_all_is_silent_and_does_not_crash():
@@ -304,3 +339,38 @@ def test_the_loop_location_falls_back_when_no_loop_watch_is_running(monkeypatch)
 
     monkeypatch.setattr(loop_watch, "_active", None)
     assert gw._loop_location() == "(unknown)"
+
+
+def test_a_sample_that_raises_does_not_silently_kill_the_watch(monkeypatch):
+    """The failure mode this guards is the nastiest one available to a
+    diagnostic: the thread dies, the log goes quiet, and a quiet log is
+    exactly what a healthy gateway looks like. The watch must survive a
+    raising sample, say so, and not say so every second forever."""
+    monkeypatch.setattr(gw, "_SAMPLE_S", 0.01)
+    watch, lines = _watch(_Client(_WS(_KeepAlive())))
+    calls = {"n": 0}
+    survived = threading.Event()
+
+    def _explode(now, reading):
+        calls["n"] += 1
+        if calls["n"] > 20:
+            survived.set()
+        raise RuntimeError("stamps went away")
+
+    monkeypatch.setattr(watch, "step", _explode)
+    try:
+        watch.start()
+        assert survived.wait(3.0), "the watch thread died on the first failure"
+        assert watch._thread is not None and watch._thread.is_alive()
+    finally:
+        watch.stop()
+    watch._thread.join(2.0)
+    # Said, but not twenty times.
+    assert 1 <= len(lines) <= 3
+    assert "sample failed (RuntimeError: stamps went away)" in lines[0]
+
+
+def test_a_log_that_itself_raises_cannot_take_the_watch_down():
+    """print() to a closed stdout during shutdown is the real instance."""
+    watch = gw.GatewayWatch(_Client(), log=lambda line: (_ for _ in ()).throw(ValueError("closed")))
+    watch._report_failure(RuntimeError("boom"))  # must not raise

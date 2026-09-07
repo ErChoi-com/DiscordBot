@@ -56,11 +56,16 @@ WINDOW_FLOOR_S = 10.0
 _SAMPLE_S = 1.0
 
 
-def silence_threshold(interval: float, floor: float) -> float:
-    """How long nothing may arrive before that is news, on this connection."""
+def silence_threshold(interval: float, fallback: float) -> float:
+    """How long nothing may arrive before that is news, on this connection.
+
+    `fallback` is used only when the interval is unknown. It does not bound
+    the result: a gateway that asks for a short interval must be judged on
+    that interval, or the watch would sleep through its silences.
+    """
     if interval and interval > 0:
         return max(1.0, interval * SILENCE_MARGIN)
-    return floor
+    return fallback
 
 
 def keepalive_of(client: Any) -> Any | None:
@@ -131,8 +136,12 @@ class GatewayWatch:
         self.silences: list[tuple[float, float]] = []  # (seconds, outstanding at start)
         self._silent_since: float | None = None
         self._silent_outstanding = 0.0
-        self._peak_recv = 0.0
         self._peak_outstanding = 0.0
+        # The receive gap *at the moment* the outstanding beat peaked, not the
+        # window's own largest gap. Independent maxima cannot answer the one
+        # question this exists for -- whether the socket was quiet while the
+        # ack was missing -- because they need not have happened together.
+        self._recv_at_peak = 0.0
         self._window_started: float | None = None
 
     def start(self) -> None:
@@ -146,8 +155,14 @@ class GatewayWatch:
 
     def _watch(self) -> None:
         while not self._stop.wait(_SAMPLE_S):
-            now = self._clock()
-            self.step(now, sample(keepalive_of(self.client), now))
+            try:
+                now = self._clock()
+                self.step(now, sample(keepalive_of(self.client), now))
+            except Exception as exc:
+                # A diagnostic that dies silently is worse than none: the log
+                # simply goes quiet and reads exactly like a healthy gateway.
+                # Say so once and carry on rather than losing the thread.
+                self._report_failure(exc)
 
     # One sample's worth of work, so that the whole watch can be driven a
     # tick at a time rather than by sleeping through it.
@@ -155,19 +170,35 @@ class GatewayWatch:
         if self._window_started is None:
             self._window_started = now
         if reading is not None:
-            self._peak_recv = max(self._peak_recv, reading["recv_gap"])
-            self._peak_outstanding = max(self._peak_outstanding, reading["outstanding"])
+            if reading["outstanding"] > self._peak_outstanding:
+                self._peak_outstanding = reading["outstanding"]
+                self._recv_at_peak = reading["recv_gap"]
             self._note_silence(reading, now)
         if now - self._window_started >= self.report_every:
             if self._peak_outstanding >= WINDOW_FLOOR_S:
+                # Read the two together: a receive gap as long as the wait
+                # means the ack was one of many frames that did not arrive,
+                # and a short one means the ack alone went missing while the
+                # socket was otherwise busy.
                 self._log(
-                    f"[gateway-watch] in the last {int(now - self._window_started)}s the longest "
-                    f"gap with nothing received was {self._peak_recv:.1f}s and the longest a beat "
-                    f"went unacked was {self._peak_outstanding:.1f}s"
+                    f"[gateway-watch] in the last {int(now - self._window_started)}s a beat went "
+                    f"unacked for {self._peak_outstanding:.1f}s, and at that moment nothing had "
+                    f"been received for {self._recv_at_peak:.1f}s"
                 )
-            self._peak_recv = 0.0
             self._peak_outstanding = 0.0
+            self._recv_at_peak = 0.0
             self._window_started = now
+
+    _failures = 0
+
+    def _report_failure(self, exc: BaseException) -> None:
+        """Say a sample failed, but do not say it every second forever."""
+        self._failures += 1
+        if self._failures <= 3:
+            try:
+                self._log(f"[gateway-watch] sample failed ({type(exc).__name__}: {exc})")
+            except Exception:
+                pass
 
     def _note_silence(self, reading: dict[str, float], now: float) -> None:
         """Open a silence when the socket goes quiet, close it when it speaks."""
