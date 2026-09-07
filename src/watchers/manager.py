@@ -152,6 +152,7 @@ def ats_fanout_cap(
     last_submitted: int,
     last_completed: int,
     growth: float = ATS_FANOUT_GROWTH,
+    min_tail: int | None = None,
 ) -> int:
     """How many of a platform's boards to ask this cycle.
 
@@ -173,24 +174,29 @@ def ats_fanout_cap(
       (fanout_capacity). Pessimistic on purpose; it is a first guess.
     - The last cycle was cut off: ask what it completed. That is a direct
       measurement of what the budget affords on this host against this
-      vendor today.
+      vendor today, and it overrides the floor: the floor assumes one request
+      per board, and a board on icims is a sitemap plus a page per posting.
+      Measured on the first capped cycle, icims completed 103 of the 600 the
+      floor had promised would fit. Only *min_tail* (one wave of the pool)
+      is kept under the ask, so discovery never stops entirely.
     - The last cycle finished everything it was given: ask for *growth* more,
       so a platform that fits keeps widening until it finds its edge.
 
-    Never below the head, never above the fleet, never below head plus floor.
-    The tail slice this leaves is still rotated by _rotate_tail, so a smaller
-    ask does not mean the same companies each cycle -- it means the whole
-    fleet is walked in more, shorter steps, each of which actually completes.
+    Never below the head, never above the fleet. The tail slice this leaves
+    is still rotated by _rotate_tail, so a smaller ask does not mean the same
+    companies each cycle -- it means the whole fleet is walked in more,
+    shorter steps, each of which actually completes.
     """
     fleet_size = max(0, int(fleet_size))
     head_size = max(0, min(int(head_size), fleet_size))
-    base = head_size + max(0, int(floor))
+    floor = max(0, int(floor))
+    min_tail = floor if min_tail is None else max(0, min(int(min_tail), floor))
     if last_submitted <= 0:
-        target = base
+        target = head_size + floor
     elif last_completed >= last_submitted:
-        target = max(base, math.ceil(last_completed * max(1.0, growth)))
+        target = max(head_size + floor, math.ceil(last_completed * max(1.0, growth)))
     else:
-        target = max(base, int(last_completed))
+        target = max(head_size + min_tail, int(last_completed))
     return max(head_size, min(target, fleet_size))
 
 
@@ -888,7 +894,9 @@ class WatcherManager:
             # Rotate the whole tail before slicing it: the rotation records
             # how far the last cycle got and resumes there, so the slice this
             # cycle asks is the one after the slice the last cycle finished.
+            # The head rotates only when a cycle was cut off inside it.
             tail = self._rotate_tail(platform, tail, len(head))
+            head = self._rotate_head(platform, head)
             fan = self._ats_last_fanout(platform)
             cap = self._fanout_cap(platform, len(fleet), len(head))
             ordered = head + tail[: max(0, cap - len(head))]
@@ -920,7 +928,43 @@ class WatcherManager:
         workers = ats_service.fanout_workers(platform, fleet_size)
         floor = ats_service.fanout_capacity(ATS_PLATFORM_FANOUT_BUDGET_S, workers)
         fan = self._ats_last_fanout(platform)
-        return ats_fanout_cap(fleet_size, head_size, floor, fan["submitted"], fan["completed"])
+        return ats_fanout_cap(
+            fleet_size, head_size, floor, fan["submitted"], fan["completed"],
+            min_tail=workers,
+        )
+
+    def _rotate_head(self, platform: str, head: list[str]) -> list[str]:
+        """`head`, resumed past the point a cut-off cycle reached inside it.
+
+        The head is asked first because it yields, and while it fits the
+        budget its order is immaterial and it is left alone. When it does not
+        fit -- icims, whose boards cost a sitemap and a page per posting,
+        completed 103 of a 150-board head -- the same 103 would be asked every
+        cycle and the other 47 never, which is the failure _rotate_tail exists
+        to prevent, one level up. So a cycle that stopped inside the head
+        moves the head's own cursor by what it completed, using the same
+        digest-order rotation, kept under its own key in the same state.
+        """
+        from services import ats_traversal
+
+        if not head:
+            return []
+        fan = self._ats_last_fanout(platform)
+        path = self._ats_rotation_state_path()
+        with _ATS_ROTATION_LOCK:
+            state = ats_traversal.load_state(path)
+            entry = state.setdefault("platforms", {}).setdefault(platform, {})
+            previous = ats_traversal.rotate(head, entry.get("head_digest"))
+            if fan["submitted"] <= 0 or fan["completed"] >= len(head):
+                # Nothing recorded, or the whole head was reached: stable.
+                return previous
+            cursor = ats_traversal.cursor_after(previous, fan["completed"])
+            if cursor is None:
+                return previous
+            entry["head_digest"] = cursor
+            entry["head_updated_at"] = datetime.now(timezone.utc).timestamp()
+            ats_traversal.save_state(path, state)
+            return ats_traversal.rotate(head, cursor)
 
     def _rotate_tail(self, platform: str, tail: list[str], head_size: int) -> list[str]:
         """`tail`, resumed from the point the previous cycle actually reached.

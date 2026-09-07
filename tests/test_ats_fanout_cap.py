@@ -186,7 +186,9 @@ def test_the_first_cycle_asks_the_head_and_one_floor_of_tail(monkeypatch, tmp_pa
     mgr = _manager(tmp_path, {1: {"enabled": True, "location": "Canada"}})
 
     asked = mgr._ordered_slugs("lever")
-    assert asked[:2] == ["c5", "c9"], "the preferred head, first and whole"
+    # The head's own order is the digest rotation (see _rotate_head); what
+    # matters here is that it is first and whole.
+    assert set(asked[:2]) == {"c5", "c9"}, "the preferred head, first and whole"
     assert len(asked) == 2 + one_worker
     assert len(set(asked)) == len(asked)
 
