@@ -34,6 +34,34 @@ FALLBACK_JOBSPY_SITES = [
     "zip_recruiter",
 ]
 CUSTOM_SCRAPER_SITES = {"glassdoor", "zip_recruiter", "greenhouse", "lever", "ashby", "workday", "icims", "bamboohr"}
+
+# Boards that list a single country or region. Asking one of them for a
+# location it does not serve costs a subprocess and its 90s timeout per keyword
+# variant and has never returned a row; measured in the archive, naukri, bdjobs
+# and bayt account for 0 of 4,046 rows and 10 of 29 timeouts in one run.
+# Sites absent from this map are treated as global. Only consulted when a
+# channel asked for "all" -- a site someone named explicitly is always asked.
+JOBSPY_SITE_COUNTRIES: dict[str, frozenset[str]] = {
+    "naukri": frozenset({"IN"}),
+    "bdjobs": frozenset({"BD"}),
+    "bayt": frozenset({"AE", "SA", "QA", "KW", "BH", "OM", "JO", "LB", "EG", "IQ", "MA", "TN", "DZ", "PK"}),
+}
+
+
+def sites_serving(sites: list[str], country: str | None) -> list[str]:
+    """`sites` minus the single-region boards that do not list `country`.
+
+    Order kept. A None/empty country (undecidable location) keeps every site
+    -- no evidence is not evidence of absence.
+    """
+    if not country:
+        return list(sites)
+    return [
+        site for site in sites
+        if site not in JOBSPY_SITE_COUNTRIES or country in JOBSPY_SITE_COUNTRIES[site]
+    ]
+
+
 JOBSPY_SITE_LABELS = {
     "all": "All supported sites",
     "bayt": "Bayt",
@@ -1916,6 +1944,20 @@ def scrape_job_postings(
 
     if not normalized_sites:
         return []
+
+    asked_for_all = not site_names or any(str(s).strip().lower() == "all" for s in site_names)
+    if asked_for_all:
+        from services.jba import geo_priority
+
+        country = geo_priority.country_of(location)
+        kept = sites_serving(normalized_sites, country)
+        if len(kept) != len(normalized_sites):
+            dropped = [site for site in normalized_sites if site not in kept]
+            print(
+                f"[jobs] {location!r} is in {country}; not asking "
+                f"{', '.join(dropped)} (single-region boards)"
+            )
+            normalized_sites = kept
 
     cache_key = (
         tuple(normalized_sites),
