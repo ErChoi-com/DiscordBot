@@ -113,3 +113,42 @@ def test_start_is_idempotent_per_process():
         first.stop()
 
     asyncio.run(_main())
+
+
+def test_busy_periods_below_the_stall_threshold_are_still_named():
+    """Many sub-threshold blocks -- each too short to be a stall -- still delay
+    everything queued behind them. The per-window histogram says where the
+    loop was on the ticks that ran late."""
+    lines: list[str] = []
+    watch = loop_watch.LoopWatch(stale_after=10, log=lines.append)
+    watch.late_after = 0.08
+    watch.report_every = 0.5
+
+    async def _main():
+        watch.start()
+        for _ in range(6):
+            _hold_the_loop_for(0.12)       # late, never a stall
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.7)           # let a report window close
+        watch.stop()
+
+    asyncio.run(_main())
+    reports = [l for l in lines if "ran late" in l]
+    assert reports, lines
+    assert "_hold_the_loop_for" in reports[0]
+    assert not any("has not ticked" in l for l in lines), "no stall: none of the blocks reached the threshold"
+    assert watch.late_windows and any("_hold_the_loop_for" in k for k in watch.late_windows[0])
+
+
+def test_a_quiet_window_prints_no_histogram():
+    lines: list[str] = []
+    watch = loop_watch.LoopWatch(stale_after=10, log=lines.append)
+    watch.report_every = 0.2
+
+    async def _main():
+        watch.start()
+        await asyncio.sleep(0.6)
+        watch.stop()
+
+    asyncio.run(_main())
+    assert lines == []
