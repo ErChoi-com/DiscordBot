@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import requests
@@ -155,6 +155,24 @@ SEMANTIC_PLUGIN_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"
 SEMANTIC_PLUGIN_THRESHOLD: float = 0.30
 SEMANTIC_MATCH_TARGET: str = "description"
 SEMANTIC_DESCRIPTION_CHAR_LIMIT: int = 2200
+# Texts per model call. Thirty candidates is a typical channel; the cap only
+# matters for the odd channel that asks for hundreds.
+SEMANTIC_ENCODE_BATCH: int = 32
+# How many CPU threads inference may use. torch defaults to every core and
+# the HF tokenizers to a pool of the same size, so one channel's filter
+# claimed all twelve and two channels' filters fought each other for them
+# alongside five hundred scrape threads: measured at 2,800s per channel for
+# about thirty short texts. MiniLM over thirty texts is well under a second
+# on four uncontended threads -- and with this bound, they are uncontended.
+SEMANTIC_INFERENCE_THREADS_MAX: int = 4
+# One inference at a time. The model already parallelises inside a call;
+# two channels calling it at once only thrash the same cores.
+_SEMANTIC_INFERENCE_LOCK = threading.Lock()
+
+
+def semantic_inference_threads() -> int:
+    """Threads for model inference: a third of the host, capped, never zero."""
+    return max(1, min(SEMANTIC_INFERENCE_THREADS_MAX, int(capacity.cpu_limit()) // 3))
 
 # ── Dedup FIFO constants (overridden at startup) ──────────────────────────────
 DEDUP_MAX_FIFO_FILES: int = 6
@@ -1372,13 +1390,18 @@ def build_site_scrape_code(
 
 
 def run_site_scrape_subprocess(python_executable: Path, site: str, code: str) -> list[dict[str, Any]]:
+    # Below normal priority: up to twelve of these run at once, each a fresh
+    # interpreter importing pandas, and they were contending on equal terms
+    # with the event loop and with interactive commands.
+    cmd, extra = platform_support.low_priority_popen_args([str(python_executable), "-c", code])
     try:
         proc = subprocess.run(
-            [str(python_executable), "-c", code],
+            cmd,
             capture_output=True,
             text=True,
             timeout=SUBPROCESS_SCRAPE_TIMEOUT,
             check=False,
+            **extra,
         )
     except subprocess.TimeoutExpired:
         print(f"Job site '{site}' timed out after {SUBPROCESS_SCRAPE_TIMEOUT}s; skipping variant")
@@ -2404,12 +2427,26 @@ def semantic_plugin_available() -> bool:
 def load_semantic_plugin_model() -> Any | None:
     if not semantic_plugin_available():
         return None
+    # Before the import: the tokenizers' thread pool is sized at import time.
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     try:
         from sentence_transformers import SentenceTransformer
-        return SentenceTransformer(SEMANTIC_PLUGIN_MODEL_NAME)
+        model = SentenceTransformer(SEMANTIC_PLUGIN_MODEL_NAME)
     except Exception as exc:
         print(f"Semantic plugin disabled (model load failed): {exc}")
         return None
+    _bound_inference_threads()
+    return model
+
+
+def _bound_inference_threads() -> None:
+    """Cap torch's intra-op pool; a missing or odd torch must not cost the model."""
+    try:
+        import torch
+
+        torch.set_num_threads(semantic_inference_threads())
+    except Exception:
+        pass
 
 
 def listing_text_for_semantic_match(job_data: dict[str, Any]) -> str:
@@ -2491,6 +2528,27 @@ def semantic_similarity_score_max(texts: list[str], search_text: str) -> float:
         return 1.0
 
 
+def _semantic_candidate_texts(job_data: dict[str, Any]) -> list[str] | None:
+    """The texts an item is judged on; None when it carries nothing to judge.
+
+    Description first, because a title alone produces false positives; the
+    title split into its chunks otherwise, so a long delimited title is
+    matched on its best part rather than on the whole.
+    """
+    listing_text = listing_text_for_semantic_match(job_data)
+    if not listing_text:
+        return None
+    title_text = title_text_for_semantic_match(job_data)
+    if SEMANTIC_MATCH_TARGET == "title" and title_text:
+        return _title_chunk_texts(title_text)
+    description_text = normalize_description_text(
+        job_data.get("description") or job_data.get("snippet") or job_data.get("summary") or job_data.get("job_description")
+    )
+    if description_text:
+        return [description_text]
+    return _title_chunk_texts(title_text or listing_text)
+
+
 def matches_search_parameters_semantic(
     job_data: dict[str, Any],
     keywords: str,
@@ -2498,22 +2556,82 @@ def matches_search_parameters_semantic(
     role_filters: list[str],
     threshold: float | None = None,
 ) -> bool:
-    listing_text = listing_text_for_semantic_match(job_data)
-    title_text = title_text_for_semantic_match(job_data)
-    description_text = normalize_description_text(
-        job_data.get("description") or job_data.get("snippet") or job_data.get("summary") or job_data.get("job_description")
-    )
+    """One item's verdict. The watcher judges a whole batch at once through
+    semantic_filter_items; this remains for callers with a single item."""
     search_text = search_text_for_semantic_match(keywords, location, role_filters)
-    if not listing_text or not search_text:
+    texts = _semantic_candidate_texts(job_data)
+    if not texts or not search_text:
         return True
-
     effective_threshold = SEMANTIC_PLUGIN_THRESHOLD if threshold is None else float(threshold)
-    if SEMANTIC_MATCH_TARGET == "title" and title_text:
-        return semantic_similarity_score_max(_title_chunk_texts(title_text), search_text) >= effective_threshold
-    if description_text:
-        # Prefer description-body semantics when available to avoid title-only false positives.
-        description_score = semantic_similarity_score(description_text, search_text)
-        return description_score >= effective_threshold
+    return semantic_similarity_score_max(texts, search_text) >= effective_threshold
 
-    # Fallback: no description — chunk the title for better coverage of long/delimited titles.
-    return semantic_similarity_score_max(_title_chunk_texts(title_text or listing_text), search_text) >= effective_threshold
+
+def semantic_filter_items(
+    items: list[dict[str, Any]],
+    keywords: str,
+    location: str,
+    role_filters: list[str],
+    threshold: float | Callable[[dict[str, Any]], float] | None = None,
+) -> list[dict[str, Any]]:
+    """The items whose best candidate text scores at least their threshold
+    against the search text -- judged in one model call for the whole batch.
+
+    Per item, the old path encoded the search text again and the item's
+    texts with it: for thirty candidates, thirty model calls, thirty
+    re-encodings of the same query, and thirty chances to queue behind the
+    other channel doing the same. Now the query is encoded once, every
+    candidate's texts go in the same batch, and cosine is a dot product over
+    normalised embeddings. Items with nothing to judge are kept, as before:
+    no evidence is not evidence against.
+
+    `threshold` may be a number or a callable of the item, so a caller can
+    hold different sources to different bars without a second pass. Each
+    kept item gets its score under "semantic_score" for anyone ranking later.
+    """
+    items = list(items)
+    search_text = search_text_for_semantic_match(keywords, location, role_filters)
+    if not items or not search_text:
+        return items
+
+    texts: list[str] = [search_text]
+    spans: list[tuple[int, int] | None] = []
+    for item in items:
+        candidates = _semantic_candidate_texts(item)
+        if not candidates:
+            spans.append(None)
+            continue
+        start = len(texts)
+        texts.extend(candidates)
+        spans.append((start, len(texts)))
+    if len(texts) == 1:
+        return items
+
+    model = load_semantic_plugin_model()
+    if model is None:
+        return items
+    try:
+        import numpy as np
+
+        with _SEMANTIC_INFERENCE_LOCK:
+            embeddings = np.asarray(
+                model.encode(texts, normalize_embeddings=True, batch_size=SEMANTIC_ENCODE_BATCH)
+            )
+        scores = embeddings[1:] @ embeddings[0]
+    except Exception as exc:
+        print(f"Semantic plugin scoring failed: {exc}")
+        return items
+
+    kept: list[dict[str, Any]] = []
+    for item, span in zip(items, spans):
+        if span is None:
+            kept.append(item)
+            continue
+        best = float(scores[span[0] - 1: span[1] - 1].max())
+        if callable(threshold):
+            bar = float(threshold(item))
+        else:
+            bar = SEMANTIC_PLUGIN_THRESHOLD if threshold is None else float(threshold)
+        item["semantic_score"] = round(best, 4)
+        if best >= bar:
+            kept.append(item)
+    return kept

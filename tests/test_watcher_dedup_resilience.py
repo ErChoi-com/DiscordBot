@@ -612,7 +612,7 @@ def test_job_watcher_records_seen_and_dedup_only_after_successful_send(tmp_path:
 
     monkeypatch.setattr(manager, "_channel_exists", _noop_channel_exists)
     monkeypatch.setattr(job_service, "scrape_job_postings", _fake_scrape)
-    monkeypatch.setattr(job_service, "matches_search_parameters_semantic", lambda *args, **kwargs: True)
+    monkeypatch.setattr(job_service, "semantic_filter_items", lambda items, *args, **kwargs: list(items))
 
     asyncio.run(_drive_one_job_watcher_iteration(manager, store, channel_id))
 
@@ -662,7 +662,7 @@ def test_job_watcher_does_not_record_seen_or_dedup_when_send_fails(tmp_path: Pat
 
     monkeypatch.setattr(manager, "_channel_exists", _noop_channel_exists)
     monkeypatch.setattr(job_service, "scrape_job_postings", _fake_scrape)
-    monkeypatch.setattr(job_service, "matches_search_parameters_semantic", lambda *args, **kwargs: True)
+    monkeypatch.setattr(job_service, "semantic_filter_items", lambda items, *args, **kwargs: list(items))
 
     asyncio.run(_drive_one_job_watcher_iteration(manager, store, channel_id))
 
@@ -720,7 +720,7 @@ def test_job_watcher_dedupes_duplicate_links_within_single_scrape_batch(tmp_path
 
     monkeypatch.setattr(manager, "_channel_exists", _noop_channel_exists)
     monkeypatch.setattr(job_service, "scrape_job_postings", _fake_scrape)
-    monkeypatch.setattr(job_service, "matches_search_parameters_semantic", lambda *args, **kwargs: True)
+    monkeypatch.setattr(job_service, "semantic_filter_items", lambda items, *args, **kwargs: list(items))
 
     asyncio.run(_drive_one_job_watcher_iteration(manager, store, channel_id))
 
@@ -774,7 +774,7 @@ def test_job_watcher_dedupes_canonical_link_variants_within_batch(tmp_path: Path
 
     monkeypatch.setattr(manager, "_channel_exists", _noop_channel_exists)
     monkeypatch.setattr(job_service, "scrape_job_postings", _fake_scrape)
-    monkeypatch.setattr(job_service, "matches_search_parameters_semantic", lambda *args, **kwargs: True)
+    monkeypatch.setattr(job_service, "semantic_filter_items", lambda items, *args, **kwargs: list(items))
 
     asyncio.run(_drive_one_job_watcher_iteration(manager, store, channel_id))
 

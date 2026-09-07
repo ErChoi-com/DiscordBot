@@ -683,33 +683,45 @@ class WatcherManager:
                 _sem_th = _safe_float(settings.get("semantic_threshold"), 0.30)
                 _ats_th = _safe_float(settings.get("ats_semantic_threshold"), _sem_th)
 
-                def _semantic_filter(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-                    # SentenceTransformer inference is CPU-bound and, on first call, loads
-                    # a model from disk -- run off the event loop so it can't freeze Discord
-                    # gateway/interaction handling (this previously ran inline in the
-                    # coroutine and stalled the whole bot for tens of seconds per scrape).
-                    return [
-                        item
-                        for item in candidates
-                        if job_service.matches_search_parameters_semantic(
-                            item,
-                            str(settings.get("keywords") or ""),
-                            str(settings.get("location") or ""),
-                            role_filters,
-                            threshold=_ats_th if _ats_set.intersection(item.get("sites") or []) else _sem_th,
-                        )
-                    ]
-
-                items = await self._tracked_to_thread(
-                    _semantic_filter, items, label=scheduler_labels.semantic_filter_label(channel_id)
-                )
-                filtered_count = len(items)
+                # Already-sent links leave before the model sees them, not
+                # after. A channel with a 24h window re-scrapes the same
+                # postings every refresh until they age out, and every one of
+                # them was re-embedded each time only to be dropped by the
+                # link check below. The model now only ever sees what is new.
                 seen = self.store.channel_job_seen.setdefault(channel_id, set())
                 batch_seen_links = {
                     job_service.canonicalize_job_link(str(link)) or str(link)
                     for link in seen
                     if str(link).strip()
                 }
+
+                def _unseen(item: dict[str, Any]) -> bool:
+                    raw_link = str(item.get("link") or "").strip()
+                    canonical = job_service.canonicalize_job_link(raw_link) or raw_link
+                    return bool(canonical) and canonical not in batch_seen_links
+
+                items = [item for item in items if _unseen(item)]
+
+                def _semantic_filter(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                    # SentenceTransformer inference is CPU-bound and, on first call, loads
+                    # a model from disk -- run off the event loop so it can't freeze Discord
+                    # gateway/interaction handling (this previously ran inline in the
+                    # coroutine and stalled the whole bot for tens of seconds per scrape).
+                    # One model call for the whole batch; see semantic_filter_items.
+                    return job_service.semantic_filter_items(
+                        candidates,
+                        str(settings.get("keywords") or ""),
+                        str(settings.get("location") or ""),
+                        role_filters,
+                        threshold=lambda item: (
+                            _ats_th if _ats_set.intersection(item.get("sites") or []) else _sem_th
+                        ),
+                    )
+
+                items = await self._tracked_to_thread(
+                    _semantic_filter, items, label=scheduler_labels.semantic_filter_label(channel_id)
+                )
+                filtered_count = len(items)
                 fresh: list[dict[str, Any]] = []
                 for item in reversed(items):
                     raw_link = str(item.get("link") or "").strip()
