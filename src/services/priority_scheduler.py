@@ -12,7 +12,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any, Callable, TypeVar
 
-from services import capacity
+from services import capacity, platform_support
 
 _T = TypeVar("_T")
 
@@ -215,6 +215,19 @@ class PriorityWorkScheduler:
             started = time.monotonic()
             with self._cv:
                 self._in_flight[task.seq] = (task.label, started)
+            # Background work runs below normal OS priority for as long as it
+            # holds this thread. The reservation above decides which task gets
+            # a worker; this decides which thread gets a core when all of them
+            # want one, which is the case a busy scrape creates and the one an
+            # interactive command and the event loop actually lose on. The
+            # reserved workers only ever carry interactive work and are never
+            # lowered, so on POSIX -- where a thread cannot be raised back --
+            # they keep their priority for good.
+            lowered = (
+                not reserved
+                and task.tier != INTERACTIVE
+                and platform_support.set_current_thread_background(True)
+            )
             try:
                 result = task.fn(*task.args, **task.kwargs)
             except BaseException as exc:  # noqa: BLE001 - propagate to the awaiting caller
@@ -222,6 +235,8 @@ class PriorityWorkScheduler:
             else:
                 task.future.set_result(result)
             finally:
+                if lowered:
+                    platform_support.set_current_thread_background(False)
                 if task.label is not None:
                     self._history_for(task.label).record(time.monotonic() - started)
                 with self._cv:

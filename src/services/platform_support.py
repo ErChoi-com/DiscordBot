@@ -35,6 +35,19 @@ SIGTERM = getattr(signal, "SIGTERM", 15)
 DETACHED_PROCESS = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
 
+# Scheduling priority for work the user is not waiting on. The scheduler
+# reserves *workers* for interactive commands, but a worker is not a core:
+# with twelve cores pinned by scrape threads, a reserved worker that has its
+# task still competes for the CPU with every one of them, and so does the
+# event loop that carries the Discord heartbeat. Priority is the layer the
+# reservation cannot reach.
+BELOW_NORMAL_PRIORITY_CLASS = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
+THREAD_PRIORITY_BELOW_NORMAL = -1
+THREAD_PRIORITY_NORMAL = 0
+# POSIX nice for background work: comfortably below 0 without reaching the
+# 19 that lets a busy foreground starve it entirely.
+BACKGROUND_NICE = 10
+
 
 def current_system() -> str:
     return platform.system()
@@ -741,6 +754,90 @@ def find_latex_executable(
         except OSError:
             continue
     return None
+
+
+def _kernel32():
+    """kernel32 with the thread-priority prototypes declared.
+
+    GetCurrentThread returns a pseudo-handle (-2). Left to ctypes' defaults it
+    comes back as a C int and goes out again as one, which on 64-bit Windows
+    is not the HANDLE the next call wants: SetThreadPriority then fails and
+    GetThreadPriority answers THREAD_PRIORITY_ERROR_RETURN, both silently.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    kernel32.GetCurrentThread.restype = wintypes.HANDLE
+    kernel32.GetCurrentThread.argtypes = []
+    kernel32.SetThreadPriority.restype = wintypes.BOOL
+    kernel32.SetThreadPriority.argtypes = [wintypes.HANDLE, ctypes.c_int]
+    kernel32.GetThreadPriority.restype = ctypes.c_int
+    kernel32.GetThreadPriority.argtypes = [wintypes.HANDLE]
+    return kernel32
+
+
+def set_current_thread_background(background: bool, system: str | None = None) -> bool:
+    """Run the calling thread below normal priority, or back at normal.
+
+    Returns whether the change took. Windows can move a thread both ways.
+    Linux threads are schedulable tasks with their own nice value, but an
+    unprivileged process may only ever *raise* nice, so the return trip fails
+    there and a worker that has run background work stays niced -- which is
+    the right outcome for a general worker, and why the scheduler never lowers
+    its reserved interactive workers in the first place.
+    """
+    if is_windows(system):
+        try:
+            kernel32 = _kernel32()
+            level = THREAD_PRIORITY_BELOW_NORMAL if background else THREAD_PRIORITY_NORMAL
+            return bool(kernel32.SetThreadPriority(kernel32.GetCurrentThread(), level))
+        except Exception:
+            return False
+    try:
+        import threading
+
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(),  # type: ignore[attr-defined]
+                       BACKGROUND_NICE if background else 0)
+        return True
+    except Exception:
+        return False
+
+
+def current_thread_priority(system: str | None = None) -> int | None:
+    """The calling thread's scheduling priority, in the OS's own units
+    (Windows: 0 normal, -1 below normal; POSIX: the nice value). None when
+    it cannot be read."""
+    if is_windows(system):
+        try:
+            kernel32 = _kernel32()
+            return int(kernel32.GetThreadPriority(kernel32.GetCurrentThread()))
+        except Exception:
+            return None
+    try:
+        import threading
+
+        return int(os.getpriority(os.PRIO_PROCESS, threading.get_native_id()))  # type: ignore[attr-defined]
+    except Exception:
+        return None
+
+
+def low_priority_popen_args(
+    cmd: list[str], system: str | None = None
+) -> tuple[list[str], dict[str, object]]:
+    """`cmd` plus the Popen kwargs that start it below normal priority.
+
+    Windows takes a creation flag. POSIX would take `preexec_fn`, but that is
+    documented unsafe in a process with threads, and this one runs hundreds;
+    prefixing `nice` costs one exec and is safe. Without a `nice` binary the
+    command runs at normal priority rather than not at all.
+    """
+    if is_windows(system):
+        return list(cmd), {"creationflags": BELOW_NORMAL_PRIORITY_CLASS}
+    nice = shutil.which("nice")
+    if not nice:
+        return list(cmd), {}
+    return [nice, "-n", str(BACKGROUND_NICE), *cmd], {}
 
 
 def profile_lock_paths(profile_path: str | Path) -> list[Path]:
