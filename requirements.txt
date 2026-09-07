@@ -1,5 +1,10 @@
 discord.py
 requests
+# Imported directly for the TLS context the ATS scrapers share
+# (ats_service._PreloadedTLSAdapter): one verified context per process
+# instead of one CA-bundle parse per connection. A dependency of requests
+# already; declared because it is now imported by name.
+urllib3
 curl_cffi
 pysocks
 playwright

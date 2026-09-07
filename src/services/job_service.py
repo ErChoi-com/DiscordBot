@@ -2610,13 +2610,13 @@ def semantic_filter_items(
     if model is None:
         return items
     try:
-        import numpy as np
-
         with _SEMANTIC_INFERENCE_LOCK:
-            embeddings = np.asarray(
-                model.encode(texts, normalize_embeddings=True, batch_size=SEMANTIC_ENCODE_BATCH)
-            )
-        scores = embeddings[1:] @ embeddings[0]
+            embeddings = model.encode(texts, normalize_embeddings=True, batch_size=SEMANTIC_ENCODE_BATCH)
+        # Normalised, so cosine is the dot product. Spelled out rather than
+        # through numpy: it is thirty rows of 384 floats, and numpy is a
+        # dependency of the optional model rather than of this module.
+        query = list(embeddings[0])
+        scores = [float(sum(x * y for x, y in zip(row, query))) for row in embeddings[1:]]
     except Exception as exc:
         print(f"Semantic plugin scoring failed: {exc}")
         return items
@@ -2626,7 +2626,7 @@ def semantic_filter_items(
         if span is None:
             kept.append(item)
             continue
-        best = float(scores[span[0] - 1: span[1] - 1].max())
+        best = max(scores[span[0] - 1: span[1] - 1])
         if callable(threshold):
             bar = float(threshold(item))
         else:
