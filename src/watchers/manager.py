@@ -124,6 +124,18 @@ def ats_cycle_timeout(platform_count: int, workers: int) -> int:
     waves = max(1, math.ceil(max(platform_count, 1) / max(workers, 1)))
     return min(waves * ATS_PLATFORM_TIMEOUT_S, ATS_CYCLE_TIMEOUT_CAP_S)
 
+def exception_text(exc: BaseException) -> str:
+    """A never-empty description of *exc*.
+
+    str() on a timeout is the empty string, so every place that logged or
+    recorded one produced a blank: the log read "timed out or errored: " with
+    nothing after the colon, and health recorded an error whose message was
+    falsy. Both readers then had to guess. Rendering goes through here so a
+    new call site cannot reintroduce it by writing the obvious str(exc).
+    """
+    return str(exc) or type(exc).__name__
+
+
 def ats_platform_slots(workers: int, reserved_interactive: int = 0) -> int:
     """How many ATS platforms may hold a scheduler worker at the same time.
 
@@ -1242,9 +1254,9 @@ class WatcherManager:
                     # raised after reaching 9,000 of 10,000 companies is a
                     # different failure from one that reached 12.
                     fan = self._ats_last_fanout(platform)
-                    print(f"[ats-scrape] {platform} error: {exc}")
+                    print(f"[ats-scrape] {platform} error: {exception_text(exc)}")
                     health_tracker.record_ats_platform_result(
-                        platform, 0, error=str(exc),
+                        platform, 0, error=exception_text(exc),
                         submitted=fan["submitted"], completed=fan["completed"],
                     )
                     return []
@@ -1264,11 +1276,12 @@ class WatcherManager:
                         # cycle failed but not how far it got.
                         fan = self._ats_last_fanout(platform)
                         print(
-                            f"[ats-scrape] {platform} timed out or errored: {exc} "
+                            f"[ats-scrape] {platform} timed out or errored: "
+                            f"{exception_text(exc)} "
                             f"({fan['completed']:,}/{fan['submitted']:,} companies reached)"
                         )
                         health_tracker.record_ats_platform_result(
-                            platform, 0, error=str(exc),
+                            platform, 0, error=exception_text(exc),
                             submitted=fan["submitted"], completed=fan["completed"],
                         )
                         return []

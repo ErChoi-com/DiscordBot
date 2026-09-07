@@ -247,9 +247,17 @@ class WatcherHealthTracker:
             ph.last_completed = completed
             ph.total_submitted += submitted
             ph.total_completed += completed
-        if error:
+        if error is not None:
+            # `is not None`, not truthiness. str() on a timeout is '' -- and
+            # asyncio.TimeoutError IS TimeoutError from 3.11 -- so an empty
+            # message took the success branch below: last_was_error stayed
+            # False, total_errors never moved, and consecutive_silent kept
+            # climbing. A fleet-wide timeout then rendered exactly like a quiet
+            # day, "0 scraped / 0 new" with no error marker anywhere. The one
+            # failure most worth seeing was the one that looked like nothing
+            # had happened.
             ph.total_errors += 1
-            ph.last_error = error[:120]
+            ph.last_error = (error or "(no message)")[:120]
             ph.last_was_error = True
         else:
             ph.last_job_count = job_count
