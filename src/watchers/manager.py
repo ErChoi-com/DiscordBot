@@ -1728,6 +1728,17 @@ class WatcherManager:
             loop_watch.start()
         except Exception as exc:
             print(f"[watchdog] loop watch unavailable ({exc})")
+        # And this one watches the other half. The loop can be ticking, the
+        # heartbeat can be going out on time, and the gateway can still report
+        # itself seconds behind -- because the ack never arrived. Only the
+        # receive side can say whether that is a socket with nothing on it or
+        # a socket whose one missing frame happens to be the ack.
+        try:
+            from services import gateway_watch
+
+            gateway_watch.start(self.client)
+        except Exception as exc:
+            print(f"[watchdog] gateway watch unavailable ({exc})")
 
     def start_job_watcher(self, channel_id: int) -> bool:
         existing = self.channel_job_tasks.get(channel_id)
