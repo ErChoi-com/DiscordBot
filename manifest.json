@@ -1,0 +1,82 @@
+{
+  "updated": "2026-09-08T09:39:42Z",
+  "sources": [
+    "https://index.commoncrawl.org",
+    "http://web.archive.org/cdx"
+  ],
+  "generator": "scripts/harvest_ats.py",
+  "files": {
+    "applicantpro.json": {
+      "sha256": "4bb61ffe821affbae282c572da5de92723cc94a23cf9851823a439ee4ffd813c",
+      "count": 1330
+    },
+    "ashby.json": {
+      "sha256": "eca4a2c7c0820c619c06800bd050f47c1d14da0dd9802abdb76aca863f33c519",
+      "count": 5301
+    },
+    "bamboohr.json": {
+      "sha256": "fb19d53156c62eb893a43157647a401de6f2bb9d9e84b5384cd0f80cd4a07415",
+      "count": 21233
+    },
+    "breezy.json": {
+      "sha256": "199e25b4598dc7c581211497028ce3d54ad84a3fbdd36cbb313bc524a5887f76",
+      "count": 3972
+    },
+    "greenhouse.json": {
+      "sha256": "3ff4097f033d622027cc24715ac22269d50972300fc9123cd9a228e7b36621cf",
+      "count": 13520
+    },
+    "icims.json": {
+      "sha256": "76d3459ed9ac7da6e6191a7042683069b31caebf1b3c69554ebeafaf3218b206",
+      "count": 8719
+    },
+    "jazzhr.json": {
+      "sha256": "663e3f795a8bde8e543b4e0cdaad316110df3f17035f89437080c8b6f1a3ae10",
+      "count": 2683
+    },
+    "jobvite.json": {
+      "sha256": "8206095558ad735f618426a397e9ebdee512c0f363197c5bb5eebafb0beac8aa",
+      "count": 1014
+    },
+    "lever.json": {
+      "sha256": "e90328b091a0e676551d80611bc03fbf8d7a2197da517f18c9bf9748252fccc7",
+      "count": 7741
+    },
+    "oracle.json": {
+      "sha256": "e1efbba29242965cf26a32b2ad32e3e5071ec465d7e5caf8002ae9141457879b",
+      "count": 2451
+    },
+    "paylocity.json": {
+      "sha256": "cdca524893eead4da3547df29e0ef0b0f90eff27fddfa1b033ff6c694dad5df0",
+      "count": 15914
+    },
+    "personio.json": {
+      "sha256": "1d5466196dc7adda95ed2e200facff5986419c3f7895443558df0c2105c836d6",
+      "count": 2318
+    },
+    "recruitee.json": {
+      "sha256": "07527ae280db101c95b64e7a3181ed00e53979e191a28084d72cfc895b50c632",
+      "count": 2580
+    },
+    "rippling.json": {
+      "sha256": "9a3926e535e4bf21ba2077da1abc40def2cfb535e11db3960cb03f1e9a7fda57",
+      "count": 1899
+    },
+    "smartrecruiters.json": {
+      "sha256": "1baa1dd9f8cd5f03292a791bb295a843a44db049d0452e758c5d2fdb23c2cae1",
+      "count": 1317
+    },
+    "teamtailor.json": {
+      "sha256": "422eb03e34d05618b20ed6dc7acfc8b7d86642d4d9f1625e0d3a79b2edc55e84",
+      "count": 2243
+    },
+    "workable.json": {
+      "sha256": "f46a526a6ec95d392e24cc758904eab32c9fd86b05e6ad88c8c319aeb1130a2f",
+      "count": 6838
+    },
+    "workday.json": {
+      "sha256": "f98ebcf3e05baa23dcf408aaf3cc0f8cb122b976232a0cb7ba394880e2776b83",
+      "count": 8820
+    }
+  }
+}
