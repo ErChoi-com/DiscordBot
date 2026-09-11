@@ -859,7 +859,22 @@ def _python_has_jobspy(executable: Path) -> bool:
         return False
 
 
+@lru_cache(maxsize=8)
 def jobspy_python_executable(configured_exe: str | None = None) -> Path | None:
+    """Which interpreter can run JobSpy. Cached, because finding out is not free.
+
+    Discovery costs up to twelve child processes: four `py -3.x` probes on
+    Windows plus an `import jobspy` check per candidate. That ran on EVERY
+    scrape -- once per channel per refresh -- and every one of those children
+    opened a console window. Six channels refreshing on their own timers meant
+    a steady drizzle of probe processes all day, re-deriving an answer that
+    cannot change while the bot runs.
+
+    Cached exactly like jobspy_runtime_metadata directly above, which already
+    made this same trade and calls this function. An interpreter installed or
+    removed mid-run is not picked up until restart, which is the same bargain
+    that one struck.
+    """
     candidates: list[Path] = []
 
     if configured_exe:
