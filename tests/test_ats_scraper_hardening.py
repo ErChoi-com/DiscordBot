@@ -370,6 +370,15 @@ def test_geo_index_loads_exactly_once_under_concurrency(monkeypatch):
     # names -- "Ontario" stops resolving to CA. The failure lands in whichever
     # test happens to run afterwards, which is why it has to be pinned here.
     monkeypatch.setattr(ats_service, "_geo_admin1_name", {})
+    # The retry backoff, reset for the same reason. _ensure_geo_loaded returns
+    # WITHOUT loading while _geo_failures is set and _geo_next_retry has not
+    # elapsed, so a real geo load that failed earlier in the session -- which is
+    # what happens whenever the live bot holds data/geo.db while the suite runs
+    # -- made this test count zero loads and fail. It passed alone, passed in
+    # this file, and failed only in a full run, which reads exactly like a
+    # regression somewhere else entirely.
+    monkeypatch.setattr(ats_service, "_geo_failures", 0)
+    monkeypatch.setattr(ats_service, "_geo_next_retry", 0.0)
     loads = {"n": 0}
     counter_lock = threading.Lock()
 
