@@ -149,3 +149,40 @@ def test_undecidable_location_keeps_every_site(monkeypatch):
     sent = calls[0]
     for site in ALL_SITES:
         assert site in sent
+
+
+# ---------------------------------------------------------------------------
+# "all" must mean every platform, including every ATS
+# ---------------------------------------------------------------------------
+
+def test_all_expands_to_every_ats_platform():
+    """`sites: ["all"]` must reach every ATS platform ats_service defines.
+
+    CUSTOM_SCRAPER_SITES was a hand-written literal naming six ATS platforms
+    long after ats_service had grown to eighteen, and normalize_requested_sites
+    filtered the expansion of "all" against it. The result was backwards: a
+    channel asking for everything got six ATS sources while a channel that
+    named none got all eighteen, so Oracle, Paylocity, SmartRecruiters,
+    Teamtailor, Recruitee and Workable were unreachable however it was set up.
+    """
+    from services.ats_service import ATS_PLATFORMS
+
+    resolved = set(job_service.normalize_requested_sites(["all"], None))
+    missing = set(ATS_PLATFORMS) - resolved
+
+    assert not missing, f"'all' does not reach these ATS platforms: {sorted(missing)}"
+
+
+def test_ats_platforms_are_never_routed_to_jobspy():
+    """An ATS platform must be scraped here, not handed to the JobSpy subprocess.
+
+    The same stale literal decided that split. Widening only the first filter
+    would have sent the twelve newly-reachable platforms to JobSpy, which has
+    no scraper for any of them, so both call sites share one derived set.
+    """
+    from services.ats_service import ATS_PLATFORMS
+
+    custom = job_service.custom_scraper_sites()
+    leaked = [site for site in ATS_PLATFORMS if site not in custom]
+
+    assert not leaked, f"these ATS platforms would be sent to JobSpy: {leaked}"

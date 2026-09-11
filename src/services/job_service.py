@@ -35,6 +35,27 @@ FALLBACK_JOBSPY_SITES = [
 ]
 CUSTOM_SCRAPER_SITES = {"glassdoor", "zip_recruiter", "greenhouse", "lever", "ashby", "workday", "icims", "bamboohr"}
 
+
+def custom_scraper_sites() -> set[str]:
+    """Every site this module scrapes itself instead of handing to JobSpy.
+
+    CUSTOM_SCRAPER_SITES is a hand-written literal and it fell behind: it named
+    six ATS platforms long after ats_service had grown to eighteen. The twelve
+    it omitted were then dropped by normalize_requested_sites, so a channel that
+    asked for "all" received FEWER sources than one that named none at all --
+    Oracle, Paylocity, SmartRecruiters, Teamtailor, Recruitee, Workable and the
+    rest were unreachable however a channel was configured. Worse, had they
+    survived that filter they would have been routed to JobSpy, which has no
+    scraper for them.
+
+    Derived from ATS_PLATFORMS rather than restated, so adding a platform
+    cannot silently make it unreachable again. Imported locally to match the
+    rest of this module, which never imports ats_service at module scope.
+    """
+    from services.ats_service import ATS_PLATFORMS
+
+    return set(CUSTOM_SCRAPER_SITES) | set(ATS_PLATFORMS)
+
 # Boards that list a single country or region. Asking one of them for a
 # location it does not serve costs a subprocess and its 90s timeout per keyword
 # variant and has never returned a row; measured in the archive, naukri, bdjobs
@@ -1193,7 +1214,7 @@ def normalize_requested_sites(site_names: list[str], configured_python_exe: str 
     if "all" in normalized_sites:
         normalized_sites = all_supported_job_sites(configured_python_exe)
 
-    custom_sites = set(CUSTOM_SCRAPER_SITES)
+    custom_sites = custom_scraper_sites()
     runtime_sites = set(jobspy_runtime_metadata(configured_python_exe).get("sites", ()))
     if runtime_sites:
         normalized_sites = [site for site in normalized_sites if site in runtime_sites or site in custom_sites]
@@ -2131,7 +2152,7 @@ def _scrape_filtered_rows_uncached(
     from services.ats_service import ATS_PLATFORMS as _ATS_PLATS_SET
     _ats_names = set(_ATS_PLATS_SET)
 
-    jobspy_sites = [site for site in normalized_sites if site not in CUSTOM_SCRAPER_SITES]
+    jobspy_sites = [site for site in normalized_sites if site not in custom_scraper_sites()]
     python_executable = jobspy_python_executable(configured_python_exe)
     if jobspy_sites and python_executable is not None:
         resolved_country_indeed = normalize_indeed_country(country_indeed, location)
