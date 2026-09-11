@@ -10,6 +10,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 
 @pytest.fixture(autouse=True)
+def _clear_jobspy_discovery_cache():
+    """jobspy_python_executable is lru_cached in production; tests must not be.
+
+    Caching it stopped every scrape re-probing `py -3.x` for an answer that
+    cannot change while the process lives. The cost lands on tests: any test
+    that asserts on the probe only sees it if it runs before the cache is warm,
+    so test_port_wiring's Linux case warmed it and the Windows case beside it
+    then asserted against a spawn list that stayed empty.
+
+    Cleared here rather than in that one file, for the reason the fixture below
+    gives: the protection must not depend on which file the next test lands in.
+    """
+    from services import job_service
+
+    job_service.jobspy_python_executable.cache_clear()
+    job_service.jobspy_runtime_metadata.cache_clear()
+    yield
+    job_service.jobspy_python_executable.cache_clear()
+    job_service.jobspy_runtime_metadata.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_resume_telemetry(tmp_path, monkeypatch):
     """Keep listing/cover telemetry and caches out of the real .resume_cache/.
 
