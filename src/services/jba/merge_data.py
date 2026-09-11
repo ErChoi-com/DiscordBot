@@ -15,6 +15,7 @@ import sqlite3
 import subprocess
 import threading
 import zipfile
+from services import platform_support
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -369,6 +370,7 @@ def _run_git(argv: list[str], *, context: str, timeout: int = 30) -> tuple[int, 
         result = subprocess.run(
             ["git", *argv], cwd=str(_repo_root()),
             capture_output=True, text=True, timeout=timeout,
+            **platform_support.no_window_kwargs(),
         )
     except Exception as exc:
         print(f"[jba-log] git {argv[0]} failed for {context}: {exc}")

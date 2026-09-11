@@ -17,6 +17,7 @@ import discord
 
 from config import AppConfig
 from services import job_service, reddit_service
+from services import platform_support
 from services.ats_service import ATS_PLATFORMS as _ATS_PLATFORMS, BAMBOOHR as _BAMBOOHR, scrape_ats_platform as _scrape_ats_platform
 from services.health import WatcherHealthTracker, compact_age
 from services.priority_scheduler import BACKGROUND, PriorityWorkScheduler
@@ -52,6 +53,7 @@ def _sync_geonames() -> bool:
         result = subprocess.run(
             [sys.executable, str(script)],
             capture_output=True, text=True, timeout=900,
+            **platform_support.no_window_kwargs(),
         )
     except Exception as exc:
         print(f"[geonames-sync] skipped: {exc}")
@@ -1158,6 +1160,7 @@ class WatcherManager:
                     [sys.executable, str(script)],
                     cwd=str(self.config.base_dir),
                     capture_output=True, text=True,
+                    **platform_support.no_window_kwargs(),
                 ).returncode
 
             rc = await self._tracked_to_thread(
@@ -1226,6 +1229,7 @@ class WatcherManager:
                      "--only-new-crawls",
                      "--total-budget-seconds", str(ATS_HARVEST_BUDGET_S)],
                     cwd=str(self.config.base_dir),
+                    **platform_support.no_window_kwargs(),
                     capture_output=True, text=True,
                 )
                 return proc.returncode, (proc.stdout or "").strip()
@@ -1288,6 +1292,7 @@ class WatcherManager:
                      "--total-budget-seconds", str(ATS_VALIDATION_BUDGET_S)],
                     cwd=str(self.config.base_dir),
                     capture_output=True, text=True,
+                    **platform_support.no_window_kwargs(),
                 )
                 return proc.returncode, (proc.stdout or "").strip()
 
@@ -1335,6 +1340,7 @@ class WatcherManager:
                     [sys.executable, str(script), "--days", "7"],
                     cwd=str(self.config.base_dir),
                     capture_output=True, text=True,
+                    **platform_support.no_window_kwargs(),
                 )
                 return proc.returncode, (proc.stdout or "").strip()
 

@@ -552,6 +552,7 @@ def _run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
 			stdin=subprocess.DEVNULL,  # same reason as _run_latex_command
 			timeout=15,
 			check=False,
+			**platform_support.no_window_kwargs(),
 		)
 	except subprocess.TimeoutExpired as exc:
 		return subprocess.CompletedProcess(
@@ -1107,6 +1108,7 @@ def _run_chktex(cwd: Path, tex_name: str, chktex_path: str) -> tuple[list[str], 
 			timeout=20,
 			check=False,
 			cwd=str(cwd),
+			**platform_support.no_window_kwargs(),
 		)
 	except (subprocess.TimeoutExpired, OSError):
 		return [], None
@@ -2261,6 +2263,7 @@ def _run_latex_command(command: list[str], cwd: Path) -> subprocess.CompletedPro
 			timeout=LATEX_ENGINE_TIMEOUT_SECONDS,
 			check=False,
 			cwd=str(cwd),
+			**platform_support.no_window_kwargs(),
 		)
 	except subprocess.TimeoutExpired as exc:
 		return subprocess.CompletedProcess(

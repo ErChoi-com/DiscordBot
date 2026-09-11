@@ -720,6 +720,7 @@ def jobspy_runtime_metadata(configured_exe: str | None = None) -> dict[str, tupl
             text=True,
             timeout=30,
             check=False,
+            **platform_support.no_window_kwargs(),
         )
     except Exception:
         proc = None
@@ -851,6 +852,7 @@ def _python_has_jobspy(executable: Path) -> bool:
             capture_output=True,
             timeout=15,
             check=False,
+            **platform_support.no_window_kwargs(),
         )
         return proc.returncode == 0
     except Exception:
@@ -877,6 +879,7 @@ def jobspy_python_executable(configured_exe: str | None = None) -> Path | None:
                 proc = subprocess.run(
                     ["py", f"-{minor}", "-c", "import sys; print(sys.executable)"],
                     capture_output=True, text=True, timeout=10, check=False,
+                    **platform_support.no_window_kwargs(),
                 )
                 if proc.returncode == 0 and proc.stdout.strip():
                     candidates.append(Path(proc.stdout.strip()))

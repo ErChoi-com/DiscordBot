@@ -42,6 +42,19 @@ CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x000
 # event loop that carries the Discord heartbeat. Priority is the layer the
 # reservation cannot reach.
 BELOW_NORMAL_PRIORITY_CLASS = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
+
+# Windows gives every child process its own console window unless told not to.
+# Every subprocess this bot starts is captured with capture_output or piped, so
+# not one of them has anything to show a user -- but a scrape cycle spawns a
+# JobSpy interpreter per site per keyword variant, LaTeX runs twice per resume,
+# and process discovery shells out to PowerShell, so the desktop fills with
+# black windows that steal focus while they live. CREATE_NO_WINDOW suppresses
+# the console without detaching the child, so stdout/stderr pipes still work.
+#
+# Mutually exclusive with DETACHED_PROCESS and CREATE_NEW_CONSOLE, so
+# spawn_detached deliberately does not use it: a detached child has no console
+# to begin with.
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 THREAD_PRIORITY_BELOW_NORMAL = -1
 THREAD_PRIORITY_NORMAL = 0
 # POSIX nice for background work: comfortably below 0 without reaching the
@@ -222,6 +235,7 @@ def _windows_chrome_processes(profile_dir: str) -> list[tuple[int, int | None]]:
              f"Where-Object {{ $_.CommandLine -like '*{profile_dir}*' }} | "
              "ForEach-Object { \"$($_.ProcessId),$($_.SessionId)\" }"],
             stderr=subprocess.DEVNULL, text=True, timeout=10,
+            **no_window_kwargs(),
         )
         return parse_pid_session_lines(out)
     except Exception:
@@ -234,6 +248,7 @@ def _windows_chrome_processes(profile_dir: str) -> list[tuple[int, int | None]]:
              f"name='chrome.exe' and commandline like '%{profile_dir}%'",
              "get", "processid,sessionid", "/format:csv"],
             stderr=subprocess.DEVNULL, text=True, timeout=10,
+            **no_window_kwargs(),
         )
     except Exception:
         return []
@@ -335,6 +350,7 @@ def _windows_cmdline_powershell(pid: int) -> str | None:
             ["powershell", "-NoProfile", "-Command",
              f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CommandLine"],
             stderr=subprocess.DEVNULL, text=True, timeout=10,
+            **no_window_kwargs(),
         ).strip()
         return out or None
     except Exception:
@@ -523,7 +539,10 @@ def terminate_process(
     POSIX escalates SIGTERM -> SIGKILL so Chrome can flush its cookie DB first;
     a profile killed mid-write is how stale SingletonLock artifacts appear."""
     if is_windows(system):
-        result = subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, text=True)
+        result = subprocess.run(
+            ["taskkill", "/F", "/PID", str(pid)],
+            capture_output=True, text=True, **no_window_kwargs(),
+        )
         if result.returncode == 0:
             return True, ""
         return False, (result.stderr or result.stdout or "").strip() or f"rc={result.returncode}"
@@ -822,6 +841,20 @@ def current_thread_priority(system: str | None = None) -> int | None:
         return None
 
 
+def no_window_kwargs(system: str | None = None) -> dict[str, object]:
+    """Popen/run kwargs that keep a child process from opening a console window.
+
+    Empty off Windows, where no console is created in the first place, so call
+    sites can spread this unconditionally instead of branching on the platform.
+
+    Only for children whose output is captured or piped. A child that is meant
+    to talk to a terminal would be silenced by this.
+    """
+    if not is_windows(system):
+        return {}
+    return {"creationflags": CREATE_NO_WINDOW}
+
+
 def low_priority_popen_args(
     cmd: list[str], system: str | None = None
 ) -> tuple[list[str], dict[str, object]]:
@@ -833,7 +866,11 @@ def low_priority_popen_args(
     command runs at normal priority rather than not at all.
     """
     if is_windows(system):
-        return list(cmd), {"creationflags": BELOW_NORMAL_PRIORITY_CLASS}
+        # Hidden as well as backgrounded: these are the most numerous children
+        # the bot starts, so they are the biggest source of console pop-ups.
+        return list(cmd), {
+            "creationflags": BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW
+        }
     nice = shutil.which("nice")
     if not nice:
         return list(cmd), {}
