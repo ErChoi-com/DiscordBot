@@ -379,7 +379,7 @@ def filter_new_listings(
             continue
         if collides(posted, batch_dates.get(base, set())):
             continue
-        if preferred.get((base, posted)) is not index:
+        if preferred.get((base, posted)) != index:
             continue
         batch_dates.setdefault(base, set()).add(posted)
         kept.append(job)
