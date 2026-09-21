@@ -273,7 +273,9 @@ def test_the_loop_snapshots_the_breaker_after_the_cycle():
     src = inspect.getsource(manager.WatcherManager._run_ats_scrape_loop)
     compact = " ".join(src.split())
     assert "set_ats_refusing(self._ats_refusing())" in compact
-    assert compact.index("asyncio.gather") < compact.index("set_ats_refusing")
+    # The gather moved into _gather_ats_platforms (the ATS slot gate); the
+    # ordering that matters is still "after every platform has run".
+    assert compact.index("_gather_ats_platforms(") < compact.index("set_ats_refusing")
 
 
 def test_a_checkout_without_the_breaker_reports_nothing_rather_than_raising():

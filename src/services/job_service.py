@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import requests
@@ -34,6 +34,55 @@ FALLBACK_JOBSPY_SITES = [
     "zip_recruiter",
 ]
 CUSTOM_SCRAPER_SITES = {"glassdoor", "zip_recruiter", "greenhouse", "lever", "ashby", "workday", "icims", "bamboohr"}
+
+
+def custom_scraper_sites() -> set[str]:
+    """Every site this module scrapes itself instead of handing to JobSpy.
+
+    CUSTOM_SCRAPER_SITES is a hand-written literal and it fell behind: it named
+    six ATS platforms long after ats_service had grown to eighteen. The twelve
+    it omitted were then dropped by normalize_requested_sites, so a channel that
+    asked for "all" received FEWER sources than one that named none at all --
+    Oracle, Paylocity, SmartRecruiters, Teamtailor, Recruitee, Workable and the
+    rest were unreachable however a channel was configured. Worse, had they
+    survived that filter they would have been routed to JobSpy, which has no
+    scraper for them.
+
+    Derived from ATS_PLATFORMS rather than restated, so adding a platform
+    cannot silently make it unreachable again. Imported locally to match the
+    rest of this module, which never imports ats_service at module scope.
+    """
+    from services.ats_service import ATS_PLATFORMS
+
+    return set(CUSTOM_SCRAPER_SITES) | set(ATS_PLATFORMS)
+
+# Boards that list a single country or region. Asking one of them for a
+# location it does not serve costs a subprocess and its 90s timeout per keyword
+# variant and has never returned a row; measured in the archive, naukri, bdjobs
+# and bayt account for 0 of 4,046 rows and 10 of 29 timeouts in one run.
+# Sites absent from this map are treated as global. Only consulted when a
+# channel asked for "all" -- a site someone named explicitly is always asked.
+JOBSPY_SITE_COUNTRIES: dict[str, frozenset[str]] = {
+    "naukri": frozenset({"IN"}),
+    "bdjobs": frozenset({"BD"}),
+    "bayt": frozenset({"AE", "SA", "QA", "KW", "BH", "OM", "JO", "LB", "EG", "IQ", "MA", "TN", "DZ", "PK"}),
+}
+
+
+def sites_serving(sites: list[str], country: str | None) -> list[str]:
+    """`sites` minus the single-region boards that do not list `country`.
+
+    Order kept. A None/empty country (undecidable location) keeps every site
+    -- no evidence is not evidence of absence.
+    """
+    if not country:
+        return list(sites)
+    return [
+        site for site in sites
+        if site not in JOBSPY_SITE_COUNTRIES or country in JOBSPY_SITE_COUNTRIES[site]
+    ]
+
+
 JOBSPY_SITE_LABELS = {
     "all": "All supported sites",
     "bayt": "Bayt",
@@ -127,6 +176,36 @@ SEMANTIC_PLUGIN_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"
 SEMANTIC_PLUGIN_THRESHOLD: float = 0.30
 SEMANTIC_MATCH_TARGET: str = "description"
 SEMANTIC_DESCRIPTION_CHAR_LIMIT: int = 2200
+# Texts per model call. Thirty candidates is a typical channel; the cap only
+# matters for the odd channel that asks for hundreds.
+SEMANTIC_ENCODE_BATCH: int = 32
+# How many CPU threads inference may use. torch defaults to every core and
+# the HF tokenizers to a pool of the same size, so one channel's filter
+# claimed all twelve and two channels' filters fought each other for them
+# alongside five hundred scrape threads: measured at 2,800s per channel for
+# about thirty short texts. MiniLM over thirty texts is well under a second
+# on four uncontended threads -- and with this bound, they are uncontended.
+SEMANTIC_INFERENCE_THREADS_MAX: int = 4
+# One inference at a time. The model already parallelises inside a call;
+# two channels calling it at once only thrash the same cores.
+_SEMANTIC_INFERENCE_LOCK = threading.Lock()
+
+
+def semantic_inference_threads() -> int:
+    """Threads for model inference: a third of the host, capped, never zero."""
+    return max(1, min(SEMANTIC_INFERENCE_THREADS_MAX, int(capacity.cpu_limit()) // 3))
+
+
+def semantic_encode_batch() -> int:
+    """Texts per encode call: memory-proportional, not just CPU-proportional.
+
+    Thirty-odd short strings through MiniLM is nothing on the 16 GB box this
+    was tuned on, but on a 1 GB VPS -- where the scrape pools are already
+    competing for that memory -- the same batch is a real allocation. This is
+    local torch work, not a politeness ceiling, so it is one of the pools
+    allowed to scale up on bigger hardware too.
+    """
+    return capacity.workers(SEMANTIC_ENCODE_BATCH, minimum=4, maximum=128)
 
 # ── Dedup FIFO constants (overridden at startup) ──────────────────────────────
 DEDUP_MAX_FIFO_FILES: int = 6
@@ -641,6 +720,7 @@ def jobspy_runtime_metadata(configured_exe: str | None = None) -> dict[str, tupl
             text=True,
             timeout=30,
             check=False,
+            **platform_support.no_window_kwargs(),
         )
     except Exception:
         proc = None
@@ -772,13 +852,29 @@ def _python_has_jobspy(executable: Path) -> bool:
             capture_output=True,
             timeout=15,
             check=False,
+            **platform_support.no_window_kwargs(),
         )
         return proc.returncode == 0
     except Exception:
         return False
 
 
+@lru_cache(maxsize=8)
 def jobspy_python_executable(configured_exe: str | None = None) -> Path | None:
+    """Which interpreter can run JobSpy. Cached, because finding out is not free.
+
+    Discovery costs up to twelve child processes: four `py -3.x` probes on
+    Windows plus an `import jobspy` check per candidate. That ran on EVERY
+    scrape -- once per channel per refresh -- and every one of those children
+    opened a console window. Six channels refreshing on their own timers meant
+    a steady drizzle of probe processes all day, re-deriving an answer that
+    cannot change while the bot runs.
+
+    Cached exactly like jobspy_runtime_metadata directly above, which already
+    made this same trade and calls this function. An interpreter installed or
+    removed mid-run is not picked up until restart, which is the same bargain
+    that one struck.
+    """
     candidates: list[Path] = []
 
     if configured_exe:
@@ -798,6 +894,7 @@ def jobspy_python_executable(configured_exe: str | None = None) -> Path | None:
                 proc = subprocess.run(
                     ["py", f"-{minor}", "-c", "import sys; print(sys.executable)"],
                     capture_output=True, text=True, timeout=10, check=False,
+                    **platform_support.no_window_kwargs(),
                 )
                 if proc.returncode == 0 and proc.stdout.strip():
                     candidates.append(Path(proc.stdout.strip()))
@@ -1135,7 +1232,7 @@ def normalize_requested_sites(site_names: list[str], configured_python_exe: str 
     if "all" in normalized_sites:
         normalized_sites = all_supported_job_sites(configured_python_exe)
 
-    custom_sites = set(CUSTOM_SCRAPER_SITES)
+    custom_sites = custom_scraper_sites()
     runtime_sites = set(jobspy_runtime_metadata(configured_python_exe).get("sites", ()))
     if runtime_sites:
         normalized_sites = [site for site in normalized_sites if site in runtime_sites or site in custom_sites]
@@ -1344,13 +1441,18 @@ def build_site_scrape_code(
 
 
 def run_site_scrape_subprocess(python_executable: Path, site: str, code: str) -> list[dict[str, Any]]:
+    # Below normal priority: up to twelve of these run at once, each a fresh
+    # interpreter importing pandas, and they were contending on equal terms
+    # with the event loop and with interactive commands.
+    cmd, extra = platform_support.low_priority_popen_args([str(python_executable), "-c", code])
     try:
         proc = subprocess.run(
-            [str(python_executable), "-c", code],
+            cmd,
             capture_output=True,
             text=True,
             timeout=SUBPROCESS_SCRAPE_TIMEOUT,
             check=False,
+            **extra,
         )
     except subprocess.TimeoutExpired:
         print(f"Job site '{site}' timed out after {SUBPROCESS_SCRAPE_TIMEOUT}s; skipping variant")
@@ -1917,6 +2019,20 @@ def scrape_job_postings(
     if not normalized_sites:
         return []
 
+    asked_for_all = not site_names or any(str(s).strip().lower() == "all" for s in site_names)
+    if asked_for_all:
+        from services.jba import geo_priority
+
+        country = geo_priority.country_of(location)
+        kept = sites_serving(normalized_sites, country)
+        if len(kept) != len(normalized_sites):
+            dropped = [site for site in normalized_sites if site not in kept]
+            print(
+                f"[jobs] {location!r} is in {country}; not asking "
+                f"{', '.join(dropped)} (single-region boards)"
+            )
+            normalized_sites = kept
+
     cache_key = (
         tuple(normalized_sites),
         keywords,
@@ -2054,7 +2170,7 @@ def _scrape_filtered_rows_uncached(
     from services.ats_service import ATS_PLATFORMS as _ATS_PLATS_SET
     _ats_names = set(_ATS_PLATS_SET)
 
-    jobspy_sites = [site for site in normalized_sites if site not in CUSTOM_SCRAPER_SITES]
+    jobspy_sites = [site for site in normalized_sites if site not in custom_scraper_sites()]
     python_executable = jobspy_python_executable(configured_python_exe)
     if jobspy_sites and python_executable is not None:
         resolved_country_indeed = normalize_indeed_country(country_indeed, location)
@@ -2362,12 +2478,26 @@ def semantic_plugin_available() -> bool:
 def load_semantic_plugin_model() -> Any | None:
     if not semantic_plugin_available():
         return None
+    # Before the import: the tokenizers' thread pool is sized at import time.
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     try:
         from sentence_transformers import SentenceTransformer
-        return SentenceTransformer(SEMANTIC_PLUGIN_MODEL_NAME)
+        model = SentenceTransformer(SEMANTIC_PLUGIN_MODEL_NAME)
     except Exception as exc:
         print(f"Semantic plugin disabled (model load failed): {exc}")
         return None
+    _bound_inference_threads()
+    return model
+
+
+def _bound_inference_threads() -> None:
+    """Cap torch's intra-op pool; a missing or odd torch must not cost the model."""
+    try:
+        import torch
+
+        torch.set_num_threads(semantic_inference_threads())
+    except Exception:
+        pass
 
 
 def listing_text_for_semantic_match(job_data: dict[str, Any]) -> str:
@@ -2449,6 +2579,27 @@ def semantic_similarity_score_max(texts: list[str], search_text: str) -> float:
         return 1.0
 
 
+def _semantic_candidate_texts(job_data: dict[str, Any]) -> list[str] | None:
+    """The texts an item is judged on; None when it carries nothing to judge.
+
+    Description first, because a title alone produces false positives; the
+    title split into its chunks otherwise, so a long delimited title is
+    matched on its best part rather than on the whole.
+    """
+    listing_text = listing_text_for_semantic_match(job_data)
+    if not listing_text:
+        return None
+    title_text = title_text_for_semantic_match(job_data)
+    if SEMANTIC_MATCH_TARGET == "title" and title_text:
+        return _title_chunk_texts(title_text)
+    description_text = normalize_description_text(
+        job_data.get("description") or job_data.get("snippet") or job_data.get("summary") or job_data.get("job_description")
+    )
+    if description_text:
+        return [description_text]
+    return _title_chunk_texts(title_text or listing_text)
+
+
 def matches_search_parameters_semantic(
     job_data: dict[str, Any],
     keywords: str,
@@ -2456,22 +2607,85 @@ def matches_search_parameters_semantic(
     role_filters: list[str],
     threshold: float | None = None,
 ) -> bool:
-    listing_text = listing_text_for_semantic_match(job_data)
-    title_text = title_text_for_semantic_match(job_data)
-    description_text = normalize_description_text(
-        job_data.get("description") or job_data.get("snippet") or job_data.get("summary") or job_data.get("job_description")
-    )
+    """One item's verdict. The watcher judges a whole batch at once through
+    semantic_filter_items; this remains for callers with a single item."""
     search_text = search_text_for_semantic_match(keywords, location, role_filters)
-    if not listing_text or not search_text:
+    texts = _semantic_candidate_texts(job_data)
+    if not texts or not search_text:
         return True
-
     effective_threshold = SEMANTIC_PLUGIN_THRESHOLD if threshold is None else float(threshold)
-    if SEMANTIC_MATCH_TARGET == "title" and title_text:
-        return semantic_similarity_score_max(_title_chunk_texts(title_text), search_text) >= effective_threshold
-    if description_text:
-        # Prefer description-body semantics when available to avoid title-only false positives.
-        description_score = semantic_similarity_score(description_text, search_text)
-        return description_score >= effective_threshold
+    return semantic_similarity_score_max(texts, search_text) >= effective_threshold
 
-    # Fallback: no description — chunk the title for better coverage of long/delimited titles.
-    return semantic_similarity_score_max(_title_chunk_texts(title_text or listing_text), search_text) >= effective_threshold
+
+def semantic_filter_items(
+    items: list[dict[str, Any]],
+    keywords: str,
+    location: str,
+    role_filters: list[str],
+    threshold: float | Callable[[dict[str, Any]], float] | None = None,
+) -> list[dict[str, Any]]:
+    """The items whose best candidate text scores at least their threshold
+    against the search text -- judged in one model call for the whole batch.
+
+    Per item, the old path encoded the search text again and the item's
+    texts with it: for thirty candidates, thirty model calls, thirty
+    re-encodings of the same query, and thirty chances to queue behind the
+    other channel doing the same. Now the query is encoded once, every
+    candidate's texts go in the same batch, and cosine is a dot product over
+    normalised embeddings. Items with nothing to judge are kept, as before:
+    no evidence is not evidence against.
+
+    `threshold` may be a number or a callable of the item, so a caller can
+    hold different sources to different bars without a second pass. Each
+    kept item gets its score under "semantic_score" for anyone ranking later.
+    """
+    items = list(items)
+    search_text = search_text_for_semantic_match(keywords, location, role_filters)
+    if not items or not search_text:
+        return items
+
+    texts: list[str] = [search_text]
+    spans: list[tuple[int, int] | None] = []
+    for item in items:
+        candidates = _semantic_candidate_texts(item)
+        if not candidates:
+            spans.append(None)
+            continue
+        start = len(texts)
+        texts.extend(candidates)
+        spans.append((start, len(texts)))
+    if len(texts) == 1:
+        return items
+
+    model = load_semantic_plugin_model()
+    if model is None:
+        return items
+    try:
+        # Sized before the lock is taken: it reads the host's memory, which is
+        # no business of the one call at a time this lock exists to enforce.
+        batch = semantic_encode_batch()
+        with _SEMANTIC_INFERENCE_LOCK:
+            embeddings = model.encode(texts, normalize_embeddings=True, batch_size=batch)
+        # Normalised, so cosine is the dot product. Spelled out rather than
+        # through numpy: it is thirty rows of 384 floats, and numpy is a
+        # dependency of the optional model rather than of this module.
+        query = list(embeddings[0])
+        scores = [float(sum(x * y for x, y in zip(row, query))) for row in embeddings[1:]]
+    except Exception as exc:
+        print(f"Semantic plugin scoring failed: {exc}")
+        return items
+
+    kept: list[dict[str, Any]] = []
+    for item, span in zip(items, spans):
+        if span is None:
+            kept.append(item)
+            continue
+        best = max(scores[span[0] - 1: span[1] - 1])
+        if callable(threshold):
+            bar = float(threshold(item))
+        else:
+            bar = SEMANTIC_PLUGIN_THRESHOLD if threshold is None else float(threshold)
+        item["semantic_score"] = round(best, 4)
+        if best >= bar:
+            kept.append(item)
+    return kept

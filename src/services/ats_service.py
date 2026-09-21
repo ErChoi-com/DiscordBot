@@ -169,6 +169,120 @@ def _make_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
     return h
 
 
+_HTTP_LOCAL = threading.local()
+
+# Per worker thread: how many hosts' connection pools are kept, and how many
+# connections each may hold. See _http for the measurement behind them.
+HTTP_POOL_HOSTS_PER_THREAD = 2
+HTTP_POOL_PER_HOST = 2
+
+
+class _PreloadedTLSAdapter(requests.adapters.HTTPAdapter):
+    """An HTTPS adapter that verifies with one CA store loaded once.
+
+    requests hands urllib3 the CA-bundle *path* for every connection
+    (cert_verify sets conn.ca_certs), and urllib3 then creates a fresh
+    SSLContext and parses the whole bundle inside ssl_wrap_socket -- per
+    connection, not per Session. A pooled Session only helps hosts we
+    reconnect to, and most ATS platforms are one host per company. The
+    py-spy dump's 166 threads in ssl_wrap_socket were this line.
+
+    So the pool is given one context, verified against the same default
+    bundle, and the per-connection path is withheld when verification is the
+    default. An explicit bundle (verify="/path", or REQUESTS_CA_BUNDLE, which
+    requests turns into a path) still reaches urllib3 unchanged.
+    """
+
+    _context: Any = None
+    _context_lock = threading.Lock()
+
+    @classmethod
+    def context(cls) -> Any:
+        with cls._context_lock:
+            if cls._context is None:
+                from urllib3.util.ssl_ import create_urllib3_context
+
+                ctx = create_urllib3_context()
+                ctx.load_verify_locations(requests.utils.DEFAULT_CA_BUNDLE_PATH)
+                cls._context = ctx
+            return cls._context
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):  # type: ignore[override]
+        pool_kwargs.setdefault("ssl_context", self.context())
+        return super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+    def cert_verify(self, conn, url, verify, cert):  # type: ignore[override]
+        super().cert_verify(conn, url, verify, cert)
+        if verify is True:
+            # Verification stays on (cert_reqs is still CERT_REQUIRED); the
+            # store that does it is the preloaded context's, not a reload.
+            conn.ca_certs = None
+            conn.ca_cert_dir = None
+
+
+def _http() -> requests.Session:
+    """The calling thread's requests.Session, created on first use.
+
+    A bare requests.get builds a Session, an adapter and an SSLContext -- and
+    reloads the CA bundle -- for every call, then throws them away. A py-spy
+    dump of the live bot found 166 of 541 threads inside ssl_wrap_socket for
+    exactly that reason. One Session per worker thread keeps the context and
+    the pooled connections for the life of the thread; per thread rather than
+    one shared Session so no lock sits in front of every fetch and so a
+    thread's connection pool is only ever used by that thread.
+    """
+    session = getattr(_HTTP_LOCAL, "session", None)
+    if session is None:
+        session = requests.Session()
+        # Two host pools of two connections, not requests' ten of ten. A
+        # worker thread makes one request at a time, and on most platforms
+        # every company is its own host, so a wider pool only keeps idle
+        # keep-alive connections open to hosts the thread will never ask
+        # again. Measured at the start of a fan-out: 1,161 established TCP
+        # connections from this process, and the gateway's heartbeat ack
+        # arriving ~42s late while the loop itself was clear -- the shape of
+        # a packet lost under that load and retransmitted with backoff. Two,
+        # so a scraper that alternates between a board host and a detail host
+        # keeps both; the previous host's connection closes as it moves on.
+        session.mount("https://", _PreloadedTLSAdapter(
+            pool_connections=HTTP_POOL_HOSTS_PER_THREAD, pool_maxsize=HTTP_POOL_PER_HOST))
+        session.mount("http://", requests.adapters.HTTPAdapter(
+            pool_connections=HTTP_POOL_HOSTS_PER_THREAD, pool_maxsize=HTTP_POOL_PER_HOST))
+        _configure_from_environment(session)
+        _HTTP_LOCAL.session = session
+    return session
+
+
+def _configure_from_environment(session: requests.Session) -> None:
+    """Read the proxy and CA environment once, for the life of the Session.
+
+    With trust_env on, requests consults the environment on every request:
+    on Windows that is a registry walk for proxy settings plus a ~/.netrc
+    lookup per call, both of which showed up in the live profile beside the
+    TLS work. Nothing about the environment changes between two fetches from
+    the same worker thread, so it is captured here instead. What is kept:
+    HTTP(S)_PROXY / ALL_PROXY, and REQUESTS_CA_BUNDLE or CURL_CA_BUNDLE. What
+    is given up: per-URL NO_PROXY matching and netrc credentials, neither of
+    which any ATS vendor is reached through.
+    """
+    session.trust_env = False
+    proxies = requests.utils.getproxies()
+    if proxies:
+        session.proxies.update(proxies)
+    bundle = os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("CURL_CA_BUNDLE")
+    if bundle:
+        session.verify = bundle
+
+
+def _http_get(url: str, **kwargs: Any) -> requests.Response:
+    """GET through the thread's Session. The one seam tests stub for HTTP."""
+    return _http().get(url, **kwargs)
+
+
+def _http_post(url: str, **kwargs: Any) -> requests.Response:
+    return _http().post(url, **kwargs)
+
+
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 _JBA_DIR = _DATA_DIR / "ats_companies"
 _DEAD_SLUG_DIR = _DATA_DIR / "dead_slugs"
@@ -266,11 +380,26 @@ def _company_entry(entry: Any) -> str:
     return str(entry or "").strip()
 
 
+_company_cache_lock = threading.Lock()
+
+
 def load_company_lists() -> dict[str, list[str]]:
     global _company_cache
     if _company_cache is not None:
         return _company_cache
+    # One loader at a time, and a second check inside: the ATS cycle hands
+    # every platform to its own thread at once, and on a cold cache each of
+    # them parsed all 135k slugs from disk independently -- five identical
+    # "+5333 companies from local harvest" lines interleaved in the log, five
+    # copies of the fleet in memory until the last writer won.
+    with _company_cache_lock:
+        if _company_cache is not None:
+            return _company_cache
+        _company_cache = _load_company_lists_uncached()
+        return _company_cache
 
+
+def _load_company_lists_uncached() -> dict[str, list[str]]:
     cache: dict[str, list[str]] = {}
     for platform, filename in _PLATFORM_FILES.items():
         path = _JBA_DIR / filename
@@ -328,8 +457,7 @@ def load_company_lists() -> dict[str, list[str]]:
             " Run: python sync_ats_companies.py"
         )
 
-    _company_cache = cache
-    return _company_cache
+    return cache
 
 
 def _load_dead_slugs(platform: str) -> set[str]:
@@ -903,6 +1031,39 @@ def _fanout_budget(count: int, workers: int) -> float:
     return REQUEST_TIMEOUT * (waves + 1)
 
 
+def fanout_capacity(budget_s: float, workers: int) -> int:
+    """How many fetches `workers` are guaranteed to drain inside *budget_s*.
+
+    The inverse of _fanout_budget, and the only place the two are related:
+    _fanout_budget says how long a count would take in the worst case, this
+    says how large a count that same worst case lets a budget afford. It is
+    deliberately pessimistic -- every fetch spending its whole REQUEST_TIMEOUT
+    -- because it is used as a floor for the first cycle on a platform that
+    has not reported yet, and a floor that could overrun is not a floor.
+    Never less than one wave: a budget too small for a single round still
+    gets to ask one.
+    """
+    waves = int(max(budget_s, 0) // REQUEST_TIMEOUT) - 1
+    return max(1, workers) * max(1, waves)
+
+
+def fanout_workers(platform: str, fleet_size: int) -> int:
+    """The pool width scrape_ats_platform actually runs *platform* at.
+
+    One definition, read by the scrape and by whoever sizes the fleet handed
+    to it, so the two cannot drift: a caller that assumed the nominal
+    PLATFORM_WORKERS while the pool had been scaled down for the host would
+    hand over more than the pool can drain. capacity.workers scales the tuned
+    ceiling down on small hardware and never up, since these values are also
+    politeness limits per platform. minimum=2, not 4: the manager fans several
+    platforms out concurrently, so this floor is paid once per platform.
+    """
+    return max(1, min(
+        capacity.workers(PLATFORM_WORKERS.get(platform, 10), minimum=2),
+        max(int(fleet_size), 1),
+    ))
+
+
 def _collect_results(futures: dict, timeout: float | None) -> dict:
     """Drain a {future: key} map into {key: result}, bounded by *timeout*.
 
@@ -950,7 +1111,7 @@ def _scrape_greenhouse(slug: str, keywords: str, location: str, max_jobs: int) -
     resp = None
     for attempt in range(3):
         try:
-            resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp = _http_get(url, headers=headers, timeout=REQUEST_TIMEOUT)
         except Exception:
             return []
         if resp.status_code == 200:
@@ -972,7 +1133,11 @@ def _scrape_greenhouse(slug: str, keywords: str, location: str, max_jobs: int) -
         return []
 
     rows: list[dict[str, Any]] = []
-    for job in data.get("jobs") or []:
+    # Before the loop, because the loop converts every body to text.
+    fresh = _fresh_only(GREENHOUSE, slug, [j for j in (data.get("jobs") or []) if isinstance(j, dict)],
+                        lambda j: j.get("absolute_url"),
+                        lambda j: j.get("first_published") or j.get("updated_at"))
+    for job in fresh:
         title = str(job.get("title") or "").strip()
         if not title:
             continue
@@ -1005,6 +1170,15 @@ def _scrape_greenhouse(slug: str, keywords: str, location: str, max_jobs: int) -
 
 # ── Lever ───────────────────────────────────────────────────────────────────
 
+def _lever_posted(posting: dict[str, Any]) -> str:
+    """createdAt (epoch milliseconds) as ISO, or '' when absent."""
+    created_ms = posting.get("createdAt")
+    if isinstance(created_ms, (int, float)) and created_ms > 0:
+        from datetime import datetime, timezone
+        return datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc).isoformat()
+    return ""
+
+
 def _scrape_lever(slug: str, keywords: str, location: str, max_jobs: int) -> list[dict[str, Any]]:
     if _is_dead(LEVER, slug):
         return []
@@ -1019,7 +1193,7 @@ def _scrape_lever(slug: str, keywords: str, location: str, max_jobs: int) -> lis
         url = f"https://{host}/v0/postings/{slug}"
         for attempt in range(3):
             try:
-                resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+                resp = _http_get(url, headers=headers, timeout=REQUEST_TIMEOUT)
             except Exception:
                 return []
             if resp.status_code == 200:
@@ -1050,6 +1224,8 @@ def _scrape_lever(slug: str, keywords: str, location: str, max_jobs: int) -> lis
         return []
 
     rows: list[dict[str, Any]] = []
+    postings = _fresh_only(LEVER, slug, [p for p in postings if isinstance(p, dict)],
+                           lambda p: p.get("hostedUrl"), _lever_posted)
     for posting in postings:
         title = str(posting.get("text") or "").strip()
         if not title:
@@ -1064,11 +1240,7 @@ def _scrape_lever(slug: str, keywords: str, location: str, max_jobs: int) -> lis
             continue
         if not _matches_location(loc, location):
             continue
-        created_ms = posting.get("createdAt")
-        date_posted = ""
-        if isinstance(created_ms, (int, float)) and created_ms > 0:
-            from datetime import datetime, timezone
-            date_posted = datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc).isoformat()
+        date_posted = _lever_posted(posting)
         row: dict[str, Any] = {
             "title": title,
             "company": slug,
@@ -1148,7 +1320,7 @@ def _scrape_ashby(slug: str, keywords: str, location: str, max_jobs: int) -> lis
         return (job.get("title"), loc,
                 job.get("jobUrl") or job.get("applyUrl"),
                 job.get("publishedAt"),
-                job.get("descriptionPlain") or _html_to_text(job.get("descriptionHtml")),
+                job.get("descriptionPlain") or (lambda: _html_to_text(job.get("descriptionHtml"))),
                 job.get("employmentType"))
 
     # isListed False means the posting exists but is not on the public board.
@@ -1183,7 +1355,7 @@ def _fetch_workday_detail(detail_url: str, headers: dict[str, str]) -> dict[str,
     """
     out = {"date_posted": "", "description": ""}
     try:
-        resp = requests.get(detail_url, headers=headers, timeout=REQUEST_TIMEOUT)
+        resp = _http_get(detail_url, headers=headers, timeout=REQUEST_TIMEOUT)
     except Exception:
         return out
     if resp.status_code != 200:
@@ -1201,7 +1373,7 @@ def _fetch_workday_detail(detail_url: str, headers: dict[str, str]) -> dict[str,
 
 def _fetch_workday_date(detail_url: str, headers: dict[str, str]) -> str:
     try:
-        resp = requests.get(detail_url, headers=headers, timeout=REQUEST_TIMEOUT)
+        resp = _http_get(detail_url, headers=headers, timeout=REQUEST_TIMEOUT)
         if resp.status_code != 200:
             return ""
         info = resp.json().get("jobPostingInfo") or {}
@@ -1243,7 +1415,7 @@ def _scrape_workday(slug: str, keywords: str, location: str, max_jobs: int) -> l
         }
 
         try:
-            resp = requests.post(api_url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp = _http_post(api_url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
         except Exception:
             break
 
@@ -1315,9 +1487,26 @@ def _scrape_workday(slug: str, keywords: str, location: str, max_jobs: int) -> l
 
     # Nested pool: bounded (accepted exception to scheduler-visible concurrency;
     # the caller holds one PriorityWorkScheduler slot for this whole fan-out).
+    #
+    # This scraper used to submit _fetch_workday_detail straight to the nested
+    # pool, bypassing _enrich_gate -- the per-platform Semaphore that caps
+    # in-flight requests against one vendor at PLATFORM_WORKERS. A py-spy dump
+    # of the live bot found 70 threads inside _fetch_workday_detail at once:
+    # outer scheduler pool x this nested pool, unbounded, all hitting Workday.
+    # Routing each submission through the gate keeps that fan-out at
+    # PLATFORM_WORKERS[workday] in flight, same as _enrich_rows.
     detail_workers = capacity.workers(5, minimum=2)
+    gate = _enrich_gate(WORKDAY)
+    # As for icims: the archive check keys on the job URL, which the search
+    # response already gave us, so it runs before the detail fetch, not after.
+    candidates = _needs_enrichment(candidates)
+
+    def _gated_detail(detail_url: str, hdrs: dict[str, str]) -> dict[str, str]:
+        with gate:
+            return _fetch_workday_detail(detail_url, hdrs)
+
     with ThreadPoolExecutor(max_workers=detail_workers) as pool:
-        futures = {pool.submit(_fetch_workday_detail, row["detail_url"], headers): row["detail_url"] for row in candidates}
+        futures = {pool.submit(_gated_detail, row["detail_url"], headers): row["detail_url"] for row in candidates}
         url_to_detail: dict[str, dict[str, str]] = _collect_results(
             futures, capacity.timeout(_fanout_budget(len(candidates), detail_workers))
         )
@@ -1400,7 +1589,7 @@ def _fetch_icims_metadata(job_url: str) -> dict[str, str]:
     resp = None
     for attempt in range(2):
         try:
-            resp = requests.get(fetch_url, headers=hdrs, timeout=REQUEST_TIMEOUT)
+            resp = _http_get(fetch_url, headers=hdrs, timeout=REQUEST_TIMEOUT)
         except Exception:
             resp = None
         if resp is not None and resp.status_code == 200:
@@ -1473,7 +1662,7 @@ def _scrape_icims(slug: str, keywords: str, location: str, max_jobs: int) -> lis
         sitemap_url = f"https://{host}.icims.com/sitemap.xml"
         for attempt in range(3):
             try:
-                resp = requests.get(sitemap_url, headers=headers, timeout=REQUEST_TIMEOUT)
+                resp = _http_get(sitemap_url, headers=headers, timeout=REQUEST_TIMEOUT)
             except Exception:
                 return []
             if resp.status_code == 200:
@@ -1546,9 +1735,28 @@ def _scrape_icims(slug: str, keywords: str, location: str, max_jobs: int) -> lis
 
     # Nested pool: bounded (accepted exception to scheduler-visible concurrency;
     # the caller holds one PriorityWorkScheduler slot for this whole fan-out).
+    #
+    # This scraper used to submit _fetch_icims_metadata straight to the nested
+    # pool, bypassing _enrich_gate -- the per-platform Semaphore that caps
+    # in-flight requests against one vendor at PLATFORM_WORKERS. A py-spy dump
+    # of the live bot found 215 threads inside _fetch_icims_metadata at once:
+    # outer scheduler pool x this nested pool, unbounded, all hitting iCIMS.
+    # Routing each submission through the gate keeps that fan-out at
+    # PLATFORM_WORKERS[icims] in flight, same as _enrich_rows.
     meta_workers = capacity.workers(5, minimum=2)
+    gate = _enrich_gate(ICIMS)
+    # Postings the archive already holds would be dropped after their page
+    # was fetched; skip the fetch. On a board asked every cycle that is
+    # nearly every posting, and the page fetch is what made an icims board
+    # cost more than its whole budget's worth of other platforms' boards.
+    candidates = _needs_enrichment(candidates)
+
+    def _gated_meta(url: str) -> dict[str, str]:
+        with gate:
+            return _fetch_icims_metadata(url)
+
     with ThreadPoolExecutor(max_workers=meta_workers) as pool:
-        futures = {pool.submit(_fetch_icims_metadata, row["job_url"]): row["job_url"] for row in candidates}
+        futures = {pool.submit(_gated_meta, row["job_url"]): row["job_url"] for row in candidates}
         url_to_meta: dict[str, dict[str, str]] = _collect_results(
             futures, capacity.timeout(_fanout_budget(len(candidates), meta_workers))
         )
@@ -1604,7 +1812,7 @@ def _fetch_bamboohr_detail(job_url: str) -> dict[str, str]:
     alone rather than blanking them.
     """
     try:
-        resp = requests.get(
+        resp = _http_get(
             f"{job_url.rstrip('/')}/detail",
             headers=_make_headers(),
             timeout=REQUEST_TIMEOUT,
@@ -1646,7 +1854,7 @@ def _scrape_bamboohr(slug: str, keywords: str, location: str, max_jobs: int) -> 
     resp = None
     for attempt in range(3):
         try:
-            resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp = _http_get(url, headers=headers, timeout=REQUEST_TIMEOUT)
         except requests.exceptions.SSLError:
             if attempt < 2:
                 time.sleep(retry_backoff_delay(attempt))
@@ -1786,9 +1994,17 @@ def _html_to_text(raw: Any) -> str:
     text = str(raw or "")
     if not text:
         return ""
-    text = html.unescape(text)
-    text = re.sub(r"<[^>]+>", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
+    # Cheapest checks first: most bodies that arrive as plain text need only
+    # the whitespace pass, and html.unescape is pure Python per entity.
+    if "&" in text:
+        text = html.unescape(text)
+    if "<" in text:
+        text = _TAG_RE.sub(" ", text)
+    return _WS_RE.sub(" ", text).strip()
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
 
 
 def _normalise_posted(value: Any) -> str:
@@ -1939,7 +2155,7 @@ def _fetch_board_json(platform: str, slug: str, url: str) -> Any:
     headers = _make_headers()
     for attempt in range(3):
         try:
-            resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp = _http_get(url, headers=headers, timeout=REQUEST_TIMEOUT)
         except Exception:
             return None
         if resp.status_code == 200:
@@ -1979,7 +2195,7 @@ def _board_rows(platform: str, slug: str, jobs: Any, keywords: str, location: st
     `shape` reads a row's title, location, url and date out of that platform's
     own field names; everything after that is identical across platforms.
     """
-    rows: list[dict[str, Any]] = []
+    shaped_jobs: list[tuple] = []
     for job in jobs or []:
         if not isinstance(job, dict):
             continue
@@ -1987,6 +2203,9 @@ def _board_rows(platform: str, slug: str, jobs: Any, keywords: str, location: st
             shaped = shape(job)
             # A platform that carries the description in its listing returns a
             # fifth element; the rest return four and enrich later, if at all.
+            # The fifth element may be a callable: the conversion from HTML is
+            # the expensive part of shaping, and it is only paid below, for the
+            # postings the archive does not already hold.
             title, loc, job_url, posted = shaped[:4]
             description = shaped[4] if len(shaped) > 4 else ""
             # Sixth element: the platform's own employment-type field. Only
@@ -2005,6 +2224,17 @@ def _board_rows(platform: str, slug: str, jobs: Any, keywords: str, location: st
             continue
         if not _matches_location(loc, location):
             continue
+        shaped_jobs.append((title, loc, job_url, posted, description, employment_type))
+
+    rows: list[dict[str, Any]] = []
+    for title, loc, job_url, posted, description, employment_type in _fresh_only(
+        platform, slug, shaped_jobs, lambda s: s[2], lambda s: s[3]
+    ):
+        if callable(description):
+            try:
+                description = description()
+            except Exception:
+                description = ""
         rows.append({
             "title": title,
             "company": slug,
@@ -2250,7 +2480,7 @@ def _fetch_jobposting_meta(job_url: str) -> dict[str, str]:
     resp = None
     for attempt in range(2):
         try:
-            resp = requests.get(job_url, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp = _http_get(job_url, headers=headers, timeout=REQUEST_TIMEOUT)
         except Exception:
             resp = None
         if resp is not None and resp.status_code == 200:
@@ -2313,7 +2543,7 @@ def _fetch_rippling_created(job_url: str) -> dict[str, str]:
                             "resolved": ""}
     headers = _make_headers({"Accept": "text/html,application/xhtml+xml"})
     try:
-        resp = requests.get(job_url, headers=headers, timeout=REQUEST_TIMEOUT)
+        resp = _http_get(job_url, headers=headers, timeout=REQUEST_TIMEOUT)
     except Exception:
         return meta
     if resp.status_code != 200:
@@ -2360,7 +2590,7 @@ def _fetch_smartrecruiters_detail(job_url: str) -> dict[str, str]:
         return meta
     company, posting_id = parts[-2], parts[-1]
     try:
-        resp = requests.get(
+        resp = _http_get(
             f"https://api.smartrecruiters.com/v1/companies/{company}/postings/{posting_id}",
             headers=_make_headers(), timeout=REQUEST_TIMEOUT)
     except Exception:
@@ -2434,6 +2664,12 @@ def _enrich_rows(rows: list[dict[str, Any]], fetch: Any) -> None:
     if not rows:
         return
     gate = _enrich_gate(str(rows[0].get("_source_site") or ""))
+    # Rows the archive already holds keep their listing values and are
+    # dropped later by _drop_already_archived; fetching their pages first
+    # bought nothing.
+    rows = _needs_enrichment(rows)
+    if not rows:
+        return
 
     def _gated(url: str) -> dict[str, str]:
         with gate:
@@ -2496,7 +2732,7 @@ def _fetch_board_html(platform: str, slug: str, url: str) -> str:
     headers = _make_headers({"Accept": "text/html,application/xhtml+xml"})
     for attempt in range(3):
         try:
-            resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp = _http_get(url, headers=headers, timeout=REQUEST_TIMEOUT)
         except Exception:
             return ""
         if resp.status_code == 200:
@@ -2724,7 +2960,7 @@ def _scrape_paylocity(slug: str, keywords: str, location: str, max_jobs: int) ->
         if job.get("IsRemote") and "remote" not in str(loc).lower():
             loc = _join_location(loc, "Remote")
         return (job.get("JobTitle"), loc, url, job.get("PublishedDate"),
-                _html_to_text(job.get("Description")))
+                lambda: _html_to_text(job.get("Description")))
 
     return _board_rows(PAYLOCITY, slug, jobs, keywords, location, max_jobs, shape)
 
@@ -2836,7 +3072,7 @@ def _scrape_personio(slug: str, keywords: str, location: str, max_jobs: int) -> 
 
     url = f"https://{slug}.jobs.personio.de/xml?language=en"
     try:
-        resp = requests.get(url, headers=_make_headers(), timeout=REQUEST_TIMEOUT)
+        resp = _http_get(url, headers=_make_headers(), timeout=REQUEST_TIMEOUT)
     except Exception:
         return []
 
@@ -2908,6 +3144,74 @@ _SCRAPERS: dict[str, Any] = {
     ORACLE: _scrape_oracle,
     PERSONIO: _scrape_personio,
 }
+
+
+def _needs_enrichment(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`rows` minus the postings the archive already holds.
+
+    Enrichment is a page fetch per posting, and _drop_already_archived then
+    discards every row the archive has seen -- which, on a board asked every
+    cycle, is nearly all of them. Paying for the fetch first and dropping the
+    row after is the cost that put icims at a sitemap plus hundreds of pages
+    per board. The identity the archive keys on (the ATS job id, or the URL)
+    is on the row before enrichment, so the same check can run before it.
+
+    Same failure posture as _drop_already_archived: an unavailable archive
+    means everything is enriched, never that anything is skipped.
+    """
+    if not rows or not ATS_ARCHIVE_DEDUP_ENABLED:
+        return rows
+    try:
+        from services.jba import archive_index
+
+        archive_index.ensure_index()
+        kept, _dropped = archive_index.filter_new_listings(rows)
+    except Exception:
+        return rows
+    return kept
+
+
+def _fresh_only(platform: str, slug: str, items: list[Any], url_of: Any,
+                posted_of: Any = None) -> list[Any]:
+    """`items` minus the postings the archive already holds, by their URL.
+
+    For the scrapers whose listing already carries the posting body. They
+    had no fetch to skip, but they converted every body from HTML to text
+    -- regex and entity decoding, pure Python, on the GIL -- and then
+    _drop_already_archived discarded the row. Greenhouse alone did that for
+    40,146 postings a cycle and kept 78. A GIL profile of the live bot put
+    _html_to_text at 39% of interpreter time while the Discord event loop
+    held it for 0.16%, and the gateway fell 42s behind every few minutes.
+
+    Items whose URL cannot be read are kept: nothing known is not evidence.
+    One archive query per board; same failure posture as the dedup itself.
+
+    `posted_of` supplies the posting date the row would carry, so the stub's
+    identity is the row's identity: an undated stub collides with *any*
+    prior sighting, a dated one only with the same date, and a genuine
+    re-post must survive here exactly as it would survive the dedup.
+    """
+    if not items or not ATS_ARCHIVE_DEDUP_ENABLED:
+        return list(items)
+    stubs: list[dict[str, Any]] = []
+    for item in items:
+        try:
+            url = str(url_of(item) or "").strip()
+        except Exception:
+            url = ""
+        posted = ""
+        if posted_of is not None:
+            try:
+                posted = _normalise_posted(posted_of(item))
+            except Exception:
+                posted = ""
+        stubs.append({"job_url": url, "company": slug, "_source_site": platform,
+                      "date_posted": posted, "_item": item})
+    keyed = [s for s in stubs if s["job_url"]]
+    kept_urls = {s["job_url"] for s in _needs_enrichment(keyed)} if keyed else set()
+    if not keyed:
+        return list(items)
+    return [s["_item"] for s in stubs if not s["job_url"] or s["job_url"] in kept_urls]
 
 
 def _drop_already_archived(platform: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3001,12 +3305,8 @@ def scrape_ats_platform(
         return []
 
     max_per_company = results_wanted if results_wanted > 0 else 10_000
-    # capacity.workers scales the tuned ceiling down on small hardware; it never
-    # scales up, since these values are also politeness limits per platform.
-    # minimum=2, not 4: watchers/manager.py fans all ~6 ATS platforms out
-    # concurrently, so this floor is paid once per platform. A floor of 4 meant
-    # a 1-core host still ran 24 simultaneous HTTP threads.
-    workers = min(capacity.workers(PLATFORM_WORKERS.get(platform, 10), minimum=2), len(company_slugs))
+    # See fanout_workers for why the width is computed there and nowhere else.
+    workers = fanout_workers(platform, len(company_slugs))
     all_rows: list[dict[str, Any]] = []
 
     # Nested pool: bounded (accepted exception to scheduler-visible concurrency;

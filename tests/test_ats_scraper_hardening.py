@@ -89,7 +89,7 @@ def _install_icims(monkeypatch, jobs: dict[str, str | None], sitemap_urls=None):
             return _Resp(429, "")
         return _Resp(200, page)
 
-    monkeypatch.setattr(ats_service.requests, "get", fake_get)
+    monkeypatch.setattr(ats_service, "_http_get", fake_get)
     monkeypatch.setattr(ats_service.time, "sleep", lambda *_: None)
 
 
@@ -131,7 +131,7 @@ def test_icims_unreadable_page_is_retried_before_giving_up(monkeypatch):
             return _Resp(429, "")
         return _Resp(200, _job_page("Senior Engineer", "Toronto", "ON", "CA"))
 
-    monkeypatch.setattr(ats_service.requests, "get", fake_get)
+    monkeypatch.setattr(ats_service, "_http_get", fake_get)
     monkeypatch.setattr(ats_service.time, "sleep", lambda *_: None)
 
     rows = ats_service._scrape_icims("acme", "engineer", "Canada", 10)
@@ -233,7 +233,7 @@ def test_successful_fetch_clears_a_stale_dead_mark(monkeypatch):
         "absolute_url": "https://boards.greenhouse.io/acme/jobs/1",
         "updated_at": "2026-08-01",
     }]})
-    monkeypatch.setattr(ats_service.requests, "get", lambda *a, **k: _Resp(200, body))
+    monkeypatch.setattr(ats_service, "_http_get", lambda *a, **k: _Resp(200, body))
 
     rows = ats_service._scrape_greenhouse("acme", "engineer", "Canada", 10)
 
@@ -370,6 +370,15 @@ def test_geo_index_loads_exactly_once_under_concurrency(monkeypatch):
     # names -- "Ontario" stops resolving to CA. The failure lands in whichever
     # test happens to run afterwards, which is why it has to be pinned here.
     monkeypatch.setattr(ats_service, "_geo_admin1_name", {})
+    # The retry backoff, reset for the same reason. _ensure_geo_loaded returns
+    # WITHOUT loading while _geo_failures is set and _geo_next_retry has not
+    # elapsed, so a real geo load that failed earlier in the session -- which is
+    # what happens whenever the live bot holds data/geo.db while the suite runs
+    # -- made this test count zero loads and fail. It passed alone, passed in
+    # this file, and failed only in a full run, which reads exactly like a
+    # regression somewhere else entirely.
+    monkeypatch.setattr(ats_service, "_geo_failures", 0)
+    monkeypatch.setattr(ats_service, "_geo_next_retry", 0.0)
     loads = {"n": 0}
     counter_lock = threading.Lock()
 
@@ -436,7 +445,7 @@ def test_icims_metadata_is_fetched_from_the_in_iframe_variant(monkeypatch):
             return _Resp(200, _SHELL_PAGE)
         return _Resp(200, _job_page("Senior Engineer", "Toronto", "ON", "CA"))
 
-    monkeypatch.setattr(ats_service.requests, "get", recording_get)
+    monkeypatch.setattr(ats_service, "_http_get", recording_get)
     monkeypatch.setattr(ats_service.time, "sleep", lambda *_: None)
 
     rows = ats_service._scrape_icims("acme", "engineer", "Canada", 10)

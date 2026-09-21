@@ -108,7 +108,12 @@ if defined PYTHON_EXE (
   ) else (
     rem The detached window's stdout/stderr previously went nowhere, hiding
     rem startup failures (Chrome launch, browser fallback errors, etc). Log it.
-    start "Discord Bot" cmd /c ""%PYTHON_EXE%" src\app.py >> "%~dp0logs\bot_console.log" 2>&1"
+    rem Launched through run_hidden.vbs rather than "start": "start" asks for a
+    rem console, and on Windows 11 the default terminal application draws that
+    rem as a visible window. The command travels in an environment variable so
+    rem its nested quotes and >> redirection survive intact.
+    set "BOT_LAUNCH_CMD=cmd /c ""%PYTHON_EXE%" src\app.py >> "%~dp0logs\bot_console.log" 2>&1"
+    call :launch_hidden
     timeout /t 1 /nobreak >nul
   )
 ) else (
@@ -117,7 +122,8 @@ if defined PYTHON_EXE (
     echo [run.bat] Scheduler mode: running bot in foreground so Task Scheduler can enforce single instance.
     py -3.11 src\app.py >> "%~dp0logs\bot_console.log" 2>&1
   ) else (
-    start "Discord Bot" cmd /c "py -3 src\app.py >> "%~dp0logs\bot_console.log" 2>&1"
+    set "BOT_LAUNCH_CMD=cmd /c "py -3 src\app.py >> "%~dp0logs\bot_console.log" 2>&1"
+    call :launch_hidden
     timeout /t 1 /nobreak >nul
   )
 )
@@ -126,6 +132,22 @@ call :release_lock
 
 echo [run.bat] Done.
 endlocal
+exit /b 0
+
+:launch_hidden
+rem Start %BOT_LAUNCH_CMD% detached and with no console window.
+rem
+rem wscript.exe is a GUI-subsystem binary: it allocates no console, and the
+rem child it starts inherits SW_HIDE, so nothing is drawn regardless of which
+rem terminal host Windows currently defaults to. If wscript or the script is
+rem missing we fall back to "start" -- that may flash a window, but a visible
+rem bot is strictly better than no bot.
+if exist "%~dp0run_hidden.vbs" (
+  wscript //B //Nologo "%~dp0run_hidden.vbs" --nowait-env BOT_LAUNCH_CMD
+  if not errorlevel 1 exit /b 0
+  echo [run.bat] Hidden launch failed; falling back to a visible window.
+)
+start "Discord Bot" %BOT_LAUNCH_CMD%
 exit /b 0
 
 :release_lock

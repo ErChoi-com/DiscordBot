@@ -12,7 +12,8 @@ its four workers that is about 2.9 hours of sleeping against a 600s
 per-platform budget -- so workable burned its whole allowance every cycle,
 returned nothing, and spent wall-clock the other platforms were sharing.
 
-Nothing here touches the network: `requests.get` is replaced with a fake that
+Nothing here touches the network: `_http_get` (the module's one HTTP-GET seam,
+routed through the calling thread's Session) is replaced with a fake that
 returns the status codes under test.
 """
 from __future__ import annotations
@@ -57,7 +58,7 @@ def _serve(monkeypatch, calls, status):
         calls["urls"].append(url)
         return _Resp(next(seq) if seq else status)
 
-    monkeypatch.setattr(A.requests, "get", _get)
+    monkeypatch.setattr(A, "_http_get", _get)
 
 
 def _fetch(n=1, platform="testplat"):
@@ -102,7 +103,7 @@ def test_an_in_flight_call_abandons_its_retries_when_another_thread_trips_it(
             A._note_board_refused("testplat")
         return _Resp(429)
 
-    monkeypatch.setattr(A.requests, "get", _get)
+    monkeypatch.setattr(A, "_http_get", _get)
     A._fetch_board_json("testplat", "co", "https://x/co")
 
     assert calls["n"] == 1, f"retried {calls['n'] - 1} times into an open breaker"

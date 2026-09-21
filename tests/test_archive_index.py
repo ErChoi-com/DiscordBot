@@ -286,6 +286,9 @@ def test_changed_archive_is_reindexed(archive):
     ])
     os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 10))
 
+    # A check made in the last minute stands (see _CHECK_INTERVAL_S); this
+    # test is about the staleness detection behind it, so let the minute pass.
+    archive_index._last_checked.clear()
     assert archive_index.ensure_index() == 1
     kept, dropped = archive_index.filter_new_listings([_job("https://x/2", posted="2026-06-02")])
     assert dropped == 1
@@ -484,3 +487,24 @@ def test_scrape_survives_a_broken_archive(archive, monkeypatch):
         ats_service.GREENHOUSE, "engineer", "Toronto", company_slugs=["acme"],
     )
     assert len(rows) == 1, "scrape lost its results when the archive failed"
+
+
+def test_large_batch_of_distinct_listings_is_kept_whole(archive):
+    """A batch bigger than CPython's small-int cache must not be truncated.
+
+    `preferred.get(...) is not index` compared the batch position by identity.
+    CPython interns only -5..256, so from index 257 onward the equal ints were
+    distinct objects and every remaining listing was dropped as "not the
+    preferred copy". Live scrapes reported exactly 257 rows for platform after
+    platform while the boards had returned tens of thousands.
+
+    600 distinct jobs, none of them archived: the whole batch is new.
+    """
+    archive_index.ensure_index()
+    batch = [_job(f"https://x/big/{i}", posted="2026-08-15") for i in range(600)]
+
+    kept, dropped = archive_index.filter_new_listings(batch)
+
+    assert dropped == 0
+    assert len(kept) == 600
+    assert [j["job_url"] for j in kept] == [j["job_url"] for j in batch]

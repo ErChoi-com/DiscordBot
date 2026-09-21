@@ -200,6 +200,43 @@ Flags:
 | `scheduler` | Run the bot in the foreground so Task Scheduler can enforce single-instance itself. |
 | `noelevated` | Refuse to start when elevated or in Session 0. Also available as `REDDIT_BOT_REFUSE_ELEVATED=1`. |
 
+#### Never point the scheduled task at `cmd.exe`
+
+The watchdog task must run:
+
+```
+wscript.exe //B //Nologo "<repo>\run_hidden.vbs" scheduler
+```
+
+**not** `cmd.exe /c run.bat`. `cmd.exe` allocates a console, and the task repeats
+every 60 seconds, so the `cmd.exe` form draws a terminal window 1,440 times a
+day. On Windows 11 that console is hosted by Windows Terminal rather than
+conhost, which makes it worse in two ways: the host decides how the window is
+shown, so "start it minimised" and `ShowWindow(GetConsoleWindow(), SW_HIDE)` do
+nothing; and Windows Terminal keeps each window open after the console behind it
+exits, so the windows *accumulate* — a few hours of this left 137 dead terminal
+windows stacked on the desktop and 136 leaked `OpenConsole.exe` processes.
+
+`wscript.exe` is a GUI-subsystem binary. It allocates no console at all and
+starts `run.bat` with `SW_HIDE`, so nothing is drawn by any terminal host. For
+the same reason `run.bat` launches the bot through `run_hidden.vbs --nowait-env`
+instead of `start` — `start` also asks for a console. `start` remains only as a
+fallback for when `run_hidden.vbs` is missing.
+
+To apply or re-apply this (the task is admin-owned, so it asks for elevation):
+
+```
+scripts\fix_watchdog_window.bat
+```
+
+That script is idempotent. It also re-adds a clock trigger, because the task
+originally carried its one-minute repetition on a `BootTrigger` alone — and
+editing a task re-arms its triggers, which leaves a boot-only task dormant until
+the next reboot. Check `NextRunTime` is populated after any change to the task.
+
+`tests/test_launcher_no_console_window.py` and
+`tests/test_no_unhidden_subprocess.py` guard all of the above.
+
 ### Linux deployment
 
 Every OS-specific decision lives in `src/services/platform_support.py` — Chrome

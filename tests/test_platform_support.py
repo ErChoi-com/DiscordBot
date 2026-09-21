@@ -548,3 +548,77 @@ def test_both_windows_readers_agree_on_this_process():
     if slow is None:
         pytest.skip("CIM did not answer on this host, nothing to compare against")
     assert fast.split()[0].lower() == slow.split()[0].lower()
+
+
+# ---------------------------------------------------------------------------
+# Console windows (Windows only creates them; the tests drive both branches)
+# ---------------------------------------------------------------------------
+
+def test_no_window_kwargs_only_sets_a_flag_on_windows():
+    assert ps.no_window_kwargs(system="Windows") == {
+        "creationflags": ps.CREATE_NO_WINDOW
+    }
+    assert ps.no_window_kwargs(system="Linux") == {}
+    assert ps.no_window_kwargs(system="Darwin") == {}
+
+
+def test_low_priority_args_are_hidden_as_well_as_backgrounded():
+    """Background children must be both low priority and window-less.
+
+    These are the most numerous processes the bot starts -- a JobSpy
+    interpreter per site per keyword variant -- so they were also the largest
+    source of console pop-ups.
+    """
+    _cmd, kwargs = ps.low_priority_popen_args(["x"], system="Windows")
+    flags = kwargs["creationflags"]
+
+    assert flags & ps.CREATE_NO_WINDOW, "background child would open a console"
+    assert flags & ps.BELOW_NORMAL_PRIORITY_CLASS, "lost the priority flag"
+
+
+def test_no_window_is_not_combined_with_detached_process():
+    """CREATE_NO_WINDOW and DETACHED_PROCESS are mutually exclusive on Windows.
+
+    Passing both makes CreateProcess fail outright, so spawn_detached must keep
+    using DETACHED_PROCESS alone -- a detached child has no console anyway.
+    """
+    import inspect
+
+    source = inspect.getsource(ps.spawn_detached)
+
+    assert "DETACHED_PROCESS" in source
+    assert "CREATE_NO_WINDOW" not in source
+
+
+def test_every_subprocess_spawn_suppresses_its_console():
+    """No spawn in src/ may open a console window.
+
+    A structural test rather than a behavioural one: the failure is a black
+    window appearing on the user's desktop, which no unit test can observe.
+    Every spawn in this codebase captures or pipes its output, so none of them
+    has anything to show, and any new one that forgets should fail here.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "src"
+    spawns = {"run", "Popen", "check_output", "call", "check_call"}
+    offenders = []
+
+    for path in sorted(root.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Attribute) or func.attr not in spawns:
+                continue
+            if getattr(getattr(func, "value", None), "id", "") != "subprocess":
+                continue
+            segment = ast.get_source_segment(source, node) or ""
+            if any(token in segment for token in
+                   ("no_window_kwargs", "creationflags", "**extra", "**kwargs")):
+                continue
+            offenders.append(f"{path.name}:{node.lineno} subprocess.{func.attr}")
+
+    assert not offenders, "spawns that would open a console window: " + ", ".join(offenders)

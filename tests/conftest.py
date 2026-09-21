@@ -10,6 +10,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 
 @pytest.fixture(autouse=True)
+def _clear_jobspy_discovery_cache():
+    """jobspy_python_executable is lru_cached in production; tests must not be.
+
+    Caching it stopped every scrape re-probing `py -3.x` for an answer that
+    cannot change while the process lives. The cost lands on tests: any test
+    that asserts on the probe only sees it if it runs before the cache is warm,
+    so test_port_wiring's Linux case warmed it and the Windows case beside it
+    then asserted against a spawn list that stayed empty.
+
+    Cleared here rather than in that one file, for the reason the fixture below
+    gives: the protection must not depend on which file the next test lands in.
+    """
+    from services import job_service
+
+    job_service.jobspy_python_executable.cache_clear()
+    job_service.jobspy_runtime_metadata.cache_clear()
+    yield
+    job_service.jobspy_python_executable.cache_clear()
+    job_service.jobspy_runtime_metadata.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_resume_telemetry(tmp_path, monkeypatch):
     """Keep listing/cover telemetry and caches out of the real .resume_cache/.
 
@@ -37,6 +59,38 @@ def _isolate_resume_telemetry(tmp_path, monkeypatch):
     monkeypatch.setattr(listing_module, "STRUCTURED_TELEMETRY_PATH", tmp_path / "telemetry.jsonl", raising=False)
     monkeypatch.setattr(listing_module, "SCRAPE_TELEMETRY_PATH", tmp_path / "scrape.jsonl", raising=False)
     monkeypatch.setattr(cover_module, "COVER_TELEMETRY_PATH", tmp_path / "cover.jsonl", raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_archive_index(tmp_path, monkeypatch):
+    """Keep the ATS archive index out of the real data/jba/jobs/.
+
+    Every ATS scraper now consults archive_index before enriching a posting
+    (ats_service._needs_enrichment), so any test that drives a scraper reaches
+    the module-level index path -- the same archive_index.db the live bot
+    builds and writes. Pointed at a tmp dir here, the index is empty, every
+    synthetic posting reads as new, and nothing touches production state.
+    test_archive_index.py's own fixtures still apply on top.
+    """
+    try:
+        from services.jba import archive_index
+    except ImportError:
+        yield
+        return
+    jobs_dir = tmp_path / "jba_jobs"
+    monkeypatch.setattr(archive_index, "_JOBS_DIR", jobs_dir, raising=False)
+    monkeypatch.setattr(archive_index, "_INDEX_PATH", jobs_dir / "archive_index.db", raising=False)
+    # The current week's sightings come from the live jobs.db, and a fixture
+    # built from a real board (applicantpro job 4194127) is in it: the
+    # prefilter dropped the fixture as "already archived" and a scraper test
+    # returned nothing. The same path is what log_jobs writes, which is how
+    # synthetic postings reached the real archive before.
+    try:
+        from services.jba import merge_data
+        monkeypatch.setattr(merge_data, "_DB_PATH", jobs_dir / "jobs.db", raising=False)
+    except ImportError:
+        pass
     yield
 
 

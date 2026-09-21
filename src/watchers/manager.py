@@ -17,6 +17,7 @@ import discord
 
 from config import AppConfig
 from services import job_service, reddit_service
+from services import platform_support
 from services.ats_service import ATS_PLATFORMS as _ATS_PLATFORMS, BAMBOOHR as _BAMBOOHR, scrape_ats_platform as _scrape_ats_platform
 from services.health import WatcherHealthTracker, compact_age
 from services.priority_scheduler import BACKGROUND, PriorityWorkScheduler
@@ -52,6 +53,7 @@ def _sync_geonames() -> bool:
         result = subprocess.run(
             [sys.executable, str(script)],
             capture_output=True, text=True, timeout=900,
+            **platform_support.no_window_kwargs(),
         )
     except Exception as exc:
         print(f"[geonames-sync] skipped: {exc}")
@@ -80,6 +82,27 @@ def _sync_geonames() -> bool:
 # Worst case by construction: almost every platform finishes in seconds, and
 # only the largest fleets approach their bound at all.
 ATS_PLATFORM_TIMEOUT_S = 600
+
+# What the fan-out inside a platform is allowed to WAIT for, as opposed to the
+# hard bound above. It has to be strictly smaller: when the fan-out gives up it
+# cancels everything still queued, but fetches already in flight cannot be
+# cancelled and the pool's context manager waits the longest of them out. That
+# drain is bounded by the per-request timeout and its retries, not by the fleet
+# size, so leaving a couple of request-timeouts of room is what lets a platform
+# return under its own bound instead of being abandoned at it -- still holding
+# a scheduler worker, which is the failure this pair of numbers exists to
+# prevent.
+ATS_PLATFORM_DRAIN_MARGIN_S = 120
+ATS_PLATFORM_FANOUT_BUDGET_S = ATS_PLATFORM_TIMEOUT_S - ATS_PLATFORM_DRAIN_MARGIN_S
+
+# How much more of its fleet a platform is offered after a cycle in which it
+# finished everything it was given. The fan-out is sized to what the last
+# cycle actually completed (see ats_fanout_cap), so this is the only way the
+# ask ever grows; a cut-off shrinks it straight back to what fit. Gentle,
+# because the price of overshooting is not the cancelled queue -- that is
+# free -- but the in-flight slugs the pool must still drain past the budget,
+# each a board fetch plus an enrichment pass over its postings.
+ATS_FANOUT_GROWTH = 1.25
 
 # Absolute ceiling on a cycle however narrow the host. The loop scrapes four
 # times a day, so a cycle has six hours of room; this leaves it most of that
@@ -123,6 +146,91 @@ def ats_cycle_timeout(platform_count: int, workers: int) -> int:
     """
     waves = max(1, math.ceil(max(platform_count, 1) / max(workers, 1)))
     return min(waves * ATS_PLATFORM_TIMEOUT_S, ATS_CYCLE_TIMEOUT_CAP_S)
+
+def ats_fanout_cap(
+    fleet_size: int,
+    head_size: int,
+    floor: int,
+    last_submitted: int,
+    last_completed: int,
+    growth: float = ATS_FANOUT_GROWTH,
+    min_tail: int | None = None,
+) -> int:
+    """How many of a platform's boards to ask this cycle.
+
+    The fan-out used to be handed the whole fleet and cut off at its budget.
+    That is the right shape when a fleet nearly fits and the wrong one when
+    it does not: 135,475 slugs across eighteen platforms, of which 1,633 are
+    known to post in a wanted country, meant every cycle submitted ~98% work
+    it would cancel, the cancelled tail's in-flight survivors held their
+    scheduler workers for 3-4x the budget, and the next cycle's platforms
+    queued behind them until their own bound expired before they started --
+    "timed out (0/0 companies reached)" on all eighteen, every cycle.
+
+    So the ask is sized to what fits, from the only evidence there is:
+
+    - The geo-preferred head is always asked whole. It is the head because it
+      is the part that yields.
+    - No cycle recorded yet: head plus *floor*, where the floor is what the
+      pool is guaranteed to drain inside its budget even if every fetch hangs
+      (fanout_capacity). Pessimistic on purpose; it is a first guess.
+    - The last cycle was cut off: ask what it completed. That is a direct
+      measurement of what the budget affords on this host against this
+      vendor today, and it overrides the floor: the floor assumes one request
+      per board, and a board on icims is a sitemap plus a page per posting.
+      Measured on the first capped cycle, icims completed 103 of the 600 the
+      floor had promised would fit. Only *min_tail* (one wave of the pool)
+      is kept under the ask, so discovery never stops entirely.
+    - The last cycle finished everything it was given: ask for *growth* more,
+      so a platform that fits keeps widening until it finds its edge.
+
+    Never below the head, never above the fleet. The tail slice this leaves
+    is still rotated by _rotate_tail, so a smaller ask does not mean the same
+    companies each cycle -- it means the whole fleet is walked in more,
+    shorter steps, each of which actually completes.
+    """
+    fleet_size = max(0, int(fleet_size))
+    head_size = max(0, min(int(head_size), fleet_size))
+    floor = max(0, int(floor))
+    min_tail = floor if min_tail is None else max(0, min(int(min_tail), floor))
+    if last_submitted <= 0:
+        target = head_size + floor
+    elif last_completed >= last_submitted:
+        target = max(head_size + floor, math.ceil(last_completed * max(1.0, growth)))
+    else:
+        target = max(head_size + min_tail, int(last_completed))
+    return max(head_size, min(target, fleet_size))
+
+
+def fanout_reached(fan: dict[str, int]) -> str:
+    """Coverage for a log line, distinguishing "reached nothing" from
+    "never got as far as fanning out".
+
+    Zero submitted means the platform's thread had not reached its fan-out
+    when the bound expired: still queued behind other work, or still ordering
+    its fleet. Printing that as "0/0 companies reached" made it read as a
+    scrape that ran and found no one, which is the opposite of what happened
+    and sent the last diagnosis looking inside the scraper for an hour that
+    was spent in the scheduler queue.
+    """
+    submitted = int(fan.get("submitted", 0))
+    completed = int(fan.get("completed", 0))
+    if submitted <= 0:
+        return "no fan-out recorded: still queued or still ordering the fleet when the bound expired"
+    return f"{completed:,}/{submitted:,} companies reached"
+
+
+def exception_text(exc: BaseException) -> str:
+    """A never-empty description of *exc*.
+
+    str() on a timeout is the empty string, so every place that logged or
+    recorded one produced a blank: the log read "timed out or errored: " with
+    nothing after the colon, and health recorded an error whose message was
+    falsy. Both readers then had to guess. Rendering goes through here so a
+    new call site cannot reintroduce it by writing the obvious str(exc).
+    """
+    return str(exc) or type(exc).__name__
+
 
 def ats_platform_slots(workers: int, reserved_interactive: int = 0) -> int:
     """How many ATS platforms may hold a scheduler worker at the same time.
@@ -373,7 +481,13 @@ class WatcherManager:
 
     async def _is_duplicate_message(self, channel_id: int, channel: Any, content: str, watcher_type: str = "job") -> bool:
         listing_file = self._attached_listing_file(channel_id, watcher_type)
-        if job_service.is_message_duplicate(
+        # Off the loop: the check globs the dedup directory and parses up to
+        # six FIFO files of five hundred rows, per message. loop_watch caught
+        # the loop thread inside exactly that (scandir, read_text) on the
+        # ticks that ran late; the per-channel send lock still serialises
+        # check, send and record, so nothing about ordering changes.
+        if await asyncio.to_thread(
+            job_service.is_message_duplicate,
             content,
             listing_file,
             months_threshold=self.dedup_months_threshold(),
@@ -383,10 +497,14 @@ class WatcherManager:
         return await self.should_skip_duplicate_message(channel_id, channel, content, watcher_type=watcher_type)
 
 
-    def _record_dedup_after_send(self, channel_id: int, watcher_type: str, content: str) -> bool:
-        """Persist watcher dedup record only after a successful message send."""
+    async def _record_dedup_after_send(self, channel_id: int, watcher_type: str, content: str) -> bool:
+        """Persist watcher dedup record only after a successful message send.
+
+        Off the loop for the same reason as the check: recording rewrites the
+        FIFO files (loop_watch caught _write_fifo_rows on the loop thread).
+        """
         listing_file = self._attached_listing_file(channel_id, watcher_type)
-        recorded = job_service.record_message_for_dedup(content, listing_file)
+        recorded = await asyncio.to_thread(job_service.record_message_for_dedup, content, listing_file)
         if not recorded:
             print(f"Watcher dedup record failed for {channel_id}/{watcher_type}")
         return recorded
@@ -413,7 +531,7 @@ class WatcherManager:
                 return False
 
             await channel.send(text)
-            self._record_dedup_after_send(channel_id, watcher_type, key)
+            await self._record_dedup_after_send(channel_id, watcher_type, key)
             self.remember_message(channel_id, key, watcher_type=watcher_type)
             return True
 
@@ -456,7 +574,7 @@ class WatcherManager:
 
             text = f"{title}\n{permalink}".strip()
             await channel.send(content=(text or None), embeds=embeds)
-            self._record_dedup_after_send(channel_id, "reddit", dedupe_key)
+            await self._record_dedup_after_send(channel_id, "reddit", dedupe_key)
             self.remember_message(channel_id, dedupe_key, watcher_type="reddit")
             return True
 
@@ -583,33 +701,45 @@ class WatcherManager:
                 _sem_th = _safe_float(settings.get("semantic_threshold"), 0.30)
                 _ats_th = _safe_float(settings.get("ats_semantic_threshold"), _sem_th)
 
-                def _semantic_filter(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-                    # SentenceTransformer inference is CPU-bound and, on first call, loads
-                    # a model from disk -- run off the event loop so it can't freeze Discord
-                    # gateway/interaction handling (this previously ran inline in the
-                    # coroutine and stalled the whole bot for tens of seconds per scrape).
-                    return [
-                        item
-                        for item in candidates
-                        if job_service.matches_search_parameters_semantic(
-                            item,
-                            str(settings.get("keywords") or ""),
-                            str(settings.get("location") or ""),
-                            role_filters,
-                            threshold=_ats_th if _ats_set.intersection(item.get("sites") or []) else _sem_th,
-                        )
-                    ]
-
-                items = await self._tracked_to_thread(
-                    _semantic_filter, items, label=scheduler_labels.semantic_filter_label(channel_id)
-                )
-                filtered_count = len(items)
+                # Already-sent links leave before the model sees them, not
+                # after. A channel with a 24h window re-scrapes the same
+                # postings every refresh until they age out, and every one of
+                # them was re-embedded each time only to be dropped by the
+                # link check below. The model now only ever sees what is new.
                 seen = self.store.channel_job_seen.setdefault(channel_id, set())
                 batch_seen_links = {
                     job_service.canonicalize_job_link(str(link)) or str(link)
                     for link in seen
                     if str(link).strip()
                 }
+
+                def _unseen(item: dict[str, Any]) -> bool:
+                    raw_link = str(item.get("link") or "").strip()
+                    canonical = job_service.canonicalize_job_link(raw_link) or raw_link
+                    return bool(canonical) and canonical not in batch_seen_links
+
+                items = [item for item in items if _unseen(item)]
+
+                def _semantic_filter(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                    # SentenceTransformer inference is CPU-bound and, on first call, loads
+                    # a model from disk -- run off the event loop so it can't freeze Discord
+                    # gateway/interaction handling (this previously ran inline in the
+                    # coroutine and stalled the whole bot for tens of seconds per scrape).
+                    # One model call for the whole batch; see semantic_filter_items.
+                    return job_service.semantic_filter_items(
+                        candidates,
+                        str(settings.get("keywords") or ""),
+                        str(settings.get("location") or ""),
+                        role_filters,
+                        threshold=lambda item: (
+                            _ats_th if _ats_set.intersection(item.get("sites") or []) else _sem_th
+                        ),
+                    )
+
+                items = await self._tracked_to_thread(
+                    _semantic_filter, items, label=scheduler_labels.semantic_filter_label(channel_id)
+                )
+                filtered_count = len(items)
                 fresh: list[dict[str, Any]] = []
                 for item in reversed(items):
                     raw_link = str(item.get("link") or "").strip()
@@ -773,7 +903,21 @@ class WatcherManager:
             for country in self._priority_countries():
                 preferred |= geo_priority.slugs_for(country)
             head, tail = geo_priority.partition(fleet, preferred)
-            return head + self._rotate_tail(platform, tail, len(head))
+            # Rotate the whole tail before slicing it: the rotation records
+            # how far the last cycle got and resumes there, so the slice this
+            # cycle asks is the one after the slice the last cycle finished.
+            # The head rotates only when a cycle was cut off inside it.
+            tail = self._rotate_tail(platform, tail, len(head))
+            head = self._rotate_head(platform, head)
+            fan = self._ats_last_fanout(platform)
+            cap = self._fanout_cap(platform, len(fleet), len(head))
+            ordered = head + tail[: max(0, cap - len(head))]
+            print(
+                f"[ats-scrape] {platform}: asking {len(ordered):,} of {len(fleet):,} boards "
+                f"({len(head):,} preferred, {len(ordered) - len(head):,} on rotation; "
+                f"last cycle reached {fan['completed']:,}/{fan['submitted']:,})"
+            )
+            return ordered
         except Exception as exc:
             # Ordering is an optimisation; losing it must not cost the scrape.
             print(f"[ats-scrape] {platform}: could not order the fleet ({exc})")
@@ -782,6 +926,57 @@ class WatcherManager:
     def _ats_rotation_state_path(self) -> Path:
         base = getattr(getattr(self, "config", None), "base_dir", None)
         return Path(base or ".") / _ATS_ROTATION_STATE
+
+    def _fanout_cap(self, platform: str, fleet_size: int, head_size: int) -> int:
+        """ats_fanout_cap for this platform, from what its last fan-out reached.
+
+        The floor is what the pool this platform will actually run at can
+        drain inside the fan-out budget with every fetch stalled -- asked of
+        the scraper itself (fanout_workers) so the width assumed here is the
+        width used there.
+        """
+        from services import ats_service
+
+        workers = ats_service.fanout_workers(platform, fleet_size)
+        floor = ats_service.fanout_capacity(ATS_PLATFORM_FANOUT_BUDGET_S, workers)
+        fan = self._ats_last_fanout(platform)
+        return ats_fanout_cap(
+            fleet_size, head_size, floor, fan["submitted"], fan["completed"],
+            min_tail=workers,
+        )
+
+    def _rotate_head(self, platform: str, head: list[str]) -> list[str]:
+        """`head`, resumed past the point a cut-off cycle reached inside it.
+
+        The head is asked first because it yields, and while it fits the
+        budget its order is immaterial and it is left alone. When it does not
+        fit -- icims, whose boards cost a sitemap and a page per posting,
+        completed 103 of a 150-board head -- the same 103 would be asked every
+        cycle and the other 47 never, which is the failure _rotate_tail exists
+        to prevent, one level up. So a cycle that stopped inside the head
+        moves the head's own cursor by what it completed, using the same
+        digest-order rotation, kept under its own key in the same state.
+        """
+        from services import ats_traversal
+
+        if not head:
+            return []
+        fan = self._ats_last_fanout(platform)
+        path = self._ats_rotation_state_path()
+        with _ATS_ROTATION_LOCK:
+            state = ats_traversal.load_state(path)
+            entry = state.setdefault("platforms", {}).setdefault(platform, {})
+            previous = ats_traversal.rotate(head, entry.get("head_digest"))
+            if fan["submitted"] <= 0 or fan["completed"] >= len(head):
+                # Nothing recorded, or the whole head was reached: stable.
+                return previous
+            cursor = ats_traversal.cursor_after(previous, fan["completed"])
+            if cursor is None:
+                return previous
+            entry["head_digest"] = cursor
+            entry["head_updated_at"] = datetime.now(timezone.utc).timestamp()
+            ats_traversal.save_state(path, state)
+            return ats_traversal.rotate(head, cursor)
 
     def _rotate_tail(self, platform: str, tail: list[str], head_size: int) -> list[str]:
         """`tail`, resumed from the point the previous cycle actually reached.
@@ -808,13 +1003,16 @@ class WatcherManager:
         if not tail:
             return []
         path = self._ats_rotation_state_path()
+        # Read before the lock: the fallback inside _ats_last_fanout reads the
+        # same state file under the same (non-reentrant) lock.
+        completed = self._ats_last_fanout(platform)["completed"]
         with _ATS_ROTATION_LOCK:
             state = ats_traversal.load_state(path)
             entry = state.get("platforms", {}).get(platform) or {}
             # The rotation the previous cycle was handed, reconstructed so
             # "it reached N" can be turned back into "it stopped here".
             previous = ats_traversal.rotate(tail, entry.get("last_digest"))
-            reached = max(0, self._ats_last_fanout(platform)["completed"] - head_size)
+            reached = max(0, completed - head_size)
             cursor = ats_traversal.cursor_after(previous, reached)
             if cursor is None:
                 # No cycle has reported yet, or it reached nothing past the
@@ -853,25 +1051,72 @@ class WatcherManager:
         except Exception:
             return {}
 
-    @staticmethod
-    def _ats_last_fanout(platform: str) -> dict[str, int]:
+    def _ats_last_fanout(self, platform: str) -> dict[str, int]:
         """Submitted/completed company counts from that platform's last fan-out.
 
         Zeroes when the scraper never got as far as fanning out (an unknown
         platform, or an empty company list). Zero submitted reads as "no cycle
         recorded" downstream rather than "reached nothing", which are different
         and were previously indistinguishable.
+
+        This process's own record first; failing that, the one the previous
+        process left in the rotation state. The counts size the next ask
+        (ats_fanout_cap), and this bot is restarted daily by its supervisor
+        and more often by hand -- a restart that forgot them re-asked icims
+        the 600 boards the floor promised, after a cycle had just measured
+        that 103 fit. The cursor already survived restarts for the same
+        reason; the counts now travel with it.
         """
         try:
             from services import ats_service
 
             fan = ats_service.LAST_FANOUT.get(platform) or {}
+            if int(fan.get("submitted", 0)) > 0:
+                return {
+                    "submitted": int(fan.get("submitted", 0)),
+                    "completed": int(fan.get("completed", 0)),
+                }
+        except Exception:
+            pass
+        try:
+            from services import ats_traversal
+
+            with _ATS_ROTATION_LOCK:
+                state = ats_traversal.load_state(self._ats_rotation_state_path())
+            saved = (state.get("platforms", {}).get(platform) or {}).get("fanout") or {}
             return {
-                "submitted": int(fan.get("submitted", 0)),
-                "completed": int(fan.get("completed", 0)),
+                "submitted": max(0, int(saved.get("submitted", 0))),
+                "completed": max(0, int(saved.get("completed", 0))),
             }
         except Exception:
             return {"submitted": 0, "completed": 0}
+
+    def _remember_fanout(self, platform: str, fan: dict[str, int]) -> None:
+        """Write the fan-out's counts into the rotation state, for the next process.
+
+        Only a fan-out that happened: zero submitted means the scrape never
+        got that far, and recording it would overwrite a real measurement
+        with "nothing known". Failures are swallowed for the same reason the
+        rotation's are: remembering is an optimisation, and losing it costs
+        one floor-sized cycle, not the scrape.
+        """
+        if int(fan.get("submitted", 0)) <= 0:
+            return
+        try:
+            from services import ats_traversal
+
+            path = self._ats_rotation_state_path()
+            with _ATS_ROTATION_LOCK:
+                state = ats_traversal.load_state(path)
+                entry = state.setdefault("platforms", {}).setdefault(platform, {})
+                entry["fanout"] = {
+                    "submitted": int(fan["submitted"]),
+                    "completed": int(fan.get("completed", 0)),
+                    "at": datetime.now(timezone.utc).timestamp(),
+                }
+                ats_traversal.save_state(path, state)
+        except Exception as exc:
+            print(f"[ats-scrape] {platform}: could not record the fan-out ({exc})")
 
     @staticmethod
     def _is_new_utc_day(today: str, current_date: str | None) -> bool:
@@ -915,6 +1160,7 @@ class WatcherManager:
                     [sys.executable, str(script)],
                     cwd=str(self.config.base_dir),
                     capture_output=True, text=True,
+                    **platform_support.no_window_kwargs(),
                 ).returncode
 
             rc = await self._tracked_to_thread(
@@ -983,6 +1229,7 @@ class WatcherManager:
                      "--only-new-crawls",
                      "--total-budget-seconds", str(ATS_HARVEST_BUDGET_S)],
                     cwd=str(self.config.base_dir),
+                    **platform_support.no_window_kwargs(),
                     capture_output=True, text=True,
                 )
                 return proc.returncode, (proc.stdout or "").strip()
@@ -1045,6 +1292,7 @@ class WatcherManager:
                      "--total-budget-seconds", str(ATS_VALIDATION_BUDGET_S)],
                     cwd=str(self.config.base_dir),
                     capture_output=True, text=True,
+                    **platform_support.no_window_kwargs(),
                 )
                 return proc.returncode, (proc.stdout or "").strip()
 
@@ -1092,6 +1340,7 @@ class WatcherManager:
                     [sys.executable, str(script), "--days", "7"],
                     cwd=str(self.config.base_dir),
                     capture_output=True, text=True,
+                    **platform_support.no_window_kwargs(),
                 )
                 return proc.returncode, (proc.stdout or "").strip()
 
@@ -1212,43 +1461,9 @@ class WatcherManager:
             )
 
             def _scrape_one(platform: str) -> list[dict[str, Any]]:
-                try:
-                    result = scrape_ats_platform(
-                        platform=platform,
-                        keywords="",
-                        location="",
-                        results_wanted=0,
-                        # First caller of a parameter that has existed unused
-                        # since it was written. Passing the fleet in the order
-                        # we want it asked is the whole feature; the contents
-                        # are identical to what the default would have loaded.
-                        company_slugs=self._ordered_slugs(platform),
-                    )
-                    new_count = log_jobs(result) if result else 0
-                    fan = self._ats_last_fanout(platform)
-                    if result:
-                        print(
-                            f"[ats-scrape] {platform}: {len(result):,} scraped, "
-                            f"{new_count:,} new to DB, "
-                            f"{fan['completed']:,}/{fan['submitted']:,} companies reached"
-                        )
-                    health_tracker.record_ats_platform_result(
-                        platform, len(result), new_count=new_count,
-                        submitted=fan["submitted"], completed=fan["completed"],
-                    )
-                    return result
-                except Exception as exc:
-                    # Coverage is recorded on the error path too: a cycle that
-                    # raised after reaching 9,000 of 10,000 companies is a
-                    # different failure from one that reached 12.
-                    fan = self._ats_last_fanout(platform)
-                    print(f"[ats-scrape] {platform} error: {exc}")
-                    health_tracker.record_ats_platform_result(
-                        platform, 0, error=str(exc),
-                        submitted=fan["submitted"], completed=fan["completed"],
-                    )
-                    return []
+                return self._scrape_one_platform(platform)
 
+            cycle_started_ts = datetime.now(timezone.utc).timestamp()
             try:
                 async def _scrape_one_bounded(platform: str) -> list[dict[str, Any]]:
                     try:
@@ -1264,11 +1479,11 @@ class WatcherManager:
                         # cycle failed but not how far it got.
                         fan = self._ats_last_fanout(platform)
                         print(
-                            f"[ats-scrape] {platform} timed out or errored: {exc} "
-                            f"({fan['completed']:,}/{fan['submitted']:,} companies reached)"
+                            f"[ats-scrape] {platform} timed out or errored: "
+                            f"{exception_text(exc)} ({fanout_reached(fan)})"
                         )
                         health_tracker.record_ats_platform_result(
-                            platform, 0, error=str(exc),
+                            platform, 0, error=exception_text(exc),
                             submitted=fan["submitted"], completed=fan["completed"],
                         )
                         return []
@@ -1319,7 +1534,79 @@ class WatcherManager:
                     _sync_geonames, label=scheduler_labels.GEONAMES_SYNC
                 )
             except Exception as exc:
-                print(f"[ats-scrape] Scrape cycle error: {exc}")
+                # An errored cycle still ran: its platforms' threads are alive
+                # and cannot be cancelled. Retrying at once, which is what
+                # leaving the pacing state untouched did, re-queued every
+                # platform behind the last cycle's survivors -- eighteen aged
+                # tasks behind ten busy workers, and each one "timed out
+                # (0/0 companies reached)" before it started. A cycle that
+                # errored after it had already counted itself is not counted
+                # twice.
+                if last_scrape_ts < cycle_started_ts:
+                    scrapes_today += 1
+                    last_scrape_ts = datetime.now(timezone.utc).timestamp()
+                # Told to health as well, so `.health` shows a cycle that
+                # errored instead of a day that quietly has fewer scrapes.
+                self.health.record_ats_cycle_error(
+                    exception_text(exc), scrapes_today, ATS_SCRAPES_PER_DAY
+                )
+                print(f"[ats-scrape] Scrape cycle error: {exception_text(exc)}")
+
+    def _scrape_one_platform(self, platform: str) -> list[dict[str, Any]]:
+        """Scrape one platform and record what it managed to reach.
+
+        A method rather than a closure in the cycle loop so that the arguments
+        it passes are reachable by a test. They were not, and a mutant that
+        simply dropped max_seconds -- reverting the whole fan-out bound --
+        survived the suite untouched.
+        """
+        from services.jba.merge_data import log_jobs
+
+        try:
+            result = _scrape_ats_platform(
+                platform=platform,
+                keywords="",
+                location="",
+                results_wanted=0,
+                # First caller of a parameter that has existed unused since it
+                # was written. Passing the fleet in the order we want it asked
+                # is the whole feature; the contents are identical to what the
+                # default would have loaded.
+                company_slugs=self._ordered_slugs(platform),
+                # Partial coverage is the design, not a failure: _rotate_tail
+                # resumes the next cycle where this one stopped, so a platform
+                # that reaches 43% a pass still offers its whole fleet a turn.
+                # That only works if the cycle actually stops when it should,
+                # and without this it did not -- the fan-out's own budget ran
+                # to hours while its caller allowed ten minutes.
+                max_seconds=ATS_PLATFORM_FANOUT_BUDGET_S,
+            )
+            new_count = log_jobs(result) if result else 0
+            fan = self._ats_last_fanout(platform)
+            self._remember_fanout(platform, fan)
+            if result:
+                print(
+                    f"[ats-scrape] {platform}: {len(result):,} scraped, "
+                    f"{new_count:,} new to DB, "
+                    f"{fan['completed']:,}/{fan['submitted']:,} companies reached"
+                )
+            self.health.record_ats_platform_result(
+                platform, len(result), new_count=new_count,
+                submitted=fan["submitted"], completed=fan["completed"],
+            )
+            return result
+        except Exception as exc:
+            # Coverage is recorded on the error path too: a cycle that raised
+            # after reaching 9,000 of 10,000 companies is a different failure
+            # from one that reached 12.
+            fan = self._ats_last_fanout(platform)
+            self._remember_fanout(platform, fan)
+            print(f"[ats-scrape] {platform} error: {exception_text(exc)}")
+            self.health.record_ats_platform_result(
+                platform, 0, error=exception_text(exc),
+                submitted=fan["submitted"], completed=fan["completed"],
+            )
+            return []
 
     async def _gather_ats_platforms(
         self,
@@ -1437,6 +1724,27 @@ class WatcherManager:
             return
         self._watchdog_task = asyncio.create_task(self._run_watchdog())
         print("[watchdog] Watcher supervisor started")
+        # The supervisor above runs *on* the loop, so it cannot see the loop
+        # stop. This one watches from a thread and prints the loop thread's
+        # stack when it stops ticking -- the gateway's "Can't keep up" names
+        # the effect and never the cause.
+        try:
+            from services import loop_watch
+
+            loop_watch.start()
+        except Exception as exc:
+            print(f"[watchdog] loop watch unavailable ({exc})")
+        # And this one watches the other half. The loop can be ticking, the
+        # heartbeat can be going out on time, and the gateway can still report
+        # itself seconds behind -- because the ack never arrived. Only the
+        # receive side can say whether that is a socket with nothing on it or
+        # a socket whose one missing frame happens to be the ack.
+        try:
+            from services import gateway_watch
+
+            gateway_watch.start(self.client)
+        except Exception as exc:
+            print(f"[watchdog] gateway watch unavailable ({exc})")
 
     def start_job_watcher(self, channel_id: int) -> bool:
         existing = self.channel_job_tasks.get(channel_id)
