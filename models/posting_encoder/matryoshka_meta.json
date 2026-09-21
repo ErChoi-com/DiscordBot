@@ -1,0 +1,274 @@
+{
+  "labels": [
+    "SKILL_DUTY",
+    "BOILERPLATE",
+    "ROLE_FACTS",
+    "COMPANY_CONTEXT"
+  ],
+  "backbone": "nomic-ai/nomic-embed-text-v1.5",
+  "format": "unquantized-float16-gguf",
+  "master_dim": 768,
+  "default_dim": 384,
+  "supported_dims": [
+    768,
+    512,
+    384,
+    256,
+    128,
+    64
+  ],
+  "num_classes": 4,
+  "trained_samples": 22619,
+  "val_samples": 5412,
+  "dry_run": false,
+  "metrics_by_dimension": {
+    "768": {
+      "accuracy": 0.6792,
+      "macro_f1": 0.5864,
+      "content_loss_pct": 8.58,
+      "per_class": {
+        "SKILL_DUTY": {
+          "precision": 0.8803,
+          "recall": 0.7026,
+          "f1": 0.7814,
+          "support": 3547
+        },
+        "BOILERPLATE": {
+          "precision": 0.5854,
+          "recall": 0.5879,
+          "f1": 0.5867,
+          "support": 927
+        },
+        "ROLE_FACTS": {
+          "precision": 0.442,
+          "recall": 0.6672,
+          "f1": 0.5318,
+          "support": 577
+        },
+        "COMPANY_CONTEXT": {
+          "precision": 0.3261,
+          "recall": 0.7036,
+          "f1": 0.4456,
+          "support": 361
+        }
+      }
+    },
+    "512": {
+      "accuracy": 0.6741,
+      "macro_f1": 0.5795,
+      "content_loss_pct": 8.32,
+      "per_class": {
+        "SKILL_DUTY": {
+          "precision": 0.8837,
+          "recall": 0.6983,
+          "f1": 0.7802,
+          "support": 3547
+        },
+        "BOILERPLATE": {
+          "precision": 0.5841,
+          "recall": 0.5696,
+          "f1": 0.5767,
+          "support": 927
+        },
+        "ROLE_FACTS": {
+          "precision": 0.4283,
+          "recall": 0.6828,
+          "f1": 0.5264,
+          "support": 577
+        },
+        "COMPANY_CONTEXT": {
+          "precision": 0.3172,
+          "recall": 0.6898,
+          "f1": 0.4346,
+          "support": 361
+        }
+      }
+    },
+    "384": {
+      "accuracy": 0.6707,
+      "macro_f1": 0.5756,
+      "content_loss_pct": 8.29,
+      "per_class": {
+        "SKILL_DUTY": {
+          "precision": 0.8848,
+          "recall": 0.6952,
+          "f1": 0.7787,
+          "support": 3547
+        },
+        "BOILERPLATE": {
+          "precision": 0.5804,
+          "recall": 0.5609,
+          "f1": 0.5705,
+          "support": 927
+        },
+        "ROLE_FACTS": {
+          "precision": 0.427,
+          "recall": 0.6846,
+          "f1": 0.526,
+          "support": 577
+        },
+        "COMPANY_CONTEXT": {
+          "precision": 0.3097,
+          "recall": 0.6898,
+          "f1": 0.4275,
+          "support": 361
+        }
+      }
+    },
+    "256": {
+      "accuracy": 0.6635,
+      "macro_f1": 0.5688,
+      "content_loss_pct": 8.66,
+      "per_class": {
+        "SKILL_DUTY": {
+          "precision": 0.8793,
+          "recall": 0.6879,
+          "f1": 0.7719,
+          "support": 3547
+        },
+        "BOILERPLATE": {
+          "precision": 0.5686,
+          "recall": 0.5545,
+          "f1": 0.5614,
+          "support": 927
+        },
+        "ROLE_FACTS": {
+          "precision": 0.4225,
+          "recall": 0.6759,
+          "f1": 0.52,
+          "support": 577
+        },
+        "COMPANY_CONTEXT": {
+          "precision": 0.3049,
+          "recall": 0.6842,
+          "f1": 0.4219,
+          "support": 361
+        }
+      }
+    },
+    "128": {
+      "accuracy": 0.6543,
+      "macro_f1": 0.5559,
+      "content_loss_pct": 8.44,
+      "per_class": {
+        "SKILL_DUTY": {
+          "precision": 0.8797,
+          "recall": 0.6823,
+          "f1": 0.7685,
+          "support": 3547
+        },
+        "BOILERPLATE": {
+          "precision": 0.5659,
+          "recall": 0.5329,
+          "f1": 0.5489,
+          "support": 927
+        },
+        "ROLE_FACTS": {
+          "precision": 0.4012,
+          "recall": 0.6759,
+          "f1": 0.5036,
+          "support": 577
+        },
+        "COMPANY_CONTEXT": {
+          "precision": 0.2904,
+          "recall": 0.6565,
+          "f1": 0.4027,
+          "support": 361
+        }
+      }
+    },
+    "64": {
+      "accuracy": 0.6231,
+      "macro_f1": 0.5271,
+      "content_loss_pct": 8.61,
+      "per_class": {
+        "SKILL_DUTY": {
+          "precision": 0.8663,
+          "recall": 0.6501,
+          "f1": 0.7428,
+          "support": 3547
+        },
+        "BOILERPLATE": {
+          "precision": 0.5384,
+          "recall": 0.4844,
+          "f1": 0.5099,
+          "support": 927
+        },
+        "ROLE_FACTS": {
+          "precision": 0.3763,
+          "recall": 0.643,
+          "f1": 0.4747,
+          "support": 577
+        },
+        "COMPANY_CONTEXT": {
+          "precision": 0.2645,
+          "recall": 0.6814,
+          "f1": 0.3811,
+          "support": 361
+        }
+      }
+    }
+  },
+  "production_384d_metrics": {
+    "accuracy": 0.6707,
+    "macro_f1": 0.5756,
+    "content_loss_pct": 8.29,
+    "per_class": {
+      "SKILL_DUTY": {
+        "precision": 0.8848,
+        "recall": 0.6952,
+        "f1": 0.7787,
+        "support": 3547
+      },
+      "BOILERPLATE": {
+        "precision": 0.5804,
+        "recall": 0.5609,
+        "f1": 0.5705,
+        "support": 927
+      },
+      "ROLE_FACTS": {
+        "precision": 0.427,
+        "recall": 0.6846,
+        "f1": 0.526,
+        "support": 577
+      },
+      "COMPANY_CONTEXT": {
+        "precision": 0.3097,
+        "recall": 0.6898,
+        "f1": 0.4275,
+        "support": 361
+      }
+    }
+  },
+  "full_768d_metrics": {
+    "accuracy": 0.6792,
+    "macro_f1": 0.5864,
+    "content_loss_pct": 8.58,
+    "per_class": {
+      "SKILL_DUTY": {
+        "precision": 0.8803,
+        "recall": 0.7026,
+        "f1": 0.7814,
+        "support": 3547
+      },
+      "BOILERPLATE": {
+        "precision": 0.5854,
+        "recall": 0.5879,
+        "f1": 0.5867,
+        "support": 927
+      },
+      "ROLE_FACTS": {
+        "precision": 0.442,
+        "recall": 0.6672,
+        "f1": 0.5318,
+        "support": 577
+      },
+      "COMPANY_CONTEXT": {
+        "precision": 0.3261,
+        "recall": 0.7036,
+        "f1": 0.4456,
+        "support": 361
+      }
+    }
+  }
+}

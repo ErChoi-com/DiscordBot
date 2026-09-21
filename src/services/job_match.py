@@ -1729,6 +1729,71 @@ def judge_jobs(
     return rankings, f"ok:{provider}"
 
 
+def judge_jobs_neural(
+    signal: ProfileSignal,
+    jobs: list[ArchivedJob],
+    dim: int | None = None,
+) -> tuple[dict[int, JudgeVerdict] | None, str]:
+    """Offline neural ranking of candidate jobs using pure Nomic embeddings.
+
+    Scores full resume text against complete job descriptions at dynamically
+    resolved dimension dim, factoring in semantic similarity and seniority alignment
+    without requiring external LLM APIs or network roundtrips.
+    """
+    if not jobs or not signal.document_text:
+        return None, "skipped: nothing to judge"
+
+    try:
+        from services.semantic.engine import get_semantic_engine
+        engine = get_semantic_engine()
+        target_dim = engine.resolve_dynamic_dimension(
+            workload="neural_judge", batch_size=len(jobs), requested_dim=dim
+        )
+    except Exception as exc:
+        return None, f"failed: {exc}"
+
+    # Extract job texts
+    job_texts: list[str] = []
+    for j in jobs:
+        desc = (j.description or "").strip()
+        header = " | ".join(p for p in [j.title, j.company, j.location] if p)
+        text = f"{header}\n{desc}" if desc else header
+        job_texts.append(text)
+
+    # Batch score semantic fit (Nomic 8192-token context window)
+    try:
+        fit_scores = engine.score_resume_fit_batch(
+            signal.document_text,
+            job_texts,
+            dim=target_dim,
+        )
+    except Exception as exc:
+        return None, f"failed: {exc}"
+
+    verdicts: dict[int, JudgeVerdict] = {}
+    for idx, (job, fit) in enumerate(zip(jobs, fit_scores)):
+        # Calculate level alignment
+        lvl_score = score_level(
+            job.title,
+            signal,
+            description=job.description,
+            employment_type=job.employment_type,
+            level=job.level,
+        )
+        # Combined score: 75% semantic fit + 25% level alignment
+        final_score = round(0.75 * fit + 0.25 * lvl_score, 4)
+        pct = int(round(final_score * 100))
+        reason = f"Nomic neural fit: {int(round(fit*100))}% semantic match, level score {int(round(lvl_score*100))}%"
+        verdicts[idx] = JudgeVerdict(
+            score=max(0.0, min(1.0, final_score)),
+            reason=reason[:120],
+            entries=(),
+            gap="",
+        )
+
+    return verdicts, "ok:nomic-neural"
+
+
 # ---------------------------------------------------------------------------
 # Ranking
 # ---------------------------------------------------------------------------
@@ -1770,6 +1835,8 @@ def rank_jobs(
     enrich: bool = True,
     llm_candidates: int | None = None,
     enrich_candidates: int | None = None,
+    use_neural_judge: bool = False,
+    neural_dim: int | None = None,
 ) -> MatchReport:
     """Prefilter every job, then have the judge score the shortlist.
 
@@ -1791,7 +1858,7 @@ def rank_jobs(
     fetch_budget = max(
         1, enrich_candidates if enrich_candidates is not None else ENRICH_CANDIDATES
     )
-    if settings is not None and scored:
+    if scored and (settings is not None or use_neural_judge):
         shortlist = scored[:shortlist_size]
         if enrich:
             # The whole shortlist is offered to the cache -- a hit costs nothing
@@ -1801,9 +1868,18 @@ def rank_jobs(
             enriched = enrich_descriptions(
                 [job for job, _ in shortlist], max_fetches=fetch_budget
             )
-        rankings, ranker = judge_jobs(
-            signal, [job for job, _ in shortlist], settings, client_factory
-        )
+        rankings = None
+        if settings is not None:
+            rankings, ranker = judge_jobs(
+                signal, [job for job, _ in shortlist], settings, client_factory
+            )
+        if rankings is None and use_neural_judge:
+            neural_rankings, neural_ranker = judge_jobs_neural(
+                signal, [job for job, _ in shortlist], dim=neural_dim
+            )
+            if neural_rankings is not None:
+                rankings, ranker = neural_rankings, neural_ranker
+
         if rankings is not None:
             judged: list[tuple[ArchivedJob, JobScore]] = []
             unjudged: list[tuple[ArchivedJob, JobScore]] = []
@@ -1845,6 +1921,8 @@ def best_jobs(
     role_filters: Iterable[str] = (),
     exclusion_terms: Iterable[str] = (),
     allow_north_america: bool | None = None,
+    use_neural_judge: bool = True,
+    neural_dim: int | None = None,
 ) -> MatchReport:
     """Top-``limit`` archived jobs for ``profile_key`` over ``window``.
 
@@ -1877,6 +1955,8 @@ def best_jobs(
         enrich=enrich,
         llm_candidates=llm_candidates,
         enrich_candidates=enrich_candidates,
+        use_neural_judge=use_neural_judge,
+        neural_dim=neural_dim,
     )
 
 

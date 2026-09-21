@@ -172,8 +172,8 @@ GLASSDOOR_LOCATION_COUNTRY_PATTERN = re.compile(r'"addressCountry"\s*:\s*"([^"]+
 GLASSDOOR_CARD_AGE_PATTERN = re.compile(r'(?<!\d)(\d+)\s*([hd])\+?(?!\d)', re.IGNORECASE)
 # ── Semantic plugin (overridden at startup from settings.toml via configure_job_service) ──
 SEMANTIC_PLUGIN_ENABLED: bool = True
-SEMANTIC_PLUGIN_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"
-SEMANTIC_PLUGIN_THRESHOLD: float = 0.30
+SEMANTIC_PLUGIN_MODEL_NAME: str = "nomic-ai/nomic-embed-text-v1.5"
+SEMANTIC_PLUGIN_THRESHOLD: float = 0.55
 SEMANTIC_MATCH_TARGET: str = "description"
 SEMANTIC_DESCRIPTION_CHAR_LIMIT: int = 2200
 # Texts per model call. Thirty candidates is a typical channel; the cap only
@@ -2468,6 +2468,11 @@ def semantic_plugin_available() -> bool:
         )
         return False
     try:
+        from services.semantic.engine import get_semantic_engine
+        return True
+    except Exception:
+        pass
+    try:
         import sentence_transformers  # noqa: F401
         return True
     except Exception:
@@ -2480,13 +2485,19 @@ def load_semantic_plugin_model() -> Any | None:
         return None
     # Before the import: the tokenizers' thread pool is sized at import time.
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    _bound_inference_threads()
+    if "nomic" in SEMANTIC_PLUGIN_MODEL_NAME.lower():
+        try:
+            from services.semantic.engine import get_semantic_engine
+            return get_semantic_engine()
+        except Exception:
+            pass
     try:
         from sentence_transformers import SentenceTransformer
         model = SentenceTransformer(SEMANTIC_PLUGIN_MODEL_NAME)
     except Exception as exc:
         print(f"Semantic plugin disabled (model load failed): {exc}")
         return None
-    _bound_inference_threads()
     return model
 
 
@@ -2548,6 +2559,13 @@ def semantic_similarity_score(text_a: str, text_b: str) -> float:
         return 1.0
 
     try:
+        if hasattr(model, "score_resume_fit"):
+            import numpy as np
+            vec_a = model.encode(text_a, dim=384, task_type="search_query")
+            vec_b = model.encode(text_b, dim=384, task_type="search_document")
+            if vec_a is not None and vec_b is not None:
+                return float(np.dot(vec_a, vec_b))
+
         from sentence_transformers import util
 
         embeddings = model.encode([text_a, text_b], normalize_embeddings=True)
@@ -2563,11 +2581,18 @@ def semantic_similarity_score_max(texts: list[str], search_text: str) -> float:
     if not texts:
         return 0.0
     if len(texts) == 1:
-        return semantic_similarity_score(texts[0], search_text)
+        return semantic_similarity_score(search_text, texts[0])
     model = load_semantic_plugin_model()
     if model is None:
         return 1.0
     try:
+        if hasattr(model, "score_resume_fit"):
+            import numpy as np
+            q_vec = model.encode(search_text, dim=384, task_type="search_query")
+            d_vecs = model.encode(texts, dim=384, task_type="search_document")
+            if q_vec is not None and d_vecs is not None:
+                return float(np.max(np.dot(d_vecs, q_vec)))
+
         from sentence_transformers import util
         all_texts = [search_text] + texts
         embeddings = model.encode(all_texts, normalize_embeddings=True)
@@ -2665,7 +2690,15 @@ def semantic_filter_items(
         # no business of the one call at a time this lock exists to enforce.
         batch = semantic_encode_batch()
         with _SEMANTIC_INFERENCE_LOCK:
-            embeddings = model.encode(texts, normalize_embeddings=True, batch_size=batch)
+            if hasattr(model, "score_resume_fit"):
+                query_vec = model.encode(texts[0], dim=384, task_type="search_query")
+                doc_vecs = model.encode(texts[1:], dim=384, task_type="search_document", batch_size=batch)
+                if query_vec is not None and doc_vecs is not None:
+                    embeddings = [query_vec] + list(doc_vecs)
+                else:
+                    embeddings = model.encode(texts, normalize_embeddings=True, batch_size=batch)
+            else:
+                embeddings = model.encode(texts, normalize_embeddings=True, batch_size=batch)
         # Normalised, so cosine is the dot product. Spelled out rather than
         # through numpy: it is thirty rows of 384 floats, and numpy is a
         # dependency of the optional model rather than of this module.

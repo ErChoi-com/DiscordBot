@@ -1148,9 +1148,8 @@ def _extract_jd_tools(description: str, skill_anchors: tuple[str, ...]) -> list[
 
 
 # Hard ceiling on a free-form directive at the prompt layer. The Discord
-# handler already clamps, but the CLI entry points (.e2e_pipeline.py,
-# scripts/run_resume.py) pass argv straight through, so the guarantee has to
-# live where the prompt is actually assembled.
+# handler already clamps, but CLI entry points (.e2e_pipeline.py) pass argv
+# straight through, so the guarantee has to live where the prompt is actually assembled.
 MAX_USER_DIRECTIVE_CHARS = 600
 
 

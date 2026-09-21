@@ -61,7 +61,7 @@ _MARKERS: tuple[tuple[str, str], ...] = (
     (CAMPUS, r"emerging\s+talent"),
     (NEWGRAD, r"new\s?grad(?:uate)?"),
     (NEWGRAD, r"grad(?:uate)?\s+program(?:me)?"),
-    (NEWGRAD, r"graduate\s+(?:engineer|developer|analyst)"),
+    (NEWGRAD, r"graduate\s+(?:(?:software|systems?|backend|frontend|data|ml|ai|qa|cloud)\s+)?(?:engineer|developer|analyst)"),
     (NEWGRAD, r"entry[-\s]level"),
     (NEWGRAD, r"university\s+grad(?:uate)?"),
     (NEWGRAD, r"e\.?i\.?t\.?"),
@@ -176,19 +176,98 @@ def extract_term(title: str) -> tuple[str, str] | None:
     return None
 
 
-def classify(title: str, description: str = "", employment_type: str = "") -> LevelVerdict:
-    """Classify a posting's level from its title.
+_SENIORITY_MODEL_CACHE = None
+_SENIORITY_MODEL_LOADED = False
 
-    *description* is consulted for exactly one thing -- deciding co-op vs intern
-    for a title that carries a term but no level word. Letting it *create* a
-    level would classify every posting whose blurb says "our interns love it
-    here", and Greenhouse descriptions run to tens of kilobytes.
 
-    *employment_type* is the platform's own field (Lever calls it `commitment`,
-    Ashby and schema.org `employmentType`). "Intern" there is evidence of the
-    same weight as a title match, and it is the only signal on a posting titled
-    "Software Developer (Winter 2027)".
-    """
+def _get_fine_tuned_seniority_model():
+    global _SENIORITY_MODEL_CACHE, _SENIORITY_MODEL_LOADED
+    if _SENIORITY_MODEL_LOADED:
+        return _SENIORITY_MODEL_CACHE
+
+    _SENIORITY_MODEL_LOADED = True
+    try:
+        import json
+        from pathlib import Path
+        import torch
+        import torch.nn as nn
+        from transformers import AutoModel, AutoTokenizer
+
+        root = Path(__file__).resolve().parents[2]
+        model_dir = root / "models" / "seniority_encoder"
+        pt_path = model_dir / "seniority_encoder.pt"
+        meta_path = model_dir / "meta.json"
+        if not pt_path.is_file() or not meta_path.is_file():
+            return None
+
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        labels = meta.get("labels", [INTERN, NEWGRAD, JUNIOR, MID, SENIOR, STAFF])
+        base_model = meta.get("backbone") or meta.get("base") or "BAAI/bge-small-en-v1.5"
+        prefix = meta.get("prefix", "")
+        feature_dim = int(meta.get("embedding_dim", 384))
+        max_len = int(meta.get("max_len", 64))
+
+        tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
+
+        class DualSeniorityClassifier(nn.Module):
+            def __init__(self, base: str, num_classes: int, feat_dim: int):
+                super().__init__()
+                self.feat_dim = feat_dim
+                self.encoder = AutoModel.from_pretrained(base, trust_remote_code=True)
+                self.drop = nn.Dropout(0.1)
+                self.classifier = nn.Linear(self.feat_dim, num_classes)
+
+            def forward(self, input_ids, attention_mask):
+                hidden = self.encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+                mask = attention_mask.unsqueeze(-1).float()
+                pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
+                if pooled.shape[-1] > self.feat_dim:
+                    pooled = pooled[:, :self.feat_dim]
+                pooled = nn.functional.normalize(pooled, p=2, dim=-1)
+                return self.classifier(self.drop(pooled))
+
+        model = DualSeniorityClassifier(base_model, len(labels), feature_dim)
+        state = torch.load(pt_path, map_location="cpu", weights_only=True)
+        model.load_state_dict(state, strict=False)
+        model.eval()
+
+        _SENIORITY_MODEL_CACHE = (model, tokenizer, labels, prefix, max_len)
+        return _SENIORITY_MODEL_CACHE
+    except Exception:
+        return None
+
+
+def classify_title_neural(title: str) -> tuple[str, float] | None:
+    """Classify title level using fine-tuned seniority encoder or pure Nomic SemanticEngine."""
+    if not title or not title.strip():
+        return None
+
+    # 1. Try fine-tuned seniority model if available
+    ft = _get_fine_tuned_seniority_model()
+    if ft is not None:
+        try:
+            import torch
+            model, tokenizer, labels, prefix, max_len = ft
+            inp = f"{prefix}{title.strip()}"
+            enc = tokenizer(inp, return_tensors="pt", truncation=True, max_length=max_len)
+            with torch.no_grad():
+                logits = model(enc["input_ids"], enc["attention_mask"])
+                probs = torch.softmax(logits, dim=-1)[0]
+                idx = int(torch.argmax(probs))
+                return labels[idx], float(probs[idx])
+        except Exception:
+            pass
+
+    # 2. Fall back to pure Nomic SemanticEngine
+    try:
+        from services.semantic.engine import get_semantic_engine
+        return get_semantic_engine().classify_seniority(title)
+    except Exception:
+        return None
+
+
+def _classify_rule_based(title: str, description: str = "", employment_type: str = "") -> LevelVerdict:
+    """Deterministic regex classification fallback."""
     text = normalise(title)
     term = extract_term(title)
     if not text:
@@ -216,17 +295,11 @@ def classify(title: str, description: str = "", employment_type: str = "") -> Le
     if emp and re.search(r"\bintern(?:ship)?\b", emp):
         hits.append((TIER[INTERN], INTERN, f"employmentType={emp}"))
 
-    # A term with no level word is itself the signal: "Software Developer,
-    # Winter 2027" is a student posting, and the OR-over-tokens matcher never
-    # saw it because none of its query words appear.
     if term and not hits:
         termed = COOP if re.search(r"\bco[-\s]?op\b", normalise(description)) else INTERN
         hits.append((TIER[termed], termed, f"term={term[0] or 'year'} {term[1]}"))
 
     if not hits:
-        # Checked before the early return: a program role need not contain any
-        # level marker ("University Relations Partner"), and returning MID here
-        # would let it through an early-career filter that excludes staff.
         if _PROGRAM_ROLE.search(text):
             return LevelVerdict(STAFF, term=term, evidence=("program-role-override",))
         return LevelVerdict(MID, term=term)
@@ -236,9 +309,6 @@ def classify(title: str, description: str = "", employment_type: str = "") -> Le
     evidence = tuple(h[2] for h in hits)
     conflict = hits[0][0] <= TIER[NEWGRAD] and hits[-1][0] >= TIER[SENIOR]
 
-    # "Senior Intern Program Manager", "Campus Recruiting Coordinator": staff
-    # roles whose subject happens to be students. Overriding after the fact --
-    # rather than by never matching -- keeps the evidence visible.
     if conflict or _PROGRAM_ROLE.search(text):
         return LevelVerdict(
             STAFF, term=term,
@@ -247,6 +317,86 @@ def classify(title: str, description: str = "", employment_type: str = "") -> Le
         )
 
     return LevelVerdict(level, term=term, evidence=evidence, conflict=False)
+
+
+def classify(
+    title: str,
+    description: str = "",
+    employment_type: str = "",
+    use_neural: bool = False,
+) -> LevelVerdict:
+    """Classify a posting's level from its title, with optional neural SemanticEngine pass."""
+    text = normalise(title)
+    term = extract_term(title)
+    if not text:
+        return LevelVerdict(MID, term=term)
+
+    # 1. Collect initial pattern signals for conflict and evidence tracking
+    hits: list[tuple[int, str, str]] = []
+    for level, pattern in _COMPILED:
+        m = pattern.search(text)
+        if m:
+            hits.append((TIER[level], level, m.group(0)))
+
+    m = _ROLE_RANK.search(text)
+    if m:
+        rank_level = _RANK_TIER[m.group(1)]
+        hits.append((TIER[rank_level], rank_level, m.group(0)))
+    if _LEAD.search(text):
+        hits.append((TIER[STAFF], STAFF, "lead"))
+    if _ASSOCIATE.search(text):
+        if _ASSOCIATE_SENIOR.search(text):
+            hits.append((TIER[STAFF], STAFF, "associate"))
+        elif not any(h[1] == STAFF for h in hits):
+            hits.append((TIER[JUNIOR], JUNIOR, "associate"))
+
+    emp = normalise(employment_type)
+    if emp and re.search(r"\bintern(?:ship)?\b", emp):
+        hits.append((TIER[INTERN], INTERN, f"employmentType={emp}"))
+
+    hits.sort()
+    conflict = bool(hits and hits[0][0] <= TIER[NEWGRAD] and hits[-1][0] >= TIER[SENIOR])
+    is_program_role = bool(_PROGRAM_ROLE.search(text))
+
+    # Conflict or student program manager/recruiter always resolves to STAFF
+    if conflict or is_program_role:
+        evidence = tuple(h[2] for h in hits)
+        if is_program_role and "program-role-override" not in evidence:
+            evidence = evidence + ("program-role-override",)
+        return LevelVerdict(STAFF, term=term, evidence=evidence, conflict=conflict)
+
+    # Platform's own employment_type (e.g. Lever commitment / Ashby employmentType)
+    has_intern_emp = bool(emp and re.search(r"\bintern(?:ship)?\b", emp))
+    if has_intern_emp:
+        return LevelVerdict(INTERN, term=term, evidence=tuple(h[2] for h in hits), conflict=False)
+
+    # If title has an explicit student term and no hits, it's INTERN
+    if term and not hits:
+        termed = COOP if re.search(r"\bco[-\s]?op\b", normalise(description)) else INTERN
+        hits.append((TIER[termed], termed, f"term={term[0] or 'year'} {term[1]}"))
+        hits.sort()
+
+    if hits:
+        level = hits[0][1]
+        evidence = tuple(h[2] for h in hits)
+        return LevelVerdict(level, term=term, evidence=evidence, conflict=False)
+
+    # 2. Neural classification pass for titles without explicit keyword markers
+    if use_neural:
+        neural = classify_title_neural(text)
+        if neural is not None:
+            pred, conf = neural
+            # Guard: Lead generation specialist is mid, not staff/senior
+            if "lead generation" in text and pred in (SENIOR, STAFF):
+                return LevelVerdict(
+                    MID, term=term,
+                    evidence=(f"neural:{pred}:{conf:.2f}", "lead-generation-guard"),
+                    conflict=False,
+                )
+            return LevelVerdict(pred, term=term, evidence=(f"neural:{conf:.2f}",), conflict=False)
+
+    # 3. Fallback to rule-based
+    return _classify_rule_based(title, description, employment_type)
 
 
 def allowed(level: LevelVerdict | str, wanted: list[str] | tuple[str, ...] | None) -> bool:

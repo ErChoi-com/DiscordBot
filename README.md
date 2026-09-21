@@ -1196,9 +1196,9 @@ application.
 `.resumecheck` to compile the template with no LLM in the loop and isolate
 whether the problem is the template/TeX install or the generated content.
 
-**Debug scripts** live in `scripts/`: `bootstrap_profile.py`,
-`debug_glassdoor_trace.py`, `migrate_to_sqlite.py`, `run_resume.py`, and several
-targeted `test_*.py` probes. `.e2e_pipeline.py` in the root runs a full
+**Debug scripts and utilities** live in `scripts/`: `bootstrap_profile.py`,
+diagnostic tools (`validate_ats.py`, `compute_metrics.py`), and several
+targeted `test_*.py` probes in `tests/`. `.e2e_pipeline.py` in the root runs a full
 channel-settings → scrape → resume → PDF pass outside Discord.
 
 ---

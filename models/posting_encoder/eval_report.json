@@ -1,0 +1,70 @@
+{
+  "pieces": 9332,
+  "accuracy": 0.7058508358336906,
+  "classes": {
+    "SKILL_DUTY": {
+      "precision": 0.8673706441393876,
+      "recall": 0.7210323033707865,
+      "support": 5696
+    },
+    "ROLE_FACTS": {
+      "precision": 0.5674342105263158,
+      "recall": 0.6976744186046512,
+      "support": 989
+    },
+    "COMPANY_CONTEXT": {
+      "precision": 0.5026833631484794,
+      "recall": 0.7604871447902571,
+      "support": 739
+    },
+    "BOILERPLATE": {
+      "precision": 0.5426425099425541,
+      "recall": 0.6436058700209644,
+      "support": 1908
+    }
+  },
+  "thresholds": {
+    "0.5": {
+      "boilerplate_removed": 0.4119496855345912,
+      "wrong_pieces": 382,
+      "content_char_loss": 0.05497838928208486
+    },
+    "0.7": {
+      "boilerplate_removed": 0.09171907756813417,
+      "wrong_pieces": 15,
+      "content_char_loss": 0.0036743086169001514
+    },
+    "0.8": {
+      "boilerplate_removed": 0.037211740041928724,
+      "wrong_pieces": 1,
+      "content_char_loss": 0.00012372813730764792
+    },
+    "0.9": {
+      "boilerplate_removed": 0.0015723270440251573,
+      "wrong_pieces": 0,
+      "content_char_loss": 0.0
+    },
+    "0.95": {
+      "boilerplate_removed": 0.0,
+      "wrong_pieces": 0,
+      "content_char_loss": 0.0
+    },
+    "0.98": {
+      "boilerplate_removed": 0.0,
+      "wrong_pieces": 0,
+      "content_char_loss": 0.0
+    },
+    "0.99": {
+      "boilerplate_removed": 0.0,
+      "wrong_pieces": 0,
+      "content_char_loss": 0.0
+    }
+  },
+  "terms": {
+    "precision": 0.4796224796224796,
+    "recall": 0.4262295081967213,
+    "f1": 0.45135244247073075,
+    "gold_terms": 5246,
+    "hits": 2236
+  }
+}

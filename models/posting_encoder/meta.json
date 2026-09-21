@@ -1,0 +1,1 @@
+{"base": "sentence-transformers/all-MiniLM-L6-v2", "labels": ["SKILL_DUTY", "ROLE_FACTS", "COMPANY_CONTEXT", "BOILERPLATE"], "max_len": 128}

@@ -81,18 +81,8 @@ def _sync_geonames() -> bool:
 #
 # Worst case by construction: almost every platform finishes in seconds, and
 # only the largest fleets approach their bound at all.
-ATS_PLATFORM_TIMEOUT_S = 600
-
-# What the fan-out inside a platform is allowed to WAIT for, as opposed to the
-# hard bound above. It has to be strictly smaller: when the fan-out gives up it
-# cancels everything still queued, but fetches already in flight cannot be
-# cancelled and the pool's context manager waits the longest of them out. That
-# drain is bounded by the per-request timeout and its retries, not by the fleet
-# size, so leaving a couple of request-timeouts of room is what lets a platform
-# return under its own bound instead of being abandoned at it -- still holding
-# a scheduler worker, which is the failure this pair of numbers exists to
-# prevent.
-ATS_PLATFORM_DRAIN_MARGIN_S = 120
+ATS_PLATFORM_TIMEOUT_S = 1800
+ATS_PLATFORM_DRAIN_MARGIN_S = 180
 ATS_PLATFORM_FANOUT_BUDGET_S = ATS_PLATFORM_TIMEOUT_S - ATS_PLATFORM_DRAIN_MARGIN_S
 
 # How much more of its fleet a platform is offered after a cycle in which it
@@ -130,7 +120,11 @@ ATS_VALIDATION_BUDGET_S = 900.0
 ATS_HARVEST_BUDGET_S = 900.0
 
 
-def ats_cycle_timeout(platform_count: int, workers: int) -> int:
+def ats_cycle_timeout(
+    platform_count: int,
+    workers: int,
+    platform_timeout: int | float | None = None,
+) -> int:
     """Long enough for every platform to get a turn on THIS host.
 
     A fixed 1800s assumed the roster fits in three waves, which was true at
@@ -144,8 +138,9 @@ def ats_cycle_timeout(platform_count: int, workers: int) -> int:
     a wave, on any host, which is the failure mode this codebase keeps finding:
     something stops happening and nothing says so.
     """
+    per_platform = int(platform_timeout or ATS_PLATFORM_TIMEOUT_S)
     waves = max(1, math.ceil(max(platform_count, 1) / max(workers, 1)))
-    return min(waves * ATS_PLATFORM_TIMEOUT_S, ATS_CYCLE_TIMEOUT_CAP_S)
+    return min(waves * per_platform, ATS_CYCLE_TIMEOUT_CAP_S)
 
 def ats_fanout_cap(
     fleet_size: int,
@@ -233,31 +228,64 @@ def exception_text(exc: BaseException) -> str:
 
 
 def ats_platform_slots(workers: int, reserved_interactive: int = 0) -> int:
-    """How many ATS platforms may hold a scheduler worker at the same time.
-
-    The fan-out submitted every platform at once. That is fine as arbitration
-    -- each one is a separate scheduler task, so nothing is hidden from the
-    worker accounting -- but arbitration only orders the *queue*, and these
-    tasks run for minutes each with nothing to preempt them. Eighteen
-    platforms against ten general workers therefore did not share the pool
-    with the job and reddit watchers; it took the pool, and the watchers sat
-    behind it until the next cycle pushed them back again.
-
-    Measured on this host while the watchers had gone quiet for six hours:
-    workers=12 active=12, `completed` frozen at 20 across three consecutive
-    watchdog dumps, one lever scrape at 2,584s, and three job scrapes queued.
-    Glassdoor and ZipRecruiter both returned rows the whole time when run by
-    hand -- they were never asked.
-
-    Half the general workers, because the point is a floor for everything
-    else rather than a ceiling for ATS: it is the same shape as the
-    scheduler's own reserved-interactive floor, one tier down, where the
-    contention now is background against background. The reserved-interactive
-    workers are excluded because ATS work cannot run on them anyway, so
-    counting them would quietly hand ATS more of the pool than intended.
-    """
+    """Static fallback for ATS platform slots: half of general workers."""
     general = max(1, workers - max(0, reserved_interactive))
     return max(1, general // 2)
+
+
+def dynamic_ats_platform_slots(
+    scheduler_or_stats: Any,
+    override: int | None = None,
+    min_slots: int | None = None,
+    max_slots: int | None = None,
+) -> int:
+    """Dynamically recalculate how many ATS platforms may run concurrently.
+
+    Instead of a fixed static split, this recalculates from live scheduler state:
+    - If other background tasks (job watcher scraping, reddit scraping) or user commands
+      are queued or in-flight, ATS yields workers and throttles back down to its floor.
+    - If the scheduler is otherwise idle (no competing tasks queued or active), ATS dynamically
+      expands up to `general - 1` (or max_slots) to drain the fleet much faster.
+    """
+    if override is not None and override > 0:
+        return override
+
+    if hasattr(scheduler_or_stats, "stats") and callable(scheduler_or_stats.stats):
+        stats = scheduler_or_stats.stats()
+    elif isinstance(scheduler_or_stats, dict):
+        stats = scheduler_or_stats
+    else:
+        workers = int(scheduler_or_stats or 1)
+        return max(1, workers // 2)
+
+    workers = max(1, int(stats.get("workers", 1) or 1))
+    reserved = max(0, int(stats.get("reserved_interactive", 0) or 0))
+    general = max(1, workers - reserved)
+
+    # Count active non-ATS work currently holding workers
+    in_flight = stats.get("in_flight") or []
+    other_in_flight = 0
+    for item in in_flight:
+        label = item[0] if isinstance(item, (tuple, list)) and item else str(item)
+        if label and not str(label).startswith("ats_scrape"):
+            other_in_flight += 1
+
+    # Count competing tasks waiting in queue
+    queued_competing = (
+        int(stats.get("queued_interactive", 0) or 0)
+        + int(stats.get("queued_promoted", 0) or 0)
+        + int(stats.get("queued_background", 0) or 0)
+    )
+
+    # Floor: safe minimum so ATS never completely stalls (at least general // 3, min 1)
+    floor = min_slots if min_slots is not None else max(1, general // 3)
+    # Ceiling: always leave at least 1 worker for unexpected watcher wakeups
+    ceiling = max_slots if max_slots is not None else max(1, general - 1)
+
+    # Dynamic available: general workers minus competing demand
+    dynamic_available = general - other_in_flight - queued_competing
+    return max(floor, min(dynamic_available, ceiling))
+
 
 
 _ATS_ROTATION_STATE = ".bot_state.ats_rotation.json"
@@ -938,7 +966,10 @@ class WatcherManager:
         from services import ats_service
 
         workers = ats_service.fanout_workers(platform, fleet_size)
-        floor = ats_service.fanout_capacity(ATS_PLATFORM_FANOUT_BUDGET_S, workers)
+        budget = getattr(
+            self.config, "ats_platform_fanout_budget_seconds", ATS_PLATFORM_FANOUT_BUDGET_S
+        )
+        floor = ats_service.fanout_capacity(budget, workers)
         fan = self._ats_last_fanout(platform)
         return ats_fanout_cap(
             fleet_size, head_size, floor, fan["submitted"], fan["completed"],
@@ -1467,11 +1498,14 @@ class WatcherManager:
             try:
                 async def _scrape_one_bounded(platform: str) -> list[dict[str, Any]]:
                     try:
+                        timeout = getattr(
+                            self.config, "ats_platform_timeout_seconds", ATS_PLATFORM_TIMEOUT_S
+                        )
                         return await asyncio.wait_for(
                             self._tracked_to_thread(
                                 _scrape_one, platform, label=scheduler_labels.ats_scrape_label(platform)
                             ),
-                            timeout=ATS_PLATFORM_TIMEOUT_S,
+                            timeout=timeout,
                         )
                     except Exception as exc:
                         # A platform cut off at the 600s bound is exactly when
@@ -1579,7 +1613,9 @@ class WatcherManager:
                 # That only works if the cycle actually stops when it should,
                 # and without this it did not -- the fan-out's own budget ran
                 # to hours while its caller allowed ten minutes.
-                max_seconds=ATS_PLATFORM_FANOUT_BUDGET_S,
+                max_seconds=getattr(
+                    self.config, "ats_platform_fanout_budget_seconds", ATS_PLATFORM_FANOUT_BUDGET_S
+                ),
             )
             new_count = log_jobs(result) if result else 0
             fan = self._ats_last_fanout(platform)
@@ -1613,33 +1649,41 @@ class WatcherManager:
         platforms: list[str],
         scrape_one: Callable[[str], Awaitable[list[dict[str, Any]]]],
     ) -> list[list[dict[str, Any]]]:
-        """Run every platform, at most ats_platform_slots() of them at a time.
+        """Run every platform, with worker slots dynamically recalculated from scheduler demand.
 
-        Bounded rather than one submission per platform all at once: see
-        ats_platform_slots for what the unbounded fan-out did to the watchers.
-
-        The same number is what the cycle bound is derived from.
-        ats_cycle_timeout counts waves, and a wave is now this wide instead of
-        the whole pool; passing the worker count here would under-estimate the
-        cycle and cancel its last wave, which is the exact failure that
-        function exists to prevent.
+        Bounded dynamically rather than one static split: when the bot has no other competing
+        watchers or queued tasks, ATS expands to take advantage of available workers. When other
+        tasks enter the scheduler, ATS throttles down to its floor to share the pool politely.
         """
-        stats = self.scheduler.stats()
-        slots = ats_platform_slots(
-            int(stats.get("workers", 1) or 1),
-            int(stats.get("reserved_interactive", 0) or 0),
-        )
-        gate = asyncio.Semaphore(slots)
+        active_ats = 0
+        cond = asyncio.Condition()
 
         async def _gated(platform: str) -> list[dict[str, Any]]:
-            # Acquired outside scrape_one so that its own per-platform budget
-            # measures the scrape rather than the wait for a slot.
-            async with gate:
+            nonlocal active_ats
+            async with cond:
+                while True:
+                    allowed = dynamic_ats_platform_slots(self.scheduler)
+                    if active_ats < allowed:
+                        active_ats += 1
+                        break
+                    try:
+                        await asyncio.wait_for(cond.wait(), timeout=10.0)
+                    except asyncio.TimeoutError:
+                        pass
+            try:
                 return await scrape_one(platform)
+            finally:
+                async with cond:
+                    active_ats = max(0, active_ats - 1)
+                    cond.notify_all()
 
+        current_slots = dynamic_ats_platform_slots(self.scheduler)
+        timeout_bound = getattr(
+            self.config, "ats_platform_timeout_seconds", ATS_PLATFORM_TIMEOUT_S
+        )
         return await asyncio.wait_for(
             asyncio.gather(*[_gated(p) for p in platforms]),
-            timeout=ats_cycle_timeout(len(platforms), slots),
+            timeout=ats_cycle_timeout(len(platforms), current_slots, timeout_bound),
         )
 
     def _ensure_ats_scrape_loop(self) -> None:

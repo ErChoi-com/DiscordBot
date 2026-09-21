@@ -411,6 +411,46 @@ _BEST_JOBS_WINDOW_ALIASES: dict[str, str] = {
 }
 
 
+def extract_best_jobs_dimension(payload: str) -> tuple[str, int | None, str | None]:
+    """Extract optional --dim <N> or --dim=<N> flag from bestjobs payload.
+
+    Returns (cleaned_payload, dim_value_or_None, error_or_None).
+    """
+    from services.semantic.prompts import MATRYOSHKA_DIMS
+    tokens = str(payload).split()
+    cleaned_tokens: list[str] = []
+    dim_val: int | None = None
+    skip_next = False
+
+    for idx, token in enumerate(tokens):
+        if skip_next:
+            skip_next = False
+            continue
+        lowered = token.lower()
+        if lowered.startswith("--dim="):
+            raw = lowered.split("=", 1)[1]
+            if raw.isdigit() and int(raw) in MATRYOSHKA_DIMS:
+                dim_val = int(raw)
+            else:
+                return payload, None, f"Invalid dimension '{raw}'. Supported Matryoshka dimensions: {list(MATRYOSHKA_DIMS)}."
+            continue
+        elif lowered in ("--dim", "-dim"):
+            if idx + 1 < len(tokens) and tokens[idx + 1].isdigit():
+                candidate = int(tokens[idx + 1])
+                if candidate in MATRYOSHKA_DIMS:
+                    dim_val = candidate
+                    skip_next = True
+                    continue
+                else:
+                    return payload, None, f"Invalid dimension '{tokens[idx+1]}'. Supported Matryoshka dimensions: {list(MATRYOSHKA_DIMS)}."
+            else:
+                return payload, None, f"Flag {token} requires a dimension number: {list(MATRYOSHKA_DIMS)}."
+        else:
+            cleaned_tokens.append(token)
+
+    return " ".join(cleaned_tokens), dim_val, None
+
+
 def parse_best_jobs_payload(payload: str) -> tuple[str, int, str | None, bool, str | None]:
     """Parse ``[day|week] [N] [profile] [--fast]`` for the best-jobs command.
 
@@ -1691,6 +1731,10 @@ class CommandRouter:
         payload = _extract_command_payload(message.content, CMD_BEST_JOBS)
         if not payload:
             payload = _extract_command_payload(message.content, CMD_BEST_JOBS_ALIAS)
+        payload, neural_dim, dim_error = extract_best_jobs_dimension(payload)
+        if dim_error:
+            await message.channel.send(dim_error, **quiet_reply_kwargs(message))
+            return True
         window, limit, profile_token, enrich, error = parse_best_jobs_payload(payload)
         if error:
             await message.channel.send(error, **quiet_reply_kwargs(message))
@@ -1734,8 +1778,9 @@ class CommandRouter:
             )
             return True
 
+        dim_tag = f" · Nomic {neural_dim}-d" if neural_dim else ""
         status_note = (
-            "fetching descriptions, then ranking" if enrich else "ranking (fast, titles only)"
+            f"fetching descriptions, then ranking{dim_tag}" if enrich else f"ranking (fast, titles only){dim_tag}"
         )
         if not allowance.full:
             status_note += f" · {allowance.describe()}"
@@ -1761,6 +1806,7 @@ class CommandRouter:
                 role_filters=job_settings["role_filters"],
                 exclusion_terms=job_settings["exclusion_terms"],
                 allow_north_america=bool(job_settings.get("allow_north_america", False)),
+                neural_dim=neural_dim,
                 label=scheduler_labels.BEST_JOBS_RANK,
             )
         except Exception as exc:

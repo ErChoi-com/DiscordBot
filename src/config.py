@@ -32,8 +32,9 @@ class AppConfig:
 
     # ── Semantic plugin ───────────────────────────────────────────────────────
     semantic_enabled: bool = True
-    semantic_model: str = "sentence-transformers/all-MiniLM-L6-v2"
-    semantic_threshold: float = 0.30
+    semantic_model: str = "nomic-ai/nomic-embed-text-v1.5"
+    semantic_threshold: float = 0.55
+    semantic_dimension: int = 384
     semantic_match_target: str = "description"
     semantic_description_char_limit: int = 2200
 
@@ -77,10 +78,14 @@ class AppConfig:
     # If sustained load does provoke gating, the per-platform refusal breaker
     # now stops the platform after 25 consecutive refusals instead of spending
     # the whole budget on them, so the downside is bounded in a way it was not
-    # when this was first switched off.
     ats_bamboohr_enabled: bool = True
+    ats_platform_timeout_seconds: int = 1800
+    ats_platform_drain_margin_seconds: int = 180
 
-    # ── Job-watcher defaults ──────────────────────────────────────────────────
+    @property
+    def ats_platform_fanout_budget_seconds(self) -> int:
+        return max(60, self.ats_platform_timeout_seconds - self.ats_platform_drain_margin_seconds)
+
     job_default_keywords: str = "python developer"
     job_default_location: str = "Canada"
     job_default_radius_miles: int = 25
@@ -247,8 +252,9 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
         resume_cache_dir=root / ".resume_cache",
         # semantic
         semantic_enabled=bool(sem.get("enabled", True)),
-        semantic_model=str(sem.get("model", "sentence-transformers/all-MiniLM-L6-v2")),
-        semantic_threshold=float(sem.get("threshold", 0.30)),
+        semantic_model=str(sem.get("model", "nomic-ai/nomic-embed-text-v1.5")),
+        semantic_threshold=float(sem.get("threshold", 0.55)),
+        semantic_dimension=int(os.environ.get("SEMANTIC_DIMENSION") or sem.get("dimension", 384)),
         semantic_match_target=str(sem.get("match_target", "description")),
         semantic_description_char_limit=int(sem.get("description_char_limit", 2200)),
         # dedup
@@ -265,6 +271,14 @@ def load_config(base_dir: Path | None = None) -> AppConfig:
         discord_history_check_limit=int(wat.get("discord_history_check_limit", 5)),
         # ats
         ats_bamboohr_enabled=bool(ats.get("bamboohr_enabled", True)),
+        ats_platform_timeout_seconds=int(
+            os.environ.get("ATS_PLATFORM_TIMEOUT_SECONDS")
+            or ats.get("platform_timeout_seconds", 1800)
+        ),
+        ats_platform_drain_margin_seconds=int(
+            os.environ.get("ATS_PLATFORM_DRAIN_MARGIN_SECONDS")
+            or ats.get("platform_drain_margin_seconds", 180)
+        ),
         # scrape defaults
         scrape_max_items=int(sc.get("max_items", 20)),
         scrape_timeout_seconds=int(sc.get("timeout_seconds", 20)),

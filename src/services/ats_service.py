@@ -477,7 +477,10 @@ def _load_dead_slugs_locked(platform: str) -> set[str]:
                 # Legacy format — assign today's date so TTL starts now
                 dates: dict[str, str] = {slug: today for slug in data}
             elif isinstance(data, dict):
-                dates = data
+                dates = {
+                    slug: str(val.get("date", today) if isinstance(val, dict) else (val or today))
+                    for slug, val in data.items()
+                }
             else:
                 dates = {}
         except Exception:
@@ -3288,6 +3291,7 @@ def scrape_ats_platform(
     results_wanted: int = 20,
     company_slugs: list[str] | None = None,
     levels: list[str] | tuple[str, ...] | None = None,
+    max_seconds: float | int | None = None,
 ) -> list[dict[str, Any]]:
     scraper = _SCRAPERS.get(platform)
     if not scraper:
@@ -3316,9 +3320,12 @@ def scrape_ats_platform(
             pool.submit(scraper, slug, keywords, location, max_per_company): slug
             for slug in company_slugs
         }
-        per_slug = _collect_results(
-            futures, capacity.timeout(_fanout_budget(len(company_slugs), workers))
+        effective_budget = (
+            float(max_seconds)
+            if max_seconds is not None
+            else capacity.timeout(_fanout_budget(len(company_slugs), workers))
         )
+        per_slug = _collect_results(futures, effective_budget)
         # How much of the fleet this cycle actually reached. _collect_results
         # only printed the cancelled count, and reasoning about coverage from
         # that alone is how "43-100% of companies reached" was once misread as

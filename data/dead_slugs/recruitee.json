@@ -1,1030 +1,3702 @@
 {
-  "128collective": "2026-09-04",
-  "1on1english": "2026-09-02",
-  "21buttons": "2026-09-04",
-  "2piitsolutionsgmbh": "2026-09-04",
+  "128collective": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "1on1english": "2026-09-16",
+  "21buttons": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "2piitsolutionsgmbh": "2026-09-20",
   "4411": "2026-09-03",
-  "47mainwalpole": "2026-09-04",
-  "4germany": "2026-09-03",
-  "4players": "2026-09-03",
-  "4transholding": "2026-09-04",
-  "5ca": "2026-09-03",
-  "aanwerven": "2026-09-03",
-  "abaltatechnologiesinc": "2026-09-04",
-  "accordia": "2026-09-04",
-  "accusonus": "2026-09-05",
-  "ackeeblockchain": "2026-09-04",
-  "acmwerbeagentur": "2026-09-04",
-  "acordocerto": "2026-09-04",
-  "adamietzkollegengmbh": "2026-09-04",
-  "adcurasteuerberatungsgesellschaft": "2026-09-04",
-  "adfides": "2026-09-04",
-  "aerial": "2026-09-04",
-  "aio": "2026-09-06",
-  "alltapesupplies": "2026-09-06",
-  "aquaconsulting": "2026-09-05",
-  "atolye15": "2026-09-06",
-  "ats": "2026-09-02",
-  "auravision": "2026-09-06",
-  "autobahn": "2026-09-06",
-  "avaxadebtadvisors": "2026-09-06",
-  "awesomeprototype1": "2026-09-06",
-  "ayendahoteles": "2026-09-06",
-  "ayvens": "2026-09-06",
-  "bebeka": "2026-09-06",
-  "betclicgroup": "2026-09-05",
-  "bettermarks": "2026-09-04",
-  "betterplaceorg": "2026-09-04",
-  "bird": "2026-09-05",
-  "bisnowmedia": "2026-09-03",
-  "bizziphone": "2026-09-06",
-  "bkl": "2026-09-04",
-  "bnbmanager": "2026-09-04",
-  "boehnelfimmel": "2026-09-04",
-  "bossabox": "2026-09-06",
-  "bovaenviroplus": "2026-09-04",
-  "breuerhoeferpartnerschaft": "2026-09-05",
-  "bridgingneighbours": "2026-09-05",
-  "brightlocal": "2026-09-05",
-  "brightpensioen": "2026-09-05",
-  "brightriver": "2026-09-03",
-  "buildingservices": "2026-09-04",
-  "bume": "2026-09-05",
-  "caliskanmediagmbh": "2026-09-06",
-  "caparodesigncrew": "2026-09-04",
-  "capitaliasteuerberatung": "2026-09-04",
-  "careerconnect": "2026-09-04",
-  "careermentors": "2026-09-04",
-  "careerstheparkplayground": "2026-09-04",
-  "cavalryventures": "2026-09-04",
-  "ceservicesgroup": "2026-09-03",
-  "chauffeur": "2026-09-05",
-  "chroszielgmbh": "2026-09-06",
-  "cityconnectnorthmacedoniatranscom": "2026-09-05",
-  "civilitymanagementsolutions1": "2026-09-03",
-  "cldin": "2026-09-05",
-  "cleandigital": "2026-09-06",
-  "coast": "2026-09-06",
-  "cobibike": "2026-09-04",
-  "codesandbox": "2026-09-04",
-  "communita": "2026-09-04",
-  "componentsense": "2026-09-04",
-  "conciergedentalgroup": "2026-09-04",
-  "configureit": "2026-09-05",
-  "connecterra": "2026-09-05",
-  "conversal": "2026-09-04",
-  "convertcom": "2026-09-04",
-  "conwaytheconveniencecompany": "2026-09-04",
-  "crederacareers": "2026-09-05",
-  "cropland": "2026-09-04",
-  "crowdyhouse": "2026-09-03",
-  "crunchr": "2026-09-05",
-  "cryptohopper": "2026-09-04",
-  "cuex": "2026-09-05",
-  "culinaryon1": "2026-09-05",
-  "cultureai": "2026-09-05",
-  "curiosum": "2026-09-03",
-  "curvgroup": "2026-09-05",
-  "cylindo": "2026-09-05",
-  "dak": "2026-09-04",
-  "dataforce": "2026-09-05",
-  "dauvister": "2026-09-05",
-  "daviddeindl": "2026-09-04",
-  "davidhreuropa": "2026-09-04",
-  "ddimmo": "2026-09-04",
-  "ddock": "2026-09-04",
-  "dealershipdevelopment": "2026-09-04",
-  "deltatecc": "2026-09-05",
-  "denkstattgmbh": "2026-09-04",
-  "despertaenergia": "2026-09-06",
-  "dettendorfer": "2026-09-04",
-  "dewonmedia": "2026-09-04",
-  "dhzrecruitmentsolutions": "2026-09-03",
-  "digitalcustomercarecompany": "2026-09-03",
-  "digitaldisruptions": "2026-09-05",
-  "digitalinsurancegroup": "2026-09-03",
-  "digitalrocksgmbh": "2026-09-05",
-  "dirkdudeck": "2026-09-03",
-  "divbrands": "2026-09-05",
-  "dockyardinc1": "2026-09-03",
-  "docs": "2026-09-03",
-  "doctenagmbh": "2026-09-05",
-  "dogado": "2026-09-05",
-  "dolezych": "2026-09-05",
-  "doxasteuerberatung": "2026-09-05",
-  "dpgmedia2": "2026-09-03",
-  "dreweslogistics": "2026-09-04",
-  "driveconsultingbv": "2026-09-04",
-  "drivelah": "2026-09-05",
-  "dsr": "2026-09-05",
-  "dtgo": "2026-09-05",
-  "duckduckgo": "2026-09-04",
-  "duffle": "2026-09-04",
-  "duraline": "2026-09-05",
-  "dw": "2026-09-06",
-  "dxresultsgmbh1": "2026-09-05",
-  "eadbox": "2026-09-04",
-  "ecc": "2026-09-04",
-  "echobot": "2026-09-04",
-  "ecommercede": "2026-09-05",
-  "econodata": "2026-09-04",
-  "educatesports": "2026-09-05",
-  "eed": "2026-09-04",
-  "eeworx": "2026-09-04",
-  "effectphotonics1": "2026-09-04",
-  "ehb": "2026-09-04",
-  "ehca": "2026-09-04",
-  "electricantlabbv": "2026-09-04",
-  "electricfeel": "2026-09-04",
-  "elevatejobs": "2026-09-04",
-  "elgentos": "2026-09-05",
-  "elves": "2026-09-04",
-  "elvinci": "2026-09-04",
-  "emelia": "2026-09-03",
-  "emergentx": "2026-09-04",
-  "emersegroupltd": "2026-09-04",
-  "emilwagner": "2026-09-04",
-  "employesvacatures": "2026-09-05",
-  "emptio": "2026-09-05",
-  "enerconwindfarmservicesirelandltd": "2026-09-04",
-  "energiebespaarders": "2026-09-04",
-  "engarde": "2026-09-03",
-  "engin": "2026-09-04",
-  "engworldwide": "2026-09-04",
-  "entoriaenergy": "2026-09-04",
-  "eolyenergy": "2026-09-05",
-  "equinoxgames": "2026-09-05",
-  "eriksdigital": "2026-09-04",
-  "esatisfaction": "2026-09-04",
-  "escherich": "2026-09-05",
-  "eucalyptus": "2026-09-04",
-  "eunerd": "2026-09-04",
-  "euramaxcoatedproducts": "2026-09-05",
-  "euromixmtpgmbh": "2026-09-04",
-  "evanskatz": "2026-09-04",
-  "evbox": "2026-09-04",
-  "eve": "2026-09-04",
-  "eventinsight": "2026-09-04",
-  "everli": "2026-09-04",
-  "everyone": "2026-09-03",
-  "evessio": "2026-09-04",
-  "evolutive": "2026-09-04",
-  "expandior": "2026-09-04",
-  "expetowireless": "2026-09-04",
-  "extrapersoneel": "2026-09-04",
-  "eyecarepro": "2026-09-04",
-  "eyenukinc": "2026-09-04",
-  "fai": "2026-09-04",
-  "familychildrensaid1": "2026-09-04",
-  "fangage": "2026-09-04",
-  "farminsect": "2026-09-04",
-  "fasanaracapital": "2026-09-04",
-  "faulhammermoennich": "2026-09-04",
-  "fayngmbh": "2026-09-04",
-  "feedback": "2026-09-03",
-  "feedingsouthflorida": "2026-09-04",
-  "feldbuschimmobilien": "2026-09-04",
-  "ferryhopper": "2026-09-04",
-  "festo": "2026-09-04",
-  "fiberklaar": "2026-09-04",
-  "fiets": "2026-09-04",
-  "filapen": "2026-09-04",
-  "fincompare": "2026-09-04",
-  "finestpetfoods": "2026-09-04",
-  "fintechos": "2026-09-04",
-  "fintechsaudi": "2026-09-04",
-  "firmade": "2026-09-04",
-  "firststatetechpartnership": "2026-09-04",
-  "fishingking": "2026-09-04",
-  "fitnessco": "2026-09-04",
-  "flatexdegiro": "2026-09-04",
-  "fleetsmart": "2026-09-03",
-  "fleks": "2026-09-04",
-  "flexappeal": "2026-09-04",
-  "flextit": "2026-09-04",
-  "flowmingo": "2026-09-04",
-  "flynthadviseursenaccountants": "2026-09-04",
-  "forcit": "2026-09-03",
-  "fordwerkegmbh": "2026-09-04",
-  "forte": "2026-09-04",
-  "fortinocapital": "2026-09-04",
-  "fortrabbit1": "2026-09-04",
-  "foxtek": "2026-09-04",
-  "freshlocalsolutions": "2026-09-03",
-  "friedrichsbyhahn": "2026-09-04",
-  "frontify": "2026-09-04",
-  "ftlexpress": "2026-09-04",
-  "fuga": "2026-09-04",
-  "fullcirclewindservices": "2026-09-04",
-  "funke": "2026-09-04",
-  "fxswede": "2026-09-04",
-  "fysius": "2026-09-04",
-  "gamesglobal": "2026-09-04",
-  "gastrofix": "2026-09-04",
-  "gca": "2026-09-04",
-  "gebwelloy": "2026-09-04",
-  "geckolabs": "2026-09-04",
-  "gentys": "2026-09-04",
-  "getingestro": "2026-09-04",
-  "getpress": "2026-09-04",
-  "gettechtalent": "2026-09-04",
-  "gig24": "2026-09-04",
-  "giveth": "2026-09-03",
-  "glide": "2026-09-04",
-  "globalpathconsultingservicesllc": "2026-09-04",
-  "glue": "2026-09-04",
-  "gobvio": "2026-09-04",
-  "goforeplc": "2026-09-04",
-  "gogoapps": "2026-09-04",
-  "goldenkey": "2026-09-04",
-  "goodinnovation": "2026-09-04",
-  "gopomelo": "2026-09-03",
-  "gorillas": "2026-09-04",
-  "gourmetmarket": "2026-09-04",
-  "govinvest": "2026-09-04",
-  "gpr": "2026-09-04",
-  "grahneis": "2026-09-04",
-  "greatbigvalue": "2026-09-04",
-  "greco": "2026-09-04",
-  "greenmont": "2026-09-04",
-  "gridtogreat": "2026-09-04",
-  "groenleven": "2026-09-03",
-  "groenoordzorgt": "2026-09-04",
-  "gromedia": "2026-09-04",
-  "groveacquisitions": "2026-09-04",
-  "growara": "2026-09-04",
-  "growbots": "2026-09-04",
-  "gsbgiessen": "2026-09-04",
-  "gtsteamug": "2026-09-03",
-  "guts": "2026-09-04",
-  "gwp": "2026-09-04",
-  "habitual": "2026-09-03",
-  "hacheundseelinger": "2026-09-03",
-  "hackaboss": "2026-09-04",
-  "halowproject": "2026-09-04",
-  "handlangers": "2026-09-03",
-  "happeohq": "2026-09-04",
-  "harriettubmanschoolofsciencetechnology": "2026-09-04",
-  "hashtagsports": "2026-09-03",
-  "hauslerdeubzer": "2026-09-04",
-  "hauspflegevereinev": "2026-09-04",
-  "hava3d": "2026-09-04",
-  "hazera": "2026-09-03",
-  "headgum": "2026-09-04",
-  "heavyfinance": "2026-09-04",
-  "heesenyachts": "2026-09-04",
-  "heidelbergpharma": "2026-09-04",
-  "heisehaustechnikbrl": "2026-09-04",
-  "heitzmann": "2026-09-04",
-  "hellobus": "2026-09-04",
-  "hellriegelzahnmedizin": "2026-09-04",
-  "helpag": "2026-09-04",
-  "helrom": "2026-09-04",
-  "heptaairborne": "2026-09-04",
-  "herolabs": "2026-09-04",
-  "hertelcoachinggmbh": "2026-09-04",
-  "hesco": "2026-09-04",
-  "hesse": "2026-09-04",
-  "hexagon": "2026-09-04",
-  "hiber": "2026-09-04",
-  "hiddenmarket": "2026-09-04",
-  "hifkfotboll": "2026-09-04",
-  "hilfeinnotpflegegmbh": "2026-09-04",
-  "hiltermannconsumentenfinancieringen": "2026-09-04",
-  "hirevision": "2026-09-04",
-  "hiya": "2026-09-04",
-  "hmclause": "2026-09-04",
-  "hoard": "2026-09-04",
-  "hoflebensberg": "2026-09-04",
-  "hollandhostessservice": "2026-09-04",
-  "homefoodsrl": "2026-09-04",
-  "horst": "2026-09-04",
-  "hostwise": "2026-09-04",
-  "hotelnivellessud": "2026-09-04",
-  "hotelstaygulf": "2026-09-04",
-  "houseoflowcode": "2026-09-04",
-  "hrkonkret": "2026-09-04",
-  "hudsonsbaywinkels": "2026-09-04",
-  "hvcapital": "2026-09-04",
-  "hvkstevens": "2026-09-04",
-  "hyko": "2026-09-03",
-  "iamfluidics": "2026-09-04",
-  "iconomi": "2026-09-04",
-  "igeolise": "2026-09-03",
-  "ilost": "2026-09-04",
-  "impraise": "2026-09-03",
-  "imsystems": "2026-09-04",
-  "incisiongroupbv": "2026-09-03",
-  "incognia": "2026-09-04",
-  "indiefin": "2026-09-04",
-  "indigitall": "2026-09-04",
-  "indigoinfra": "2026-09-04",
-  "inewa": "2026-09-04",
-  "infare": "2026-09-04",
-  "infeedo": "2026-09-04",
-  "inflow": "2026-09-04",
-  "infotrust": "2026-09-03",
-  "inkubis": "2026-09-03",
-  "innocentdrinks": "2026-09-03",
-  "instacarro": "2026-09-04",
-  "institutartline": "2026-09-04",
-  "instituutverbeeten": "2026-09-04",
-  "insum": "2026-09-04",
-  "intelligentstaffinginc": "2026-09-04",
-  "interchainfoundation": "2026-09-04",
-  "interimrecruitingteam": "2026-09-04",
-  "internationalsecurityagency": "2026-09-04",
-  "intetics": "2026-09-04",
-  "inyonstaffing": "2026-09-04",
-  "isap": "2026-09-04",
-  "isits": "2026-09-03",
-  "isostech": "2026-09-04",
-  "ittestingde": "2026-09-04",
-  "jabfactory": "2026-09-03",
-  "jachensen": "2026-09-03",
-  "jaimy": "2026-09-04",
-  "jannisneumann": "2026-09-04",
-  "jarola": "2026-09-04",
-  "jeranex": "2026-09-04",
-  "jeremyhanssens": "2026-09-04",
-  "jexiacom": "2026-09-04",
-  "jobsatrivieramaison": "2026-09-04",
-  "jobsgroomeindustrial": "2026-09-04",
-  "jobshuswell": "2026-09-04",
-  "joinstellarup": "2026-09-04",
-  "joinupvest": "2026-09-03",
-  "jumpcodegenomics": "2026-09-04",
-  "jumptechnologycareer": "2026-09-04",
-  "justdigitalbr": "2026-09-04",
-  "justixgmbh": "2026-09-04",
-  "kanzleihergeth": "2026-09-04",
-  "karify": "2026-09-04",
-  "karlmaxberlin": "2026-09-04",
-  "karmafinancial": "2026-09-03",
-  "karrierehbb": "2026-09-04",
-  "karrierehdtonline": "2026-09-03",
-  "karriereschwankevonschwerin": "2026-09-04",
-  "keleygroup": "2026-09-04",
-  "kirschbaumconsulting": "2026-09-04",
-  "kisi": "2026-09-03",
-  "kitar": "2026-09-04",
-  "kittl": "2026-09-03",
-  "klingenberg": "2026-09-04",
-  "klunternehmerberatung": "2026-09-04",
-  "kmprojectplatocom": "2026-09-04",
-  "kolektordigital": "2026-09-03",
-  "koniarskisteuerberater": "2026-09-03",
-  "kontaktfluss": "2026-09-04",
-  "kontax": "2026-09-04",
-  "kpitengineering": "2026-09-03",
-  "krakenleads": "2026-09-04",
-  "krasemann": "2026-09-03",
-  "kring": "2026-09-03",
-  "kriptomat": "2026-09-03",
-  "ksuhousing": "2026-09-03",
-  "ksuhousingdining": "2026-09-03",
-  "kuglergmbh": "2026-09-04",
-  "kuoksingaporelimited": "2026-09-03",
-  "labdigitalagency1": "2026-09-04",
-  "lagomajcapital": "2026-09-03",
-  "landacquisitiondotcom": "2026-09-03",
-  "landbackereisommer": "2026-09-04",
-  "landienglish": "2026-09-03",
+  "47mainwalpole": "2026-09-20",
+  "4germany": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "4players": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "4transholding": "2026-09-20",
+  "5ca": "2026-09-20",
+  "aanwerven": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "abaltatechnologiesinc": "2026-09-20",
+  "accordia": "2026-09-18",
+  "accusonus": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "ackeeblockchain": "2026-09-20",
+  "acmwerbeagentur": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "acordocerto": "2026-09-17",
+  "activestockmanagement": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "adamietzkollegengmbh": "2026-09-18",
+  "adapt": "2026-09-18",
+  "adcurasteuerberatungsgesellschaft": "2026-09-20",
+  "adeleexpress": "2026-09-20",
+  "adfides": "2026-09-20",
+  "adimec": "2026-09-20",
+  "admindagency": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "admr54": "2026-09-17",
+  "advertacegmbh1": "2026-09-20",
+  "aerial": "2026-09-17",
+  "agapeworldwide": "2026-09-19",
+  "agentnooninc": "2026-09-20",
+  "agile": "2026-09-20",
+  "aicrowd": "2026-09-20",
+  "aimforthemoon": "2026-09-20",
+  "aio": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "airnamics": "2026-09-18",
+  "aivero": "2026-09-17",
+  "ajrdigital": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "akiani": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "albatrossai": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "alexanderhausverwaltung": "2026-09-20",
+  "alexanderimmobilien": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "alfdex": "2026-09-20",
+  "aliada": "2026-09-20",
+  "alleo": "2026-09-20",
+  "allianceforyouthorganizing": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "allourkin": "2026-09-20",
+  "alltapesupplies": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "allyhealth": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "almavivadebelgique": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "aloompa": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "alphasociety": "2026-09-20",
+  "ambie": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "amorgroup": "2026-09-19",
+  "amperecloud": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "ampyxpowerjobs": "2026-09-19",
+  "analystinstitute": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "anchr": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "antoniadisurerechtsanwaltsgesellschaftmbh": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "aplayersrecruiting1": "2026-09-17",
+  "apposta": "2026-09-17",
+  "appshouse": "2026-09-17",
+  "apside": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "aptiaukltd": "2026-09-19",
+  "aquaconsulting": "2026-09-17",
+  "arbio": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "arch": "2026-09-19",
+  "arch1": "2026-09-18",
+  "arrayio": "2026-09-20",
+  "arsipa": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "artaker": "2026-09-17",
+  "artnight": "2026-09-18",
+  "arvoredelivros": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "arzbau": "2026-09-20",
+  "arztkonsultation": "2026-09-16",
+  "ascendaloyalty": "2026-09-20",
+  "asellion": "2026-09-20",
+  "assistme": "2026-09-20",
+  "astronomer": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "atfinity": "2026-09-20",
+  "atolye15": "2026-09-19",
+  "atrix": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "ats": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "attendi": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "aubainerie": "2026-09-19",
+  "augmedit": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "aulaeducation": "2026-09-20",
+  "auravision": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "aureus": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "aurorajetfueldmcc": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "aurumfitnessag": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "autobahn": "2026-09-18",
+  "autohauswicke": "2026-09-20",
+  "avaxadebtadvisors": "2026-09-19",
+  "aviasales": "2026-09-20",
+  "avsverkehrssicherunggmbh": "2026-09-19",
+  "avyld": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "awarait": "2026-09-19",
+  "awesomeprototype1": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "ayendahoteles": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "ayo": "2026-09-19",
+  "ayvens": "2026-09-18",
+  "azarai": "2026-09-20",
+  "azavista": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "azumuta": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "babylonsciences": "2026-09-19",
+  "bace": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "bacegmbh": "2026-09-18",
+  "bacher": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "backoffice": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "baeckerschrader": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "ballast-nedam": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "balr": "2026-09-20",
+  "bartundbastian": "2026-09-20",
+  "battolysersystems": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "bavarianbuaug": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "bbtkanzlei": "2026-09-18",
+  "bebeka": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "beelivery": "2026-09-20",
+  "bemcare": "2026-09-16",
+  "bemind": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "benitago": "2026-09-20",
+  "benso": "2026-09-20",
+  "benvitec": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "bergkarriere": "2026-09-20",
+  "berlinpodo": "2026-09-20",
+  "bes": "2026-09-19",
+  "bescmdjobs": "2026-09-20",
+  "betclicgroup": "2026-09-20",
+  "bettermarks": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "betterplaceorg": "2026-09-20",
+  "bgoodgmbh": "2026-09-16",
+  "bhattipro": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "bierenslab": "2026-09-20",
+  "bildungsinstitutsud": "2026-09-20",
+  "billfrontgmbh": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "binkies": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "bird": "2026-09-19",
+  "bisnowmedia": "2026-09-20",
+  "bitacademy": "2026-09-17",
+  "bitfinexsecurities": "2026-09-19",
+  "bitsofstock": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "bizziphone": "2026-09-20",
+  "bkl": "2026-09-17",
+  "bksystems": "2026-09-20",
+  "blackbananas": "2026-09-17",
+  "blackbeargym": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "blackbell": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "blankno": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "blinkzorgprofessionals": "2026-09-16",
+  "bliq": "2026-09-16",
+  "blossombs": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "bluedeskcrm": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 4
+  },
+  "bluedrops": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "bnbmanager": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "boehnelfimmel": "2026-09-20",
+  "boehnelranfft": "2026-09-20",
+  "boonchapman": "2026-09-19",
+  "borgen": "2026-09-20",
+  "borisglogerstellenangebote": "2026-09-20",
+  "bossabox": "2026-09-18",
+  "bovaenviroplus": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "brainstack": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "breople": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "breuerhoeferpartnerschaft": "2026-09-19",
+  "bridgesecurityadvisors": "2026-09-18",
+  "bridgingneighbours": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "brightlocal": "2026-09-19",
+  "brightpensioen": "2026-09-19",
+  "brightriver": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "brompton": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "browseai": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "brunchdale": "2026-09-19",
+  "bsgcontact": "2026-09-18",
+  "bsource": "2026-09-20",
+  "btgbadischetreuhandgesellschaftmbh": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "buildingservices": "2026-09-20",
+  "bume": "2026-09-20",
+  "bunkhotels": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "bunzimmobilien": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "buybay": "2026-09-20",
+  "bvaccountants": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "bwenergy": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "cabbageapps": "2026-09-20",
+  "caliskanmediagmbh": "2026-09-17",
+  "callistaace": "2026-09-20",
+  "camasit": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "candisgmbh": "2026-09-18",
+  "canny": "2026-09-20",
+  "caparodesigncrew": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "capitaliasteuerberatung": "2026-09-20",
+  "capradio": "2026-09-20",
+  "career": "2026-09-18",
+  "careerconnect": "2026-09-20",
+  "careermentors": "2026-09-17",
+  "careers": "2026-09-20",
+  "careersat5miles": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "careerssaferhomeservices": "2026-09-20",
+  "careerstheparkplayground": "2026-09-16",
+  "careerswcc": "2026-09-20",
+  "castellumsecurity": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "catenate": "2026-09-17",
+  "cavalryventures": "2026-09-20",
+  "cendas": "2026-09-16",
+  "centreon": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "ceservicesgroup": "2026-09-20",
+  "cf2i": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "cfpenergy": "2026-09-19",
+  "chauffeur": "2026-09-17",
+  "chroszielgmbh": "2026-09-20",
+  "cigusgmbh": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "circleeconomy": "2026-09-20",
+  "cirqus": "2026-09-18",
+  "cityconnectcroatiatranscom": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "cityconnectnorthmacedoniatranscom": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "citymesh": "2026-09-19",
+  "civilitymanagementsolutions1": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "clarityai1": "2026-09-20",
+  "cldin": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "cleandigital": "2026-09-20",
+  "climact": "2026-09-16",
+  "climeworks": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "cloudbilling": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "cloval": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "coachme": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "coachmegmbh": "2026-09-18",
+  "coast": "2026-09-20",
+  "cobibike": "2026-09-20",
+  "codaservices": "2026-09-20",
+  "codator": "2026-09-20",
+  "codesandbox": "2026-09-20",
+  "codibly1": "2026-09-20",
+  "codulate": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "coingaming": "2026-09-20",
+  "colorful": "2026-09-20",
+  "coloriet": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "commerzkontor": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "communita": "2026-09-20",
+  "componentsense": "2026-09-20",
+  "conciergedentalgroup": "2026-09-20",
+  "configura": "2026-09-20",
+  "configureit": "2026-09-20",
+  "confirmo": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "connecterra": "2026-09-19",
+  "conservationafrica": "2026-09-20",
+  "considerati": "2026-09-19",
+  "consignaction": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "continental": "2026-09-20",
+  "contoursingapore": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "conversal": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "convertcom": "2026-09-16",
+  "conwaytheconveniencecompany": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "coolgradient": "2026-09-20",
+  "cop": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "copasystemegmbhcokg": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "copywriting": "2026-09-19",
+  "corti": "2026-09-18",
+  "cosmose": "2026-09-20",
+  "coverworks": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "createandadapt": "2026-09-17",
+  "createit": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 4
+  },
+  "crederacareers": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "cremerspeciaalmachinesbv": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "cropland": "2026-09-18",
+  "crowdcontent": "2026-09-20",
+  "crowdyhouse": "2026-09-16",
+  "crunchr": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "cryptohopper": "2026-09-18",
+  "cuex": "2026-09-20",
+  "culinaryon1": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 4
+  },
+  "cultureai": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "cumulio": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "curiosum": "2026-09-20",
+  "curiouscompanygmbh": "2026-09-20",
+  "curvgroup": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "cyberninjas": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "cyclifesweden": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "cylindo": "2026-09-18",
+  "dak": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "dataforce": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "dauvister": "2026-09-20",
+  "daviddeindl": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "davidhreuropa": "2026-09-20",
+  "ddimmo": "2026-09-18",
+  "ddock": "2026-09-20",
+  "dealershipdevelopment": "2026-09-17",
+  "deeplite": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "deltatecc": "2026-09-20",
+  "deluxeholidayhomes": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "denkstattgmbh": "2026-09-20",
+  "dentaaltotaal": "2026-09-18",
+  "depoortere": "2026-09-18",
+  "deribit": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "despertaenergia": "2026-09-18",
+  "dettendorfer": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "devdeer": "2026-09-20",
+  "dewonmedia": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "dexterenergyservices": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "dhzrecruitmentsolutions": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "diadata": "2026-09-20",
+  "digitalcustomercarecompany": "2026-09-17",
+  "digitaldisruptions": "2026-09-20",
+  "digitalhub": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "digitalinsurancegroup": "2026-09-20",
+  "digitalpayrollservices": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "digitalrocksgmbh": "2026-09-20",
+  "digitalsolutionsconsultinggmbh": "2026-09-16",
+  "dirkdudeck": "2026-09-20",
+  "divbrands": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "divigas": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "dockyardinc1": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "doclerholding": "2026-09-17",
+  "docs": "2026-09-20",
+  "doctenagmbh": "2026-09-17",
+  "dogado": "2026-09-20",
+  "dolezych": "2026-09-18",
+  "doss2": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "doxasteuerberatung": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "dpgmedia2": "2026-09-17",
+  "dreweslogistics": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "driveconsultingbv": "2026-09-20",
+  "drivelah": "2026-09-17",
+  "dsr": "2026-09-19",
+  "dtgo": "2026-09-20",
+  "duckduckgo": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "duffle": "2026-09-20",
+  "duraline": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "dw": "2026-09-20",
+  "dwf": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "dxresultsgmbh1": "2026-09-18",
+  "eadbox": "2026-09-20",
+  "eazyrecruiting": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "ecc": "2026-09-20",
+  "echobot": "2026-09-20",
+  "ecommercede": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "econodata": "2026-09-20",
+  "educatesports": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "eed": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "eeworx": "2026-09-20",
+  "effectory": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "effectphotonics1": "2026-09-20",
+  "egeniq": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "ehb": "2026-09-17",
+  "ehca": "2026-09-20",
+  "eiseleflugdienstgmbh": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "electricantlabbv": "2026-09-18",
+  "electricfeel": "2026-09-20",
+  "elevatejobs": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "elgentos": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "elves": "2026-09-20",
+  "elvinci": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "emelia": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "emergentx": "2026-09-20",
+  "emersegroupltd": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "emilwagner": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "employesvacatures": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "empoweremployconsultingllc": "2026-09-20",
+  "emptio": "2026-09-18",
+  "emrunternehmensberatung": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "enerconwindfarmservicesirelandltd": "2026-09-20",
+  "energiebespaarders": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "engarde": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "engin": "2026-09-20",
+  "engworldwide": "2026-09-20",
+  "ensembleiq1": "2026-09-19",
+  "entoriaenergy": "2026-09-18",
+  "eolyenergy": "2026-09-19",
+  "epflextensionschool": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "epicdata": {
+    "code": 403,
+    "date": "2026-09-21",
+    "streak": 4
+  },
+  "equinoxgames": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "eranederland": "2026-09-20",
+  "eriksdigital": "2026-09-20",
+  "esatisfaction": "2026-09-20",
+  "escherich": "2026-09-19",
+  "etterpartner": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "eucalyptus": "2026-09-18",
+  "eunerd": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "eurail": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "euramaxcoatedproducts": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 4
+  },
+  "euromixmtpgmbh": "2026-09-18",
+  "evanskatz": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "evbox": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "eve": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 4
+  },
+  "eventinsight": "2026-09-20",
+  "everli": "2026-09-20",
+  "everyone": "2026-09-20",
+  "evessio": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "evolutive": "2026-09-20",
+  "expandior": "2026-09-16",
+  "expetowireless": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "extrapersoneel": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "eyecarepro": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "eyenukinc": "2026-09-20",
+  "fab4minds": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "fai": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "familychildrensaid1": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "fangage": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "farminsect": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "fasanaracapital": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "faulhammermoennich": "2026-09-20",
+  "favionline": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "fayngmbh": "2026-09-20",
+  "feedback": "2026-09-20",
+  "feedingsouthflorida": "2026-09-20",
+  "feldbuschimmobilien": "2026-09-20",
+  "ferryhopper": "2026-09-17",
+  "festgmbh": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "festo": "2026-09-20",
+  "fiberklaar": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "fiets": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "filapen": "2026-09-18",
+  "fincompare": "2026-09-20",
+  "finestpetfoods": "2026-09-20",
+  "fintechos": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "fintechsaudi": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "firmade": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "firststatetechpartnership": "2026-09-20",
+  "fishingking": "2026-09-18",
+  "fitnessco": "2026-09-17",
+  "flatexdegiro": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "fleetsmart": "2026-09-19",
+  "fleks": "2026-09-20",
+  "flexappeal": "2026-09-18",
+  "flextit": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "flowmingo": "2026-09-17",
+  "flynthadviseursenaccountants": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "forcit": "2026-09-20",
+  "fordwerkegmbh": "2026-09-20",
+  "forte": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "fortinocapital": "2026-09-18",
+  "fortrabbit1": "2026-09-20",
+  "foxtek": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "framcareers": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "freshlocalsolutions": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "friedrichsbyhahn": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "frontify": "2026-09-20",
+  "ftlexpress": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "fuga": "2026-09-20",
+  "fullcirclewindservices": "2026-09-20",
+  "funke": "2026-09-20",
+  "fxswede": "2026-09-20",
+  "fysius": "2026-09-20",
+  "gamesglobal": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "gastrofix": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "gca": "2026-09-18",
+  "gebwelloy": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "geckolabs": "2026-09-18",
+  "gentys": "2026-09-20",
+  "getingestro": "2026-09-20",
+  "getpress": "2026-09-17",
+  "gettechtalent": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "gevgroupltd": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "gig24": "2026-09-20",
+  "giveth": "2026-09-20",
+  "glide": "2026-09-20",
+  "globalpathconsultingservicesllc": "2026-09-20",
+  "glue": "2026-09-20",
+  "gobvio": "2026-09-20",
+  "goforeplc": "2026-09-20",
+  "gogoapps": "2026-09-20",
+  "goldenkey": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "goodinnovation": "2026-09-20",
+  "gopomelo": "2026-09-20",
+  "gorillas": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "gourmetmarket": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "govinvest": "2026-09-20",
+  "gpbullhound": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "gpr": "2026-09-20",
+  "gpvgermany": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "grahneis": "2026-09-20",
+  "greatbigvalue": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "greco": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "greenmont": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "gridtogreat": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "groenleven": "2026-09-20",
+  "groenoordzorgt": "2026-09-20",
+  "gromedia": "2026-09-20",
+  "groveacquisitions": "2026-09-18",
+  "growara": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "growbots": "2026-09-17",
+  "gsbgiessen": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "gsbsolutions1": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "gtsteamug": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "guidion6": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "guts": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "gwp": "2026-09-17",
+  "habitual": "2026-09-20",
+  "hacheundseelinger": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "hackaboss": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "halowproject": "2026-09-20",
+  "handlangers": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "happeohq": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "happycapitalhrm": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "harriettubmanschoolofsciencetechnology": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "hashtagsports": "2026-09-20",
+  "hauslerdeubzer": "2026-09-18",
+  "hauspflegevereinev": "2026-09-20",
+  "hava3d": "2026-09-20",
+  "hazera": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "headgum": "2026-09-20",
+  "heavyfinance": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "heesenyachts": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "heidelbergpharma": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "heisehaustechnikbrl": "2026-09-20",
+  "heitzmann": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "hellobus": "2026-09-20",
+  "hellriegelzahnmedizin": "2026-09-20",
+  "helpag": "2026-09-20",
+  "helrom": "2026-09-20",
+  "heptaairborne": "2026-09-18",
+  "herolabs": "2026-09-16",
+  "hertelcoachinggmbh": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "hesco": "2026-09-20",
+  "hesse": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "hetzner": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "hexagon": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "hiber": "2026-09-20",
+  "hiddenmarket": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "hieroo": "2026-09-17",
+  "hifkfotboll": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "hilfeinnotpflegegmbh": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "hiltermannconsumentenfinancieringen": "2026-09-20",
+  "hirevision": "2026-09-20",
+  "hiya": "2026-09-20",
+  "hmclause": "2026-09-20",
+  "hoard": "2026-09-18",
+  "hoflebensberg": "2026-09-18",
+  "hollandhostessservice": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "homefoodsrl": "2026-09-18",
+  "horst": "2026-09-20",
+  "hostwise": "2026-09-20",
+  "hotelgent": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "hotelgorinchema27": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "hotelnivellessud": "2026-09-17",
+  "hotelstaygulf": "2026-09-17",
+  "houseoflowcode": "2026-09-19",
+  "hqengineeringitalia": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "hrkonkret": "2026-09-20",
+  "hudsonsbaywinkels": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "hvcapital": "2026-09-20",
+  "hvkstevens": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "hyko": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "iamfluidics": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "ibexa": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "iconomi": "2026-09-20",
+  "igeolise": "2026-09-20",
+  "ilost": "2026-09-16",
+  "immoexperten": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "impraise": "2026-09-16",
+  "imsystems": "2026-09-20",
+  "incisiongroupbv": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "incognia": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "incoresolutions1": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "indiefin": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "indigitall": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "indigoinfra": "2026-09-20",
+  "inewa": "2026-09-20",
+  "infare": "2026-09-20",
+  "infeedo": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "inflow": "2026-09-20",
+  "infotrust": "2026-09-20",
+  "inkubis": "2026-09-20",
+  "innocentdrinks": "2026-09-20",
+  "innovencio": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "instacarro": "2026-09-20",
+  "institutartline": "2026-09-18",
+  "instituutverbeeten": "2026-09-20",
+  "insum": "2026-09-20",
+  "intelligentstaffinginc": "2026-09-18",
+  "interchainfoundation": "2026-09-20",
+  "interimrecruitingteam": "2026-09-20",
+  "internationalsecurityagency": "2026-09-20",
+  "intetics": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "intuitionstaffing": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "inyonstaffing": "2026-09-20",
+  "ipro": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "isap": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "isits": "2026-09-20",
+  "ism": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "isostech": "2026-09-20",
+  "ittestingde": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "jabfactory": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "jachensen": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "jaimy": "2026-09-20",
+  "jannisneumann": "2026-09-17",
+  "jarola": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "jedowski": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "jeranex": "2026-09-20",
+  "jeremyhanssens": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "jexiacom": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "jobsatrivieramaison": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "jobsgroomeindustrial": "2026-09-16",
+  "jobshuswell": "2026-09-17",
+  "joinstellarup": "2026-09-20",
+  "joinupvest": "2026-09-19",
+  "jollerconsultinggmbh1": "2026-09-20",
+  "jumpcodegenomics": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "jumptechnologycareer": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "justdigitalbr": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "justixgmbh": "2026-09-20",
+  "kanzleihergeth": "2026-09-17",
+  "karaktertraprenovaties": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "karify": "2026-09-20",
+  "karlmaxberlin": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "karmafinancial": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "karrierehbb": "2026-09-20",
+  "karrierehdtonline": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "karriereschwankevonschwerin": "2026-09-16",
+  "keleygroup": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "kirschbaumconsulting": "2026-09-20",
+  "kisi": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "kitar": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "kittl": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "kjldtgfh": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "klingenberg": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "klunternehmerberatung": "2026-09-20",
+  "kmprojectplatocom": "2026-09-20",
+  "kolektordigital": "2026-09-20",
+  "koniarskisteuerberater": "2026-09-19",
+  "koninklijkeniesternsander": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "kontaktfluss": "2026-09-20",
+  "kontax": "2026-09-19",
+  "kornerrealestategmbh": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "kpitengineering": "2026-09-19",
+  "krakenleads": "2026-09-20",
+  "krasemann": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "krila": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "kring": "2026-09-20",
+  "kriptomat": "2026-09-17",
+  "ksuhousing": "2026-09-17",
+  "ksuhousingdining": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "kuglergmbh": "2026-09-20",
+  "kuoksingaporelimited": "2026-09-19",
+  "kwadraad": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "kybunjoyaretail": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "labdigitalagency1": "2026-09-20",
+  "lagomajcapital": "2026-09-17",
+  "landacquisitiondotcom": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "landbackereisommer": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "landienglish": "2026-09-20",
   "landing": "2026-09-02",
-  "lascentrum": "2026-09-04",
-  "latticeflow": "2026-09-04",
-  "lawantec": "2026-09-04",
-  "leapeventtech": "2026-09-03",
-  "learnshipnetworksgmbh": "2026-09-04",
-  "leaseplanschweizag": "2026-09-04",
-  "lebenskraftpur": "2026-09-04",
-  "leebointelligentebouwsystemenbv": "2026-09-03",
-  "leomike": "2026-09-04",
-  "lepaya": "2026-09-04",
-  "lepristineantwerp": "2026-09-04",
-  "letsgetitstarted": "2026-09-04",
-  "letsmilebv": "2026-09-04",
-  "lett": "2026-09-04",
-  "levantusag": "2026-09-04",
-  "lexhamgroup": "2026-09-04",
-  "lfchumain": "2026-09-04",
-  "liebezeitarbeitpersonalservice": "2026-09-04",
-  "liedetectors1": "2026-09-04",
-  "liftventures": "2026-09-03",
-  "likhacareers": "2026-09-04",
-  "limgroup": "2026-09-03",
-  "lineagedigital": "2026-09-03",
-  "lineup7": "2026-09-03",
-  "lipsync": "2026-09-04",
-  "litetech": "2026-09-04",
-  "livelihoodsventure": "2026-09-03",
-  "lively": "2026-09-04",
-  "llolloapp": "2026-09-03",
-  "loadsmile": "2026-09-04",
-  "loanboox": "2026-09-04",
-  "local4localmarketing": "2026-09-04",
-  "locamation": "2026-09-04",
-  "lsi": "2026-09-04",
-  "lspinnovativeautomotivesystemsgmbh": "2026-09-04",
-  "luca": "2026-09-04",
-  "luckbox": "2026-09-04",
-  "ludewigmarketing": "2026-09-04",
-  "luketechnikgmbh": "2026-09-03",
-  "luminis": "2026-09-04",
-  "luni": "2026-09-04",
-  "m4m": "2026-09-04",
-  "mablewholesale": "2026-09-03",
-  "maerskaircrew": "2026-09-04",
-  "mailgun": "2026-09-03",
-  "maintenancepartners": "2026-09-04",
-  "majargroup": "2026-09-04",
-  "makerdao": "2026-09-03",
-  "makerstreet": "2026-09-03",
-  "makesyoulocal": "2026-09-03",
-  "malcomfinance": "2026-09-04",
-  "manpowergroupgreecepfizer": "2026-09-04",
-  "mansaold": "2026-09-03",
-  "mapadoacolhimento": "2026-09-04",
-  "marctorke": "2026-09-04",
-  "margera": "2026-09-03",
-  "markel": "2026-09-04",
-  "marketingwizards": "2026-09-03",
-  "marketnode": "2026-09-04",
-  "martialartsforlife": "2026-09-04",
-  "marvinjeskeimmobilienwittlichgbr": "2026-09-04",
-  "marvyagmbh": "2026-09-04",
-  "massagesesselwelt": "2026-09-03",
-  "masterpiecestudio": "2026-09-03",
-  "maxcluster": "2026-09-03",
-  "maximiliangamperling": "2026-09-04",
-  "measurelab": "2026-09-03",
-  "mediapool": "2026-09-04",
-  "mediozorg": "2026-09-04",
-  "meetmable": "2026-09-04",
-  "megaparticleinc": "2026-09-03",
-  "mehramperegmbh": "2026-09-04",
-  "mehrb2bkunden": "2026-09-03",
-  "mehrfahrer": "2026-09-04",
-  "melitamarinegroup": "2026-09-04",
-  "melitta": "2026-09-04",
-  "mentorjam": "2026-09-04",
-  "mesosolutions": "2026-09-03",
-  "metr": "2026-09-03",
-  "metrbmsgmbh": "2026-09-04",
-  "metrikagmbh": "2026-09-04",
-  "mindgram": "2026-09-04",
-  "mindpal": "2026-09-03",
-  "mindsdb": "2026-09-04",
-  "mindsdigital3": "2026-09-04",
-  "mingers": "2026-09-04",
-  "mingersrechtsanwaltsgesellschaftmbh": "2026-09-03",
-  "missioninboxinc": "2026-09-04",
-  "missionlabscareers": "2026-09-04",
-  "mobileintegrationworkgroup": "2026-09-03",
-  "modernmartialarts": "2026-09-03",
-  "moleqlar": "2026-09-04",
-  "monstarlab": "2026-09-04",
-  "moovai": "2026-09-03",
-  "mopinion": "2026-09-04",
-  "morawitzconsultinggmbh": "2026-09-04",
-  "morpho": "2026-09-04",
-  "morpholabs": "2026-09-04",
-  "morphoses": "2026-09-03",
-  "motorai": "2026-09-04",
-  "movelabstudio": "2026-09-04",
-  "moversandmakersgmbh": "2026-09-04",
-  "movetexas": "2026-09-04",
-  "mpeople": "2026-09-03",
-  "mtc": "2026-09-04",
-  "mydatafactory": "2026-09-03",
-  "myjobtech": "2026-09-04",
-  "mymove": "2026-09-04",
-  "mysolity": "2026-09-03",
-  "nash": "2026-09-04",
-  "naturalheroes": "2026-09-04",
-  "navitrans": "2026-09-04",
-  "ndigitalconsultinggmbh": "2026-09-04",
-  "neara": "2026-09-04",
-  "neni": "2026-09-04",
-  "neocles": "2026-09-04",
-  "neocom": "2026-09-04",
-  "neossdi": "2026-09-04",
-  "nepgroup": "2026-09-04",
-  "neptuneenergy": "2026-09-04",
-  "neptunesoftware": "2026-09-04",
-  "neschen": "2026-09-03",
-  "netdata": "2026-09-03",
-  "netox": "2026-09-04",
-  "netreviews": "2026-09-04",
-  "netwisesa": "2026-09-05",
-  "neuronesit": "2026-09-04",
-  "newego": "2026-09-04",
-  "newyorkpizza": "2026-09-04",
-  "nexadigital": "2026-09-04",
-  "nexoya": "2026-09-04",
-  "nextbigthing": "2026-09-04",
-  "nextbigthingag2": "2026-09-04",
-  "nexusmutual": "2026-09-03",
-  "nfactorial": "2026-09-04",
-  "ngrave": "2026-09-04",
-  "ngxinteractive": "2026-09-04",
-  "niagahoster": "2026-09-03",
-  "nicklconsulting": "2026-09-03",
-  "nmssteuerberatung": "2026-09-04",
-  "noackstatistik": "2026-09-03",
-  "noderes": "2026-09-03",
-  "nodes": "2026-09-04",
-  "noobz": "2026-09-04",
-  "northstarnetwork": "2026-09-04",
-  "nostics": "2026-09-03",
-  "nostosgenomics": "2026-09-04",
-  "nosuch": "2026-09-03",
-  "novaconsultinggrouppolska": "2026-09-03",
-  "novakrecruiting": "2026-09-04",
-  "nowagwirthrecruitingconsultants": "2026-09-04",
-  "nubits": "2026-09-04",
-  "numinus": "2026-09-04",
-  "nursa": "2026-09-03",
-  "nutrilent": "2026-09-04",
-  "nutrium": "2026-09-04",
-  "nviz": "2026-09-03",
-  "nxtlvl": "2026-09-04",
-  "oaky": "2026-09-04",
-  "odv": "2026-09-03",
-  "oetkerdigital1": "2026-09-04",
-  "oliverrasche": "2026-09-04",
-  "omnicommediagroup2": "2026-09-04",
-  "omroepzeeland": "2026-09-04",
-  "onecodex": "2026-09-04",
-  "oneteam": "2026-09-04",
-  "onethingdesign": "2026-09-04",
-  "onlinebewerbung": "2026-09-04",
-  "ontimeengineers": "2026-09-03",
-  "openprovider": "2026-09-04",
-  "optinova": "2026-09-04",
-  "optiopay": "2026-09-03",
-  "orbem": "2026-09-03",
-  "ordinaryseafood": "2026-09-04",
-  "origin": "2026-09-03",
-  "orixamedia": "2026-09-03",
-  "orsatelqualitypeople": "2026-09-04",
-  "overactive": "2026-09-04",
-  "ovinto": "2026-09-04",
-  "oviva": "2026-09-03",
-  "ownr": "2026-09-04",
-  "oyen": "2026-09-04",
-  "packly": "2026-09-03",
-  "paid": "2026-09-04",
-  "pairfinancegmbh": "2026-09-04",
-  "pandaabc": "2026-09-04",
-  "pangaea": "2026-09-04",
-  "parcelparcel": "2026-09-04",
-  "partnerinstitut": "2026-09-04",
-  "partory": "2026-09-04",
-  "pastbook": "2026-09-04",
-  "payoneergermany": "2026-09-03",
-  "peanut": "2026-09-04",
-  "peerssolutions": "2026-09-04",
-  "penbrothers": "2026-09-03",
-  "pennyappealusa": "2026-09-04",
-  "pensionworks": "2026-09-03",
-  "pentoaps": "2026-09-03",
-  "peoplekeep": "2026-09-04",
-  "peoplepayment": "2026-09-04",
-  "perfeggt": "2026-09-04",
-  "performancedirecte": "2026-09-04",
-  "performante": "2026-09-03",
-  "perpetualnext": "2026-09-04",
-  "peterfrahmcoaching": "2026-09-04",
-  "petrieichendiakonischekinderundjugendhilfebremenggmbh": "2026-09-04",
-  "pgssoftware": "2026-09-03",
-  "philabs": "2026-09-03",
-  "philpoosch": "2026-09-03",
-  "phoenixsecurity": "2026-09-03",
-  "phyllo": "2026-09-03",
-  "phyllocareers": "2026-09-04",
-  "piggy": "2026-09-04",
-  "pisanoco": "2026-09-04",
-  "pix": "2026-09-03",
-  "pixxprint": "2026-09-04",
-  "plandgmbh": "2026-09-04",
-  "planfabrik": "2026-09-04",
-  "plango": "2026-09-04",
-  "plantlab": "2026-09-03",
-  "plasticsurgeon": "2026-09-04",
-  "plumresearch": "2026-09-03",
-  "polandxebia": "2026-09-03",
-  "poppingastomberg": "2026-09-04",
-  "portaltelemedicina": "2026-09-04",
-  "posrocket": "2026-09-04",
-  "possehlconsultinggmbh": "2026-09-04",
-  "pporahovica1": "2026-09-04",
-  "praxisdrsahin": "2026-09-04",
-  "praxisfurzahnheilkundedrdaniellakaiser": "2026-09-03",
-  "prazisionsentwicklungdenzfertigungsgmbh": "2026-09-04",
-  "preava": "2026-09-04",
-  "premiermedia": "2026-09-04",
-  "prepmyfuture": "2026-09-04",
-  "presspage": "2026-09-03",
-  "prezzee": "2026-09-04",
-  "primeadvicebv": "2026-09-04",
-  "producthackers": "2026-09-03",
-  "progaming": "2026-09-04",
-  "projecteaden": "2026-09-04",
-  "projectivegroup": "2026-09-03",
-  "prompt": "2026-09-04",
-  "prompto": "2026-09-04",
-  "protix": "2026-09-03",
-  "provetuspflege": "2026-09-04",
-  "provitaarndtgmbh": "2026-09-04",
-  "prozeetechnoservicebv": "2026-09-03",
-  "prtt": "2026-09-03",
-  "ps": "2026-09-04",
-  "pspmedia": "2026-09-04",
-  "puremysmile": "2026-09-04",
-  "pym": "2026-09-04",
-  "qlgaminggroup": "2026-09-04",
-  "qollabi": "2026-09-04",
-  "quantmetry1": "2026-09-03",
-  "quatt": "2026-09-03",
-  "quidax": "2026-09-03",
-  "ququabc": "2026-09-04",
-  "raedlingeringenieurbau": "2026-09-04",
-  "raffyleystroom": "2026-09-04",
-  "rahnema": "2026-09-04",
-  "raisa": "2026-09-04",
-  "raisaegypt": "2026-09-04",
-  "rallyrecruit": "2026-09-04",
-  "rarifylabs": "2026-09-04",
-  "rarimoprotocol": "2026-09-03",
-  "rbcprojectsbv": "2026-09-03",
-  "rcco": "2026-09-04",
-  "readytech": "2026-09-04",
-  "recohoist1": "2026-09-03",
-  "redbullmediahouse": "2026-09-04",
-  "referit": "2026-09-03",
-  "reinischgmbh": "2026-09-04",
-  "rekkiapp": "2026-09-04",
-  "releaf": "2026-09-04",
-  "relu": "2026-09-03",
-  "remerge": "2026-09-04",
-  "reshapebiotech": "2026-09-04",
-  "resultscontracting": "2026-09-03",
-  "returnista": "2026-09-03",
-  "reviewlab": "2026-09-03",
-  "rewaa": "2026-09-04",
-  "rheinmainsteuerberatungpartnerschaftmbb": "2026-09-04",
-  "rhenuslogisticscarrierefrance": "2026-09-04",
-  "rheonlabs": "2026-09-03",
-  "rhmd": "2026-09-04",
-  "rkh": "2026-09-04",
-  "rkmedia": "2026-09-04",
-  "rmember": "2026-09-03",
-  "robustagaukel": "2026-09-04",
-  "rocketpeople": "2026-09-04",
-  "rockitfinancebv": "2026-09-04",
-  "rodomniagmbh": "2026-09-04",
-  "roemvanyerseke": "2026-09-04",
-  "rojoconsultancy": "2026-09-04",
-  "rojointegrations": "2026-09-04",
-  "romeobv": "2026-09-04",
-  "roslinct": "2026-09-04",
-  "roslinctcareers": "2026-09-03",
-  "rotapersonal": "2026-09-04",
-  "route42": "2026-09-03",
-  "rscinternationalgmbh": "2026-09-03",
-  "rtcamp": "2026-09-04",
-  "rukakeskus": "2026-09-04",
-  "saaletreu": "2026-09-03",
-  "sabrogmbh": "2026-09-04",
-  "saferhomeservices": "2026-09-04",
-  "saleenco": "2026-09-04",
-  "sandemansneweurope": "2026-09-03",
-  "sandwave": "2026-09-04",
-  "sannegroup": "2026-09-04",
-  "santevet": "2026-09-04",
-  "sapienhealth": "2026-09-04",
-  "sapphiresystems": "2026-09-04",
-  "sardi": "2026-09-04",
-  "saschastarck": "2026-09-04",
-  "satori": "2026-09-04",
-  "savangardcareer": "2026-09-03",
-  "scalesquad": "2026-09-04",
-  "scanmovers": "2026-09-04",
-  "scento": "2026-09-04",
-  "scheersgroepadviseursenaccountants": "2026-09-04",
-  "schellerstabenow": "2026-09-04",
-  "schmalkokeautomobile": "2026-09-03",
-  "schmid": "2026-09-04",
-  "schneiderundzien": "2026-09-04",
-  "schoenhoff": "2026-09-04",
-  "schoolinternational": "2026-09-03",
-  "schotelsoperationsoy": "2026-09-04",
-  "schustersteuerberatungsgesellschaft": "2026-09-04",
-  "scorewarrior": "2026-09-03",
-  "scottyslittlesoldiers": "2026-09-04",
-  "scrumsdotcom": "2026-09-03",
-  "sdsacademy": "2026-09-04",
-  "searchopal": "2026-09-03",
-  "secturelabs": "2026-09-03",
-  "secure": "2026-09-04",
-  "seifertsadlothielgmbhstbg": "2026-09-04",
-  "selesti": "2026-09-04",
-  "selfapygmbh": "2026-09-03",
-  "sellactivegmbh": "2026-09-04",
-  "sellicsjobs": "2026-09-03",
-  "sengefabrikken": "2026-09-04",
-  "september": "2026-09-03",
-  "serenide": "2026-09-04",
-  "setiinstitute": "2026-09-04",
-  "sfimarkets": "2026-09-04",
-  "shared": "2026-09-03",
-  "shareup": "2026-09-04",
-  "shoppad": "2026-09-03",
-  "shttransformationgmbh": "2026-09-04",
-  "siccar": "2026-09-04",
-  "sikhcoalition": "2026-09-04",
-  "simabs": "2026-09-04",
-  "simvecgmbh": "2026-09-04",
-  "sits": "2026-09-04",
-  "skmgroup": "2026-09-04",
-  "skondras": "2026-09-04",
-  "skoon": "2026-09-04",
-  "skyrecords": "2026-09-04",
-  "skytrac": "2026-09-04",
-  "slingshotgroup1": "2026-09-03",
-  "smartbi": "2026-09-03",
-  "smartrobotics": "2026-09-03",
-  "smartsteeltechnologiesgmbh": "2026-09-04",
-  "smilefulgmbh": "2026-09-04",
-  "smiler": "2026-09-03",
-  "smoothly": "2026-09-03",
-  "snapeda": "2026-09-04",
-  "snoop": "2026-09-04",
-  "socialab": "2026-09-03",
-  "socialco": "2026-09-03",
-  "socialdealbe": "2026-09-04",
-  "soda": "2026-09-04",
-  "softgenius": "2026-09-04",
-  "solarmonkey": "2026-09-04",
-  "solarplazainternationalbv": "2026-09-03",
-  "solita": "2026-09-03",
-  "sonnemannsteuerberater": "2026-09-04",
-  "soomgo": "2026-09-04",
-  "sor": "2026-09-03",
-  "soundintelligence": "2026-09-04",
-  "sourcelabs": "2026-09-04",
-  "sovtech": "2026-09-04",
-  "spacelift": "2026-09-04",
-  "spaceos": "2026-09-03",
-  "sparkfactory": "2026-09-03",
-  "sparx": "2026-09-04",
-  "specialtystaffing": "2026-09-04",
-  "specitecsa": "2026-09-03",
-  "spectralengines": "2026-09-04",
-  "speedinvestgmbh": "2026-09-03",
-  "speedinvestheroes": "2026-09-03",
-  "speedoc": "2026-09-04",
-  "spentys": "2026-09-04",
-  "spingersteuerberater": "2026-09-03",
-  "sportecsolutions": "2026-09-03",
-  "spotahome": "2026-09-03",
-  "starair": "2026-09-04",
-  "startupsjobs": "2026-09-04",
-  "status": "2026-09-03",
-  "stayawesome": "2026-09-04",
-  "stbhannemann": "2026-09-04",
-  "stealthstartup": "2026-09-03",
-  "steinconsultinggmbh1": "2026-09-03",
-  "sterblue": "2026-09-03",
-  "steuerberateraichach": "2026-09-03",
-  "steuerkanzleichristlwagnerschneider": "2026-09-04",
-  "stichtinggelijkwaardigherstel": "2026-09-04",
-  "stndigital": "2026-09-03",
-  "stormcreative1": "2026-09-04",
-  "storq": "2026-09-04",
-  "storyme": "2026-09-04",
-  "streamloots": "2026-09-04",
-  "strix": "2026-09-04",
-  "stronganalytics": "2026-09-04",
-  "studentfinance": "2026-09-04",
-  "studibuch": "2026-09-04",
-  "superb": "2026-09-04",
-  "superbryte": "2026-09-03",
-  "superlist": "2026-09-03",
-  "supermercato24": "2026-09-03",
-  "supersonic": "2026-09-04",
-  "supkanzlei": "2026-09-04",
-  "supper": "2026-09-03",
-  "surfer": "2026-09-03",
-  "surgeryhero": "2026-09-04",
-  "survicate": "2026-09-04",
-  "susodigital": "2026-09-04",
-  "svoesterling": "2026-09-04",
-  "swapfiets": "2026-09-04",
-  "swipeguide": "2026-09-04",
-  "swisspearl": "2026-09-04",
-  "sympla": "2026-09-03",
-  "syncvrmedical1": "2026-09-04",
-  "syngenta": "2026-09-04",
-  "synthesis": "2026-09-04",
-  "sysintegra": "2026-09-04",
-  "systemssunlight": "2026-09-03",
-  "szre": "2026-09-04",
-  "taglivros": "2026-09-03",
-  "take1": "2026-09-03",
-  "talentgateway": "2026-09-03",
-  "talentgatewaywanstor": "2026-09-04",
-  "taleron": "2026-09-04",
-  "tapline": "2026-09-04",
-  "taxandnederland": "2026-09-04",
-  "taxfix": "2026-09-03",
-  "tbimoney": "2026-09-03",
-  "tcmgroup": "2026-09-04",
-  "teachcast": "2026-09-04",
-  "teagueelectric": "2026-09-04",
-  "team": "2026-09-04",
-  "technikoinstallatietechniek": "2026-09-04",
-  "techspire": "2026-09-04",
-  "techtogether": "2026-09-04",
-  "tecme": "2026-09-04",
-  "teffo": "2026-09-04",
-  "tenpo1": "2026-09-04",
-  "tentamentrainingen": "2026-09-04",
-  "teqball": "2026-09-04",
-  "terraessencegermany": "2026-09-03",
-  "tesenso": "2026-09-04",
-  "thearc": "2026-09-04",
-  "theengineersoffinanceag": "2026-09-04",
-  "thefabricant": "2026-09-03",
-  "thekeyacademy": "2026-09-04",
-  "themarketingpractice": "2026-09-04",
-  "thenextdigitals": "2026-09-04",
-  "thespastudios": "2026-09-03",
-  "thestudenthotel": "2026-09-04",
-  "theventurestudio": "2026-09-04",
-  "theyukicompany": "2026-09-04",
-  "thingthingltd1": "2026-09-04",
-  "thisissoon": "2026-09-04",
-  "thomasthor": "2026-09-04",
-  "tigersunmediagroup": "2026-09-03",
-  "timberhub": "2026-09-04",
-  "timeshift": "2026-09-04",
-  "timut": "2026-09-04",
-  "tinybeans": "2026-09-03",
-  "tirlog": "2026-09-04",
-  "titan": "2026-09-04",
-  "tivron": "2026-09-04",
-  "tntswisspost": "2026-09-04",
-  "together": "2026-09-04",
-  "tomorrowseducation": "2026-09-03",
-  "tomorrowuniversity": "2026-09-03",
-  "topsports": "2026-09-04",
-  "tourismgroup": "2026-09-04",
-  "tpgaming": "2026-09-04",
-  "tqsintegration": "2026-09-04",
-  "traildptyltd": "2026-09-03",
-  "trans4mation": "2026-09-03",
-  "transcombih": "2026-09-03",
-  "transcomcroatia": "2026-09-04",
-  "transcomegypt": "2026-09-04",
-  "transcomlatvia": "2026-09-04",
-  "transcomnorthmacedonia": "2026-09-04",
-  "transcompoland": "2026-09-04",
-  "transcomserbia": "2026-09-04",
-  "transcomspain": "2026-09-04",
-  "translations": "2026-09-04",
-  "trattoriaboretti": "2026-09-04",
-  "trauringmanufaktur": "2026-09-04",
-  "traveltime": "2026-09-04",
-  "tribers": "2026-09-04",
-  "tribesai": "2026-09-03",
-  "tricycle": "2026-09-04",
-  "trinca": "2026-09-03",
-  "tripaneer": "2026-09-04",
-  "trucksters": "2026-09-04",
-  "trustedshopsbv": "2026-09-04",
-  "trustedshopssl": "2026-09-03",
-  "tuasaude": "2026-09-04",
-  "tumultlabs": "2026-09-04",
-  "tunga1": "2026-09-04",
-  "turo": "2026-09-03",
-  "tutorial": "2026-09-04",
-  "ufynd": "2026-09-04",
-  "umbler": "2026-09-03",
-  "uncharted": "2026-09-04",
-  "undagrid": "2026-09-04",
-  "unifiedmusicgroup": "2026-09-03",
-  "uniplacescareers": "2026-09-03",
-  "unitx": "2026-09-04",
-  "universign": "2026-09-04",
-  "universitepantheonassas": "2026-09-03",
-  "unknowngroup": "2026-09-04",
-  "unlglobal": "2026-09-04",
-  "upad": "2026-09-04",
-  "updates": "2026-09-04",
-  "uplink": "2026-09-04",
-  "upnext": "2026-09-04",
-  "upstageai": "2026-09-04",
-  "upvestco": "2026-09-03",
-  "urbannatureimmobilien": "2026-09-04",
-  "usersnap": "2026-09-03",
-  "uvugroup": "2026-09-04",
-  "uwpsychiater": "2026-09-04",
-  "vallomedia": "2026-09-04",
-  "valorsoftware": "2026-09-03",
-  "valve": "2026-09-04",
-  "vamatbv": "2026-09-04",
-  "vandenheuvellogistiek": "2026-09-04",
-  "vandersterrenhospitality": "2026-09-04",
-  "vdpindustries": "2026-09-04",
-  "venturerock": "2026-09-04",
-  "veratrak": "2026-09-03",
-  "verduurzaamvastgoed": "2026-09-03",
-  "verhoevengrondverzetmachinesbv": "2026-09-03",
-  "versett": "2026-09-04",
-  "versosociety": "2026-09-03",
-  "veylinx": "2026-09-04",
-  "vgl": "2026-09-04",
-  "vhdbv1": "2026-09-04",
-  "viahostels": "2026-09-03",
-  "viasalutedaccorsica": "2026-09-03",
-  "victoryranch": "2026-09-04",
-  "videostatementsgmbh": "2026-09-04",
-  "village": "2026-09-04",
-  "vilniausbaldai": "2026-09-03",
-  "vionretail": "2026-09-03",
-  "vistarait": "2026-09-04",
-  "voiceland": "2026-09-04",
-  "voicelandsa": "2026-09-04",
-  "vuonogroup": "2026-09-03",
-  "vvcconsultancy": "2026-09-04",
-  "vyrugentys": "2026-09-04",
-  "waat": "2026-09-04",
-  "wannahaves": "2026-09-04",
-  "wavesense": "2026-09-04",
-  "wayhome": "2026-09-04",
-  "wcc1": "2026-09-04",
-  "weareemma": "2026-09-04",
-  "wearemap": "2026-09-04",
-  "wearemoonshot": "2026-09-03",
-  "weempowerinnovators": "2026-09-03",
-  "wehyvejobs": "2026-09-04",
-  "wellabe": "2026-09-03",
-  "werkenbijdehuidkliniek": "2026-09-04",
-  "werkenbijdekempervennen": "2026-09-03",
-  "werkenbijdepizzabakkers": "2026-09-03",
-  "werkenbijdmp": "2026-09-04",
-  "werkenbijeikk": "2026-09-04",
-  "werkenbijmicazu": "2026-09-04",
-  "werkenbijntnt": "2026-09-04",
-  "werkenbijskepp": "2026-09-03",
-  "werkenbijspecialisterren": "2026-09-04",
-  "werkenbijteamfrankjol": "2026-09-04",
-  "werkenbijwhoon": "2026-09-04",
-  "westcord": "2026-09-04",
-  "westendorfroewe": "2026-09-04",
-  "whatagraph": "2026-09-03",
-  "whiffle": "2026-09-03",
-  "wholesaleexpress": "2026-09-03",
-  "wholestacksolutions": "2026-09-04",
-  "wincacademy": "2026-09-03",
-  "windhr": "2026-09-04",
-  "wingassistant": "2026-09-03",
-  "winspearcentreedmontonsymphonyorchestra": "2026-09-04",
-  "winstuitjewoning": "2026-09-04",
-  "wisepops": "2026-09-04",
-  "wittekoeltechniekbv": "2026-09-04",
-  "wizbii2": "2026-09-04",
-  "wohlertaldagpartner": "2026-09-04",
-  "workhunter": "2026-09-03",
-  "wortelboer": "2026-09-04",
-  "writeofpassage": "2026-09-03",
-  "writeofpassagestudents": "2026-09-03",
-  "wsa": "2026-09-04",
-  "wuestbadundheizung": "2026-09-03",
-  "wundermart": "2026-09-03",
-  "wurdacksteuern": "2026-09-04",
-  "xapo": "2026-09-04",
-  "xbird": "2026-09-04",
-  "xbyx": "2026-09-04",
-  "xebiapoland": "2026-09-03",
-  "xenioshospitality": "2026-09-03",
-  "yarukiswitchgroup": "2026-09-03",
-  "yays": "2026-09-04",
-  "ycon": "2026-09-04",
-  "ympact": "2026-09-03",
-  "yourcampus": "2026-09-04",
-  "yourotherhalfsolutions": "2026-09-04",
-  "zeilhofer": "2026-09-03",
-  "zeitgeist": "2026-09-03",
-  "zenloopgmbh": "2026-09-03",
-  "zenwatch": "2026-09-03",
-  "zerodoubtclub": "2026-09-03",
-  "ziegler": "2026-09-04",
-  "zkv": "2026-09-04",
-  "zomato": "2026-09-04",
-  "zood": "2026-09-04",
-  "zooplusnetherlands": "2026-09-04",
-  "zopa": "2026-09-04"
+  "lansweeper": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "lascentrum": "2026-09-20",
+  "latticeflow": "2026-09-20",
+  "lawantec": "2026-09-20",
+  "leapeventtech": "2026-09-20",
+  "learnshipnetworksgmbh": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "leaseplanschweizag": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "lebenskraftpur": "2026-09-20",
+  "leebointelligentebouwsystemenbv": "2026-09-17",
+  "leomike": "2026-09-18",
+  "lepaya": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "lepristineantwerp": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "letsgetitstarted": "2026-09-16",
+  "letsmilebv": "2026-09-18",
+  "lett": "2026-09-20",
+  "levantusag": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "lexhamgroup": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "lfchumain": "2026-09-16",
+  "liebezeitarbeitpersonalservice": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "liedetectors1": "2026-09-20",
+  "liftventures": "2026-09-20",
+  "likhacareers": "2026-09-17",
+  "limeflight": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "limgroup": "2026-09-17",
+  "lineagedigital": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "lineup7": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "lipsync": "2026-09-18",
+  "litetech": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "liveaboard": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "livelihoodsventure": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "lively": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "llolloapp": "2026-09-20",
+  "loadsmile": "2026-09-20",
+  "loanboox": "2026-09-20",
+  "local4localmarketing": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "locamation": "2026-09-20",
+  "lsi": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "lspinnovativeautomotivesystemsgmbh": "2026-09-20",
+  "luca": "2026-09-20",
+  "luckbox": "2026-09-20",
+  "ludewigmarketing": "2026-09-20",
+  "luketechnikgmbh": "2026-09-20",
+  "luminis": "2026-09-20",
+  "luni": "2026-09-20",
+  "m4m": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "mablewholesale": "2026-09-20",
+  "madsacklogistik": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "maerskaircrew": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "mailgun": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "mainstream": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "maintenancepartners": "2026-09-17",
+  "majargroup": "2026-09-17",
+  "make": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "makerdao": "2026-09-20",
+  "makerstreet": "2026-09-19",
+  "makesyoulocal": "2026-09-17",
+  "malcomfinance": "2026-09-20",
+  "manpowergroupgreecepfizer": "2026-09-18",
+  "mansaold": "2026-09-20",
+  "mapadoacolhimento": "2026-09-20",
+  "marctorke": "2026-09-20",
+  "margera": {
+    "code": 403,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "markel": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "marketingwizards": "2026-09-20",
+  "marketnode": {
+    "code": 403,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "marketplace": {
+    "code": 403,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "martialartsforlife": "2026-09-20",
+  "marvinjeskeimmobilienwittlichgbr": "2026-09-20",
+  "marvyagmbh": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "massagesesselwelt": "2026-09-19",
+  "masterpiecestudio": "2026-09-20",
+  "maxcluster": "2026-09-20",
+  "maximiliangamperling": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "measurelab": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "mediapool": "2026-09-20",
+  "mediozorg": "2026-09-20",
+  "meetmable": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "megaparticleinc": "2026-09-16",
+  "mehramperegmbh": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "mehrb2bkunden": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "mehrfahrer": "2026-09-20",
+  "meiarchitectsplanners": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "melitamarinegroup": "2026-09-20",
+  "melitta": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "meltandmarble": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "mentorjam": "2026-09-17",
+  "merkurlifestyle": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "mesosolutions": "2026-09-20",
+  "metr": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "metrbmsgmbh": "2026-09-20",
+  "metrikagmbh": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "mindgram": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "mindpal": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "mindsdb": "2026-09-20",
+  "mindsdigital3": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "mingers": "2026-09-20",
+  "mingersrechtsanwaltsgesellschaftmbh": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "missioninboxinc": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "missionlabscareers": "2026-09-20",
+  "mobileintegrationworkgroup": "2026-09-20",
+  "modernmartialarts": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "moleqlar": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "monstarlab": "2026-09-20",
+  "moovai": "2026-09-19",
+  "mopinion": "2026-09-17",
+  "morawitzconsultinggmbh": "2026-09-20",
+  "morpho": "2026-09-20",
+  "morpholabs": "2026-09-20",
+  "morphoses": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "motorai": "2026-09-16",
+  "movelabstudio": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "moversandmakersgmbh": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "movetexas": "2026-09-20",
+  "mpeople": "2026-09-20",
+  "mtc": "2026-09-17",
+  "mumc": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "mydatafactory": "2026-09-17",
+  "myjobtech": "2026-09-20",
+  "mymove": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "mysolity": "2026-09-20",
+  "nash": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "naturalheroes": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "navitrans": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "ndigitalconsultinggmbh": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "neara": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "nencofoodgroup": "2026-09-20",
+  "neni": "2026-09-20",
+  "neocles": "2026-09-20",
+  "neocom": "2026-09-20",
+  "neossdi": "2026-09-20",
+  "nepgroup": "2026-09-20",
+  "neptuneenergy": "2026-09-20",
+  "neptunesoftware": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "neschen": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "netdata": "2026-09-20",
+  "netox": "2026-09-18",
+  "netreviews": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "netwisesa": "2026-09-17",
+  "neuronesit": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "newego": "2026-09-20",
+  "newyorkpizza": "2026-09-16",
+  "nexadigital": "2026-09-20",
+  "nexoya": "2026-09-20",
+  "nextbigthing": "2026-09-17",
+  "nextbigthingag2": "2026-09-17",
+  "nexusmutual": "2026-09-16",
+  "nfactorial": "2026-09-20",
+  "ngrave": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "ngxinteractive": "2026-09-20",
+  "niagahoster": "2026-09-20",
+  "nicklconsulting": "2026-09-20",
+  "nmssteuerberatung": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "noackstatistik": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "noderes": "2026-09-20",
+  "nodes": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "noobz": "2026-09-20",
+  "northstarnetwork": "2026-09-20",
+  "nostics": "2026-09-20",
+  "nostosgenomics": "2026-09-18",
+  "nosuch": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "novaconsultinggrouppolska": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "novakrecruiting": "2026-09-20",
+  "nowagwirthrecruitingconsultants": "2026-09-20",
+  "nubits": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "numinus": "2026-09-20",
+  "nursa": "2026-09-20",
+  "nutrilent": "2026-09-20",
+  "nutrium": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 4
+  },
+  "nuuvem": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "nviz": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "nxtlvl": "2026-09-20",
+  "oaky": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "odv": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "oetkerdigital1": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "oliverrasche": "2026-09-20",
+  "omnicommediagroup2": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "omroepzeeland": "2026-09-20",
+  "omrt": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "onecodex": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "onemobility": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "oneteam": "2026-09-20",
+  "onethingdesign": "2026-09-18",
+  "onlinebewerbung": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "ontimeengineers": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "opencorporates": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "openprovider": "2026-09-17",
+  "optinova": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "optiopay": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "orbem": "2026-09-19",
+  "orbisk": "2026-09-18",
+  "ordinaryseafood": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "origin": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "orixamedia": "2026-09-20",
+  "orsatelqualitypeople": "2026-09-17",
+  "osalas": "2026-09-17",
+  "osalasgmbh": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "overactive": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "ovinto": "2026-09-16",
+  "oviva": "2026-09-20",
+  "ownr": "2026-09-20",
+  "oyen": "2026-09-20",
+  "packly": "2026-09-20",
+  "paid": "2026-09-20",
+  "pairfinancegmbh": "2026-09-20",
+  "pandaabc": "2026-09-17",
+  "pangaea": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "parcelparcel": "2026-09-20",
+  "partnerinstitut": "2026-09-18",
+  "partory": "2026-09-18",
+  "pastbook": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "payoneergermany": "2026-09-20",
+  "peanut": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "peerssolutions": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "penbrothers": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "pennyappealusa": "2026-09-20",
+  "pensionworks": "2026-09-20",
+  "pentoaps": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "peoplekeep": "2026-09-20",
+  "peoplepayment": "2026-09-20",
+  "perfeggt": "2026-09-20",
+  "performancedirecte": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "performante": "2026-09-19",
+  "perpetualnext": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "peterfrahmcoaching": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "petrieichendiakonischekinderundjugendhilfebremenggmbh": "2026-09-20",
+  "pgssoftware": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "philabs": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "philpoosch": "2026-09-20",
+  "phoenixsecurity": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "phyllo": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "phyllocareers": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "piggy": "2026-09-20",
+  "pisanoco": "2026-09-20",
+  "pix": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "pixxprint": "2026-09-20",
+  "plandgmbh": "2026-09-20",
+  "planfabrik": "2026-09-20",
+  "plango": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "plantlab": "2026-09-20",
+  "plasticsurgeon": "2026-09-20",
+  "plumresearch": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "polandxebia": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "poppingastomberg": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "portaltelemedicina": "2026-09-17",
+  "posrocket": "2026-09-18",
+  "possehlconsultinggmbh": "2026-09-20",
+  "powerprozesse": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "pporahovica1": "2026-09-20",
+  "praxisdrsahin": "2026-09-18",
+  "praxisfurzahnheilkundedrdaniellakaiser": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "prazisionsentwicklungdenzfertigungsgmbh": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "preava": "2026-09-18",
+  "premiermedia": "2026-09-20",
+  "prepmyfuture": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "presspage": "2026-09-20",
+  "prezzee": "2026-09-18",
+  "primeadvicebv": "2026-09-18",
+  "producthackers": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "progaming": "2026-09-16",
+  "projecteaden": "2026-09-20",
+  "projectivegroup": "2026-09-20",
+  "prolyse": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "prompt": "2026-09-20",
+  "prompto": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "protix": "2026-09-20",
+  "provetuspflege": "2026-09-20",
+  "provitaarndtgmbh": "2026-09-20",
+  "prozeetechnoservicebv": "2026-09-19",
+  "prtt": "2026-09-20",
+  "ps": "2026-09-16",
+  "pspmedia": "2026-09-20",
+  "puremysmile": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "pym": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "qlgaminggroup": "2026-09-20",
+  "qollabi": "2026-09-20",
+  "qparkoperationsgermanygmbhcokg": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "quantmetry1": "2026-09-20",
+  "quatt": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "quidax": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "ququabc": "2026-09-18",
+  "radishlab": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "radix": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "raedlingeringenieurbau": "2026-09-20",
+  "raffyleystroom": "2026-09-20",
+  "rahnema": "2026-09-18",
+  "raisa": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "raisaegypt": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "rallyrecruit": "2026-09-20",
+  "raphaelstichting": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "rarifylabs": "2026-09-20",
+  "rarimoprotocol": "2026-09-19",
+  "rbcprojectsbv": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "rcco": "2026-09-16",
+  "readytech": "2026-09-20",
+  "recohoist1": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "redbullmediahouse": "2026-09-20",
+  "referit": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "reinischgmbh": "2026-09-20",
+  "rekkiapp": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "releaf": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "relu": "2026-09-17",
+  "remerge": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "reshapebiotech": "2026-09-20",
+  "resultscontracting": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "returnista": "2026-09-19",
+  "reviewlab": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "rewaa": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "rheinmainsteuerberatungpartnerschaftmbb": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "rhenuslogisticscarrierefrance": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "rheonlabs": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "rhmd": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "rift": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "rkh": "2026-09-20",
+  "rkmedia": "2026-09-18",
+  "rmember": "2026-09-20",
+  "robustagaukel": "2026-09-18",
+  "rocketpeople": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "rockitfinancebv": "2026-09-20",
+  "rodomniagmbh": "2026-09-20",
+  "roemvanyerseke": "2026-09-20",
+  "rojoconsultancy": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "rojointegrations": "2026-09-20",
+  "romeobv": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "roslinct": "2026-09-20",
+  "roslinctcareers": "2026-09-16",
+  "rotapersonal": "2026-09-16",
+  "route42": "2026-09-20",
+  "rscinternationalgmbh": "2026-09-20",
+  "rtcamp": "2026-09-16",
+  "rukakeskus": "2026-09-17",
+  "saaletreu": "2026-09-19",
+  "sabrogmbh": "2026-09-19",
+  "saferhomeservices": "2026-09-20",
+  "saleenco": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "salesup": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "sandemansneweurope": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "sandwave": "2026-09-20",
+  "sannegroup": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "santevet": "2026-09-20",
+  "sapienhealth": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "sapphiresystems": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "sardi": "2026-09-20",
+  "saschastarck": "2026-09-17",
+  "satori": "2026-09-20",
+  "savangardcareer": "2026-09-20",
+  "scalesquad": "2026-09-20",
+  "scanmovers": "2026-09-17",
+  "scento": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "scheersgroepadviseursenaccountants": "2026-09-20",
+  "schellerstabenow": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "schmalkokeautomobile": "2026-09-20",
+  "schmid": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "schneiderundzien": "2026-09-19",
+  "schoenhoff": "2026-09-18",
+  "schoolinternational": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "schotelsoperationsoy": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "schustersteuerberatungsgesellschaft": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "scioteq": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "scorewarrior": "2026-09-19",
+  "scottyslittlesoldiers": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "scrumsdotcom": "2026-09-20",
+  "sdsacademy": "2026-09-20",
+  "searchopal": "2026-09-19",
+  "secturelabs": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "secure": "2026-09-20",
+  "seenons": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "seifertsadlothielgmbhstbg": "2026-09-20",
+  "selesti": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "selfapygmbh": "2026-09-20",
+  "sellactivegmbh": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "sellicsjobs": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "semag": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "sengefabrikken": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "sennasearch": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "september": "2026-09-20",
+  "serenide": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "setiinstitute": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "sfimarkets": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "sharecompanygroup": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "shared": "2026-09-20",
+  "shareup": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "shoppad": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "shttransformationgmbh": "2026-09-20",
+  "siccar": "2026-09-20",
+  "signode": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "sikhcoalition": "2026-09-18",
+  "silverein": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "simabs": "2026-09-20",
+  "simvecgmbh": "2026-09-20",
+  "sits": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "skmgroup": "2026-09-17",
+  "skondras": "2026-09-18",
+  "skoon": "2026-09-18",
+  "skyrecords": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "skytrac": "2026-09-20",
+  "sleep21": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "slingshotgroup1": "2026-09-19",
+  "smartbi": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "smartrobotics": "2026-09-19",
+  "smartsteeltechnologiesgmbh": "2026-09-17",
+  "smedleygroup": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "smilefulgmbh": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "smiler": "2026-09-16",
+  "smoothly": "2026-09-16",
+  "snapeda": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "snoop": "2026-09-18",
+  "socialab": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "socialco": "2026-09-20",
+  "socialdealbe": "2026-09-20",
+  "soda": "2026-09-20",
+  "softgenius": "2026-09-18",
+  "solarmonkey": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "solarplazainternationalbv": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "solita": "2026-09-19",
+  "sonnemannsteuerberater": "2026-09-20",
+  "soomgo": "2026-09-16",
+  "sor": "2026-09-20",
+  "soundboks": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "soundintelligence": "2026-09-20",
+  "sourcelabs": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "sovtech": "2026-09-20",
+  "spacelift": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "spaceos": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "sparkfactory": "2026-09-16",
+  "sparx": "2026-09-20",
+  "specialtystaffing": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "specitecsa": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "spectralengines": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "speedinvestgmbh": "2026-09-20",
+  "speedinvestheroes": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "speedoc": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "spentys": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "spingersteuerberater": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "sportecsolutions": "2026-09-19",
+  "spotahome": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "spotlab": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "stagebijvandervalk": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "starair": "2026-09-20",
+  "startupsjobs": "2026-09-20",
+  "status": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "stayawesome": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "stbhannemann": "2026-09-20",
+  "stealthstartup": "2026-09-20",
+  "steinconsultinggmbh1": "2026-09-19",
+  "sterblue": "2026-09-20",
+  "steuerberateraichach": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "steuerkanzleichristlwagnerschneider": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "stichtinggelijkwaardigherstel": "2026-09-20",
+  "stndigital": "2026-09-20",
+  "stormcreative1": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "storq": "2026-09-20",
+  "storyme": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "streamloots": "2026-09-20",
+  "strix": "2026-09-18",
+  "stronganalytics": "2026-09-20",
+  "studentfinance": "2026-09-20",
+  "studibuch": "2026-09-20",
+  "sunlab": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "superb": "2026-09-20",
+  "superbryte": "2026-09-20",
+  "superlist": "2026-09-20",
+  "supermercato24": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "supersonic": "2026-09-20",
+  "supersummary": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "supkanzlei": "2026-09-20",
+  "supper": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "surfer": "2026-09-20",
+  "surgeryhero": "2026-09-17",
+  "survicate": "2026-09-18",
+  "susodigital": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "svoesterling": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "swapfiets": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "swapsupport": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "swipeguide": "2026-09-20",
+  "swisspearl": "2026-09-18",
+  "sympla": "2026-09-19",
+  "syncvrmedical1": "2026-09-20",
+  "syngenta": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "synthesis": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "sysintegra": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "systemssunlight": "2026-09-17",
+  "szre": "2026-09-20",
+  "tacobellnederland": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "taglivros": "2026-09-20",
+  "take1": "2026-09-19",
+  "talentgateway": "2026-09-20",
+  "talentgatewaywanstor": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "taleron": "2026-09-20",
+  "tapline": "2026-09-20",
+  "taxandnederland": "2026-09-20",
+  "taxfix": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 4
+  },
+  "tbimoney": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "tcmgroup": "2026-09-16",
+  "teachcast": "2026-09-20",
+  "teagueelectric": "2026-09-18",
+  "team": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "technicaengineeringspain": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "technikoinstallatietechniek": "2026-09-20",
+  "techspire": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "techtogether": "2026-09-16",
+  "tecme": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "teffo": "2026-09-20",
+  "telindus": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "temicongmbh": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "tenpo1": "2026-09-18",
+  "tentamentrainingen": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "teqball": "2026-09-20",
+  "terraessencegermany": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "tesenso": "2026-09-18",
+  "thearc": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "theengineersoffinanceag": "2026-09-20",
+  "thefabricant": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "thekeyacademy": "2026-09-20",
+  "themarketingpractice": "2026-09-20",
+  "thenextdigitals": "2026-09-20",
+  "thespastudios": "2026-09-20",
+  "thestudenthotel": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "theventurestudio": "2026-09-20",
+  "theyukicompany": "2026-09-20",
+  "thingthingltd1": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "thisissoon": "2026-09-20",
+  "thomasthor": "2026-09-18",
+  "tigersunmediagroup": "2026-09-20",
+  "timberhub": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "timeshift": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "timut": "2026-09-20",
+  "tinybeans": "2026-09-20",
+  "tirlog": "2026-09-16",
+  "titan": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "tivron": "2026-09-20",
+  "tntswisspost": "2026-09-18",
+  "together": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "tomorrowseducation": "2026-09-17",
+  "tomorrowuniversity": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "topsports": "2026-09-20",
+  "tourismgroup": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "tpgaming": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "tqsintegration": "2026-09-20",
+  "tradinorganicagriculture": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "trafilea": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "trafineo": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "traildptyltd": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "trans4mation": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "transcombih": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "transcomcroatia": "2026-09-20",
+  "transcomegypt": "2026-09-20",
+  "transcomlatvia": "2026-09-20",
+  "transcomnorthmacedonia": "2026-09-18",
+  "transcompoland": "2026-09-20",
+  "transcomserbia": "2026-09-20",
+  "transcomspain": "2026-09-16",
+  "translations": "2026-09-20",
+  "trattoriaboretti": "2026-09-18",
+  "trauringmanufaktur": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "traveltime": "2026-09-20",
+  "tribers": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "tribesai": "2026-09-19",
+  "tricycle": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "trinca": "2026-09-19",
+  "tripaneer": "2026-09-20",
+  "triplejump": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "trucksters": "2026-09-17",
+  "trustedshopsbv": "2026-09-20",
+  "trustedshopssl": "2026-09-19",
+  "tsetinissoftware": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "tuasaude": "2026-09-18",
+  "tumultlabs": "2026-09-20",
+  "tunga1": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "turo": "2026-09-20",
+  "tutorial": "2026-09-20",
+  "ufynd": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "umbler": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "uncharted": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "undagrid": "2026-09-20",
+  "unifiedmusicgroup": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "uniplacescareers": "2026-09-20",
+  "unitx": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "universign": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "universitepantheonassas": "2026-09-19",
+  "unknowngroup": "2026-09-16",
+  "unlglobal": "2026-09-17",
+  "unnunitednewsnetworkgmbh": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "upad": "2026-09-20",
+  "updates": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "uplink": "2026-09-20",
+  "upnext": "2026-09-20",
+  "upstageai": "2026-09-20",
+  "upvestco": "2026-09-20",
+  "urbannatureimmobilien": "2026-09-20",
+  "usersnap": "2026-09-20",
+  "uvugroup": "2026-09-20",
+  "uwpsychiater": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "vallomedia": "2026-09-20",
+  "valorsoftware": "2026-09-20",
+  "valve": "2026-09-16",
+  "vamatbv": "2026-09-20",
+  "vanbeestbv": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "vandenheuvellogistiek": "2026-09-20",
+  "vandersterrenhospitality": "2026-09-20",
+  "vandervalkdienstencentrum": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "variondgruppe": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "vbkvacatures": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "vdpindustries": "2026-09-20",
+  "venturerock": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "venuescanner": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "veratrak": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "verduurzaamvastgoed": "2026-09-20",
+  "verhoevengrondverzetmachinesbv": "2026-09-17",
+  "versett": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "versosociety": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "veylinx": "2026-09-17",
+  "vgl": "2026-09-20",
+  "vhdbv1": "2026-09-20",
+  "viahostels": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "viasalutedaccorsica": "2026-09-20",
+  "victoryranch": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "videostatementsgmbh": "2026-09-20",
+  "viderity": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "viepeople": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "village": "2026-09-18",
+  "vilniausbaldai": "2026-09-17",
+  "vionretail": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "vistarait": "2026-09-20",
+  "voiceland": "2026-09-20",
+  "voicelandsa": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "vuonogroup": "2026-09-20",
+  "vvcconsultancy": "2026-09-20",
+  "vyrugentys": "2026-09-20",
+  "waat": "2026-09-16",
+  "walki": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "wannahaves": "2026-09-18",
+  "waracle": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "wavesense": "2026-09-20",
+  "wayhome": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "wcc1": "2026-09-20",
+  "weareemma": "2026-09-17",
+  "wearemap": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "wearemoonshot": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "weempowerinnovators": "2026-09-20",
+  "wehyvejobs": "2026-09-20",
+  "wellabe": "2026-09-19",
+  "werkenbijadesso": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "werkenbijdecantharel": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "werkenbijdehuidkliniek": "2026-09-20",
+  "werkenbijdekempervennen": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "werkenbijdepizzabakkers": "2026-09-17",
+  "werkenbijdmp": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "werkenbijeikk": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "werkenbijmicazu": "2026-09-17",
+  "werkenbijnedcargo": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "werkenbijntnt": "2026-09-20",
+  "werkenbijpinkelephant": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "werkenbijseabournelogistics": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "werkenbijskepp": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "werkenbijspecialisterren": "2026-09-16",
+  "werkenbijteamfrankjol": "2026-09-18",
+  "werkenbijvanberlo": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "werkenbijwhoon": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "werraenergie": {
+    "code": 429,
+    "date": "2026-09-20",
+    "streak": 3
+  },
+  "westcord": "2026-09-18",
+  "westendorfroewe": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "whatagraph": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "whiffle": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "wholesaleexpress": "2026-09-20",
+  "wholestacksolutions": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "wiiw": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "wincacademy": "2026-09-20",
+  "windhr": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "wingassistant": "2026-09-19",
+  "winspearcentreedmontonsymphonyorchestra": "2026-09-20",
+  "winstuitjewoning": "2026-09-20",
+  "wisepops": "2026-09-16",
+  "wittekoeltechniekbv": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "wizbii2": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "wohlertaldagpartner": "2026-09-20",
+  "workhunter": "2026-09-20",
+  "wortelboer": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "writeofpassage": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 4
+  },
+  "writeofpassagestudents": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "wsa": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "wuestbadundheizung": "2026-09-20",
+  "wundermart": "2026-09-16",
+  "wurdacksteuern": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "xapo": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "xbird": "2026-09-20",
+  "xbyx": "2026-09-20",
+  "xebiapoland": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "xenioshospitality": "2026-09-17",
+  "yarukiswitchgroup": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "yays": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "ycon": "2026-09-20",
+  "yellowstone": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "ympact": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  },
+  "yourcampus": "2026-09-20",
+  "yourotherhalfsolutions": "2026-09-20",
+  "youweconnectit": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "zeilhofer": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "zeitgeist": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "zenloopgmbh": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "zensai": {
+    "code": 429,
+    "date": "2026-09-21",
+    "streak": 3
+  },
+  "zenwatch": "2026-09-20",
+  "zerodoubtclub": "2026-09-20",
+  "ziegler": "2026-09-20",
+  "zkv": "2026-09-20",
+  "zomato": "2026-09-20",
+  "zood": "2026-09-18",
+  "zooplusnetherlands": {
+    "code": 404,
+    "date": "2026-09-20",
+    "streak": 2
+  },
+  "zopa": {
+    "code": 404,
+    "date": "2026-09-21",
+    "streak": 2
+  }
 }
