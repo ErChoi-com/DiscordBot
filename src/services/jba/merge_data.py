@@ -440,7 +440,7 @@ def commit_archives(*, push: bool | None = None) -> bool:
     if _run_git(["rev-parse", "--git-dir"], context="repo check")[0] != 0:
         return False
 
-    if _run_git(["add", "-A", "--", _ARCHIVE_PATHSPEC], context="archive staging")[0] != 0:
+    if _run_git(["add", "-f", "--", "data/jba/jobs/*/*.zip"], context="archive staging")[0] != 0:
         return False
 
     if not _archive_changes_staged():
@@ -560,7 +560,7 @@ def _git_commit_monthly(zip_path: Path, month: str, job_count: int) -> bool:
     if not _archive_commit_enabled():
         return False
 
-    if _run_git(["add", "-A", "--", _ARCHIVE_PATHSPEC], context=month)[0] != 0:
+    if _run_git(["add", "-f", "--", "data/jba/jobs/*/*.zip"], context=month)[0] != 0:
         return False
     if not _archive_changes_staged():
         return False

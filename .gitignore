@@ -146,10 +146,8 @@ data/geonames_raw/
 
 # Large archives / dataset dumps
 *.zip
-# Allow job archive zips -- weekly and consolidated monthly alike. The bot
-# commits these itself (merge_data.commit_archives), gated on
-# JBA_ARCHIVE_GIT_COMMIT.
-!data/jba/jobs/*/*.zip
+# Job archive zips are ignored by default. The bot force-adds them using
+# `git add -f` (merge_data.commit_archives), gated on JBA_ARCHIVE_GIT_COMMIT.
 *.7z
 *.tar
 *.tar.gz
