@@ -1,0 +1,176 @@
+\documentclass[11pt]{article}
+\usepackage[letterpaper,
+top=0.5in,
+bottom=0.5in,
+left=0.5in,
+right=0.5in]{geometry}
+
+\usepackage{XCharter}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}
+\usepackage{comment}
+\raggedright
+\pagestyle{empty}
+
+\input{glyphtounicode}
+\pdfgentounicode=1
+
+% Section heading: bold, rule underneath, controlled spacing above/below
+\titleformat{\section}{\bfseries\large}{}{0pt}{}[\vspace{1pt}\titlerule]
+\titlespacing*{\section}{0pt}{8pt}{2pt}
+
+\renewcommand\labelitemi{$\vcenter{\hbox{\small$\bullet$}}$}
+% topsep: gap between entry title line and bullet list
+% itemsep: gap between individual bullets
+% parsep/partopsep: suppress extra paragraph padding
+\setlist[itemize]{itemsep=-2pt, leftmargin=12pt, topsep=2pt, parsep=0pt, partopsep=0pt}
+
+\begin{document}
+
+% ---------- NAME ----------
+\centerline{\Huge Ernest Choi}
+\vspace{3pt}
+
+% ---------- CONTACT ----------
+\centerline{%
+  \href{mailto:ernestljchoi@gmail.com}{ernestljchoi@gmail.com} |
+  \href{https://www.github.com/ErChoi-com}{github.com/ErChoi-com} |
+  \href{https://www.linkedin.com/in/ernest-choi-lj}{linkedin.com/in/ernest-choi-lj} |
+  647-713-8997
+}
+
+% ---------- EXPERIENCE ----------
+\section*{Experience}
+
+\smallskip
+% [frontend]
+\textbf{Software Development Intern,} {MCG3D} -- Remote \hfill January 2026 -- March 2026 \\
+\begin{itemize}
+  \item Built production web applications in \textbf{React} and \textbf{TypeScript}, keeping the component architecture scalable and the interface fast and user-centric.
+  \item Integrated frontend features with \textbf{Python} \textbf{Flask} backend services over secure \textbf{RESTful APIs}, including AI-enabled workflows built on \textbf{OpenAI} APIs.
+  \item Deployed and tested applications in \textbf{Docker} containers and wrote technical documentation, working within a remote, cross-functional team.
+\end{itemize}
+
+\smallskip
+% [electrical]
+\textbf{Electrical Team Member,} {Metropolitan Aerospace Rocket Society (MARS)} -- Toronto, ON \hfill September 2024 -- Present \\
+\begin{itemize}
+  \item Designed, fabricated, and integrated \textbf{PCB circuits} in \textbf{Altium} and \textbf{KiCad} for a custom \textbf{STM32}-based avionics flight computer with GPS telemetry, sensor integration, and pyrotechnic ignition.
+  \item Improved power efficiency by 23\% through circuit configuration, component selection, and \textbf{power distribution} across regulated voltage rails.
+  \item Performed \textbf{board bring-up} and debugging with \textbf{oscilloscopes}, logic analyzers, and electrical measurements, validating hardware against strict performance and safety standards for flight.
+  \item Developed embedded firmware for the microcontroller-based avionics in \textbf{C/C++} and \textbf{Python}, automating test workflows with scripting.
+\end{itemize}
+
+\smallskip
+% [ml]
+\textbf{Machine Learning Intern,} {Goopter Commerce Solutions} -- Remote \hfill September 2025 -- December 2025 \\
+\begin{itemize}
+  \item Engineered a low-latency pipeline for quantitative trading, streaming high-frequency \textbf{Kafka} market data into asynchronous \textbf{Python} services on \textbf{FastAPI}, \textbf{Pandas}, \textbf{NumPy}, and \textbf{scikit-learn}.
+  \item Built and trained trading-signal models in \textbf{TensorFlow} and \textbf{PyTorch Lightning}, operating on live market data streams.
+  \item Deployed analytics dashboards in \textbf{Tableau} and \textbf{Power BI} for company use, surfacing real-time predictive insights from those models.
+\end{itemize}
+
+\smallskip
+% [general]
+\textbf{Software Developer Intern,} {Constellation Homebuilders} -- Markham, Ontario \hfill September 2026 -- Present \\
+\begin{itemize}
+  \item Built new product modules end-to-end in a \textbf{Scrum} team using \textbf{Angular}, \textbf{TypeScript}, \textbf{HTML5}, and \textbf{.NET}, delivering multi-tier, responsive web-based \textbf{ERP} software for the homebuilding industry.
+  \item Wrote and maintained \textbf{SQL} queries and applied \textbf{Object-Oriented Design} principles across the full stack, working under architectural guidance with shared \textbf{Git} workflows — branching, pull requests, and code review.
+  \item Set up, configured, and maintained \textbf{MCP} servers and connectors powering AI-assisted development across the team, authoring documentation and usage governance policies.
+  \item Expanded automated test coverage — unit, integration, and end-to-end (\textbf{Playwright}) — and wired tests into \textbf{Azure DevOps} Repos and Pipelines for continuous integration and delivery.
+  \item Authored and refined reusable AI context including rules files, prompts, and agentic workflows for repeatable development and code-review tasks using \textbf{AI coding assistants}.
+  \item Evaluated the quality and reliability of AI-assisted output against real coding tasks, iterating on prompts and tooling to improve accuracy and development velocity.
+  \item Documented processes and delivered recommendations for scaling AI-assisted development and automation practices across the engineering team.
+\end{itemize}
+
+\begin{comment}
+\smallskip
+% [teaching]
+\textbf{Engineering Instructor,} {Obotz Robotics} -- Markham, Ontario \hfill September 2022 -- Present \\
+\begin{itemize}
+  \item Taught digital logic concepts and embedded \textbf{C} programming, raising students' robotics problem-completion scores by 35\%.
+  \item Coached students to place in the 75th percentile of robotics competitions with custom \textbf{Arduino} hardware.
+  \item Explained students' technical progress to parents in clear, non-technical terms.
+\end{itemize}
+\end{comment}
+
+% ---------- PROJECTS ----------
+\section*{Projects}
+
+% [systems, gpu]
+\textbf{Particle Fluid Simulation} | \textit{C++, OpenGL} \hfill \href{https://github.com/ErChoi-com/Particle-Fluid-Simulation}{github.com/ErChoi-com/Particle-Fluid-Simulation} \\
+\begin{itemize}
+  \item Developed a real-time fluid simulation in \textbf{C++} and \textbf{OpenGL}, writing \textbf{GLSL} shaders for particle rendering, physics-driven interaction, and GPU-accelerated parallel computation.
+  \item Managed windowing, input, and render contexts with \textbf{GLFW} and \textbf{GLUT}, and trimmed graphics-pipeline memory allocation by 12\% for smoother frames and better GPU utilization.
+  \item Implemented a raycasting system that uses projection math to simulate depth and perspective.
+\end{itemize}
+
+\begin{comment}
+% [embedded]
+\textbf{eebot Mobile Robot System} | \textit{Assembly, C} \\ % no public repository
+\begin{itemize}
+  \item Developed embedded firmware in \textbf{Assembly} and \textbf{C} for a mobile robot built on the \textbf{HCS12} microcontroller, handling hardware verification and board-level integration in a \textbf{Linux/Unix} environment.
+  \item Implemented \textbf{PWM} motor control with timer-driven scheduling that sustained 50ms sensor sampling intervals, driving the motor electronics from regulated voltage rails.
+\end{itemize}
+\end{comment}
+
+\begin{comment}
+% [hardware, fpga]
+\textbf{General-Purpose Processor (ALU)} | \textit{VHDL, Quartus II, FPGA} \\ % no public repository
+\begin{itemize}
+  \item Designed and implemented a modular \textbf{Arithmetic and Logic Unit (ALU)} in \textbf{VHDL} on an \textbf{Altera FPGA}, integrating registers, a finite state machine, a $4\times16$ decoder, and a microcode-driven ALU core.
+  \item Verified the design through \textbf{Quartus II} simulation, waveform analysis, and static timing verification, driving results out to 7-segment displays.
+  \item Applied \textbf{RTL} design practice — timing analysis, modular integration, bitwise operations — to build and test digital logic at the register-transfer level.
+\end{itemize}
+\end{comment}
+
+% [fullstack]
+\textbf{Web Messaging App} | \textit{JavaScript, Node.js, SQL} \hfill \href{https://www.ernestchoi.com/terminalcards/roomEnter.html}{ernestchoi.com/terminalcards} \\
+\begin{itemize}
+  \item Built a fullstack collaborative programming platform in \textbf{JavaScript} and \textbf{Node.js}, using \textbf{WebRTC} for real-time peer-to-peer messaging, file sharing, and room management.
+  \item Implemented machine-learning autocomplete and in-browser \textbf{Python} code execution, alongside secure credential handling, key generation, and error recovery.
+  \item Hosted the backend on a \textbf{Raspberry Pi} running \textbf{Ubuntu}, exposing a layered \textbf{RESTful API} backed by a secured \textbf{PostgreSQL} database.
+\end{itemize}
+
+% [backend, ai, distributed]
+\textbf{Job-Monitoring \& Resume-Generation System} | \textit{Python, Playwright, LLM APIs, SQLite} \hfill \href{https://github.com/ErChoi-com/DiscordBot}{github.com/ErChoi-com/DiscordBot} \\
+\begin{itemize}
+  \item Scraped and deduplicated 206,775 job postings (120,989 unique URLs) in one month across five \textbf{ATS} providers, using each source's \textbf{REST API} and escalating to \textbf{Playwright} only where required.
+  \item Isolated failing sources behind per-source circuit breakers and a fair scheduler with concurrency caps, coordinated in \textbf{asyncio} so interactive commands preempt background scraping.
+  \item Built an \textbf{LLM} pipeline returning structured \textbf{JSON} that \textbf{Python} renders deterministically into \textbf{LaTeX}, with provider fallback, \textbf{SQLite} storage, and a 500+ test \textbf{pytest} suite.
+\end{itemize}
+
+\begin{comment}
+% [graphics]
+\textbf{Algorithm Terrain Visualizer} | \textit{JavaScript, Java, C++} \hfill \href{https://www.ernestchoi.com/terrain/src/terrain.html}{ernestchoi.com/terrain} \\
+\begin{itemize}
+  \item Built a 3D terrain generator in \textbf{JavaScript} on \textbf{WebGLRenderer}, with procedural texture algorithms (Perlin, Gaussian) prototyped in \textbf{C++} and \textbf{Java}.
+  \item Developed a voxel-style tile system with adjustable generation parameters, dynamic lighting and shadows, and a full camera control system.
+\end{itemize}
+\end{comment}
+
+\begin{comment}
+% [oop]
+\textbf{Bookstore App} | \textit{Java, JavaFX} \\
+\begin{itemize}
+  \item Created a bookstore app in \textbf{Java} around OOP design principles, with persistent file-backed record storage.
+  \item Built a responsive \textbf{JavaFX} interface and wired it to the app's backend functions.
+\end{itemize}
+\end{comment}
+
+% ---------- SKILLS ----------
+\section*{Skills}
+\textbf{Languages:} JavaScript/Node.js, Java, Python, C++, C, SQL, HTML, CSS, GLSL, VHDL, Verilog, MATLAB \\
+\textbf{Frameworks/Libraries:} OpenGL, WebRTC, JavaFX, React, TypeScript, Flask, FastAPI, TensorFlow, PyTorch Lightning, scikit-learn, Pandas, NumPy, Playwright, pytest \\
+\textbf{Tools:} Git, PostgreSQL, SQLite, Ubuntu Linux, Docker, Kafka, Tableau, Power BI, Microsoft Suite \\
+\textbf{Platforms:} GitHub, GitLab, Raspberry Pi, Arduino, FPGA \\
+\textbf{Relevant Courses:} Object Oriented Eng Analysis and Design, Data Structures and Algorithms, Operating Systems, Computer Networks, Computer Organization and Architecture, Software Testing and Quality Assurance, Distributed Systems and Cloud Computing, Embedded Systems Design, Digital Systems, Digital Systems Engineering, Microprocessor Systems, Electronic Circuits I, Electronic Circuits II, Electric Networks, Signals and Systems, Control Systems, Discrete Mathematics, Probability and Statistics, Linear Algebra, Differential Equations
+
+% ---------- EDUCATION ----------
+\section*{Education}
+\textbf{Toronto Metropolitan University} -- Bachelor of Engineering in Computer Engineering \hfill Expected 2028
+
+\end{document}

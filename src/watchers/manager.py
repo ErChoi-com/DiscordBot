@@ -81,18 +81,6 @@ def _sync_geonames() -> bool:
 # only the largest fleets approach their bound at all.
 ATS_PLATFORM_TIMEOUT_S = 600
 
-# What the fan-out inside a platform is allowed to WAIT for, as opposed to the
-# hard bound above. It has to be strictly smaller: when the fan-out gives up it
-# cancels everything still queued, but fetches already in flight cannot be
-# cancelled and the pool's context manager waits the longest of them out. That
-# drain is bounded by the per-request timeout and its retries, not by the fleet
-# size, so leaving a couple of request-timeouts of room is what lets a platform
-# return under its own bound instead of being abandoned at it -- still holding
-# a scheduler worker, which is the failure this pair of numbers exists to
-# prevent.
-ATS_PLATFORM_DRAIN_MARGIN_S = 120
-ATS_PLATFORM_FANOUT_BUDGET_S = ATS_PLATFORM_TIMEOUT_S - ATS_PLATFORM_DRAIN_MARGIN_S
-
 # Absolute ceiling on a cycle however narrow the host. The loop scrapes four
 # times a day, so a cycle has six hours of room; this leaves it most of that
 # while still guaranteeing the loop returns to its own scheduling.
@@ -135,18 +123,6 @@ def ats_cycle_timeout(platform_count: int, workers: int) -> int:
     """
     waves = max(1, math.ceil(max(platform_count, 1) / max(workers, 1)))
     return min(waves * ATS_PLATFORM_TIMEOUT_S, ATS_CYCLE_TIMEOUT_CAP_S)
-
-def exception_text(exc: BaseException) -> str:
-    """A never-empty description of *exc*.
-
-    str() on a timeout is the empty string, so every place that logged or
-    recorded one produced a blank: the log read "timed out or errored: " with
-    nothing after the colon, and health recorded an error whose message was
-    falsy. Both readers then had to guess. Rendering goes through here so a
-    new call site cannot reintroduce it by writing the obvious str(exc).
-    """
-    return str(exc) or type(exc).__name__
-
 
 def ats_platform_slots(workers: int, reserved_interactive: int = 0) -> int:
     """How many ATS platforms may hold a scheduler worker at the same time.
@@ -1236,7 +1212,42 @@ class WatcherManager:
             )
 
             def _scrape_one(platform: str) -> list[dict[str, Any]]:
-                return self._scrape_one_platform(platform)
+                try:
+                    result = scrape_ats_platform(
+                        platform=platform,
+                        keywords="",
+                        location="",
+                        results_wanted=0,
+                        # First caller of a parameter that has existed unused
+                        # since it was written. Passing the fleet in the order
+                        # we want it asked is the whole feature; the contents
+                        # are identical to what the default would have loaded.
+                        company_slugs=self._ordered_slugs(platform),
+                    )
+                    new_count = log_jobs(result) if result else 0
+                    fan = self._ats_last_fanout(platform)
+                    if result:
+                        print(
+                            f"[ats-scrape] {platform}: {len(result):,} scraped, "
+                            f"{new_count:,} new to DB, "
+                            f"{fan['completed']:,}/{fan['submitted']:,} companies reached"
+                        )
+                    health_tracker.record_ats_platform_result(
+                        platform, len(result), new_count=new_count,
+                        submitted=fan["submitted"], completed=fan["completed"],
+                    )
+                    return result
+                except Exception as exc:
+                    # Coverage is recorded on the error path too: a cycle that
+                    # raised after reaching 9,000 of 10,000 companies is a
+                    # different failure from one that reached 12.
+                    fan = self._ats_last_fanout(platform)
+                    print(f"[ats-scrape] {platform} error: {exc}")
+                    health_tracker.record_ats_platform_result(
+                        platform, 0, error=str(exc),
+                        submitted=fan["submitted"], completed=fan["completed"],
+                    )
+                    return []
 
             try:
                 async def _scrape_one_bounded(platform: str) -> list[dict[str, Any]]:
@@ -1253,12 +1264,11 @@ class WatcherManager:
                         # cycle failed but not how far it got.
                         fan = self._ats_last_fanout(platform)
                         print(
-                            f"[ats-scrape] {platform} timed out or errored: "
-                            f"{exception_text(exc)} "
+                            f"[ats-scrape] {platform} timed out or errored: {exc} "
                             f"({fan['completed']:,}/{fan['submitted']:,} companies reached)"
                         )
                         health_tracker.record_ats_platform_result(
-                            platform, 0, error=exception_text(exc),
+                            platform, 0, error=str(exc),
                             submitted=fan["submitted"], completed=fan["completed"],
                         )
                         return []
@@ -1310,60 +1320,6 @@ class WatcherManager:
                 )
             except Exception as exc:
                 print(f"[ats-scrape] Scrape cycle error: {exc}")
-
-    def _scrape_one_platform(self, platform: str) -> list[dict[str, Any]]:
-        """Scrape one platform and record what it managed to reach.
-
-        A method rather than a closure in the cycle loop so that the arguments
-        it passes are reachable by a test. They were not, and a mutant that
-        simply dropped max_seconds -- reverting the whole fan-out bound --
-        survived the suite untouched.
-        """
-        from services.jba.merge_data import log_jobs
-
-        try:
-            result = _scrape_ats_platform(
-                platform=platform,
-                keywords="",
-                location="",
-                results_wanted=0,
-                # First caller of a parameter that has existed unused since it
-                # was written. Passing the fleet in the order we want it asked
-                # is the whole feature; the contents are identical to what the
-                # default would have loaded.
-                company_slugs=self._ordered_slugs(platform),
-                # Partial coverage is the design, not a failure: _rotate_tail
-                # resumes the next cycle where this one stopped, so a platform
-                # that reaches 43% a pass still offers its whole fleet a turn.
-                # That only works if the cycle actually stops when it should,
-                # and without this it did not -- the fan-out's own budget ran
-                # to hours while its caller allowed ten minutes.
-                max_seconds=ATS_PLATFORM_FANOUT_BUDGET_S,
-            )
-            new_count = log_jobs(result) if result else 0
-            fan = self._ats_last_fanout(platform)
-            if result:
-                print(
-                    f"[ats-scrape] {platform}: {len(result):,} scraped, "
-                    f"{new_count:,} new to DB, "
-                    f"{fan['completed']:,}/{fan['submitted']:,} companies reached"
-                )
-            self.health.record_ats_platform_result(
-                platform, len(result), new_count=new_count,
-                submitted=fan["submitted"], completed=fan["completed"],
-            )
-            return result
-        except Exception as exc:
-            # Coverage is recorded on the error path too: a cycle that raised
-            # after reaching 9,000 of 10,000 companies is a different failure
-            # from one that reached 12.
-            fan = self._ats_last_fanout(platform)
-            print(f"[ats-scrape] {platform} error: {exception_text(exc)}")
-            self.health.record_ats_platform_result(
-                platform, 0, error=exception_text(exc),
-                submitted=fan["submitted"], completed=fan["completed"],
-            )
-            return []
 
     async def _gather_ats_platforms(
         self,

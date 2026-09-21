@@ -1,0 +1,90 @@
+Candidate profile facts (source of truth for all resume content):
+
+- Name: Ernest Choi
+- Program: Bachelor of Engineering in Computer Engineering (Toronto Metropolitan University, 2023-2028)
+
+== EXPERIENCE ==
+
+[teaching] Engineering Instructor, Obotz Robotics — Markham ON, Sep 2022 – Present
+Notes:
+Ownership: runs his own class sections — lesson delivery through parent progress reporting.
+Adoption: raised robotics problem-completion scores by 35% across his students.
+Impact: coached students to place in the 75th percentile of robotics competitions.
+
+[ml] Machine Learning Intern, Goopter Commerce Solutions — Remote, Sep 2025 – Dec 2025
+Notes:
+Scale: pipeline streamed continuous high-frequency Kafka market data into asynchronous Python services for quantitative trading.
+Reliability: pipeline built for low-latency operation on live financial data streams.
+Adoption: Tableau and Power BI dashboards deployed for company use, surfacing real-time predictive insights.
+
+[electrical] Electrical Team Member, Metropolitan Aerospace Rocket Society (MARS) — Toronto ON, Sep 2024 – Present
+Notes:
+Scope: electrical subteam of a student rocketry design team building a custom STM32-based avionics flight computer.
+Cost: improved power efficiency by 23% through circuit configuration and component selection.
+Reliability: hardware validated with oscilloscopes and logic analyzers against strict performance and safety standards for flight.
+
+[city_markham] Technical Development Intern, City of Markham — Markham ON, Jul 2022 – Aug 2024
+Notes:
+Scope: two-year role spanning documentation, milestone reporting, and change validation for municipal web operations.
+Reliability: documentation of website workflows helped cut website downtime by 41%.
+Cost: milestone tracking and progress reporting reduced coordination delays by 14%.
+Impact: change validation against quality standards reduced reported errors by 20%.
+
+[frontend] Software Development Intern, MCG3D — Remote, Jan 2026 – Mar 2026
+Notes:
+Scope: production web applications delivered within a remote, cross-functional team.
+Ownership: built and integrated complete frontend features against Flask and OpenAI-API backend services.
+Reliability: features deployed and tested in Docker containers, with technical documentation maintained alongside.
+
+[general] Software Developer Intern Constellation Homebuilders
+Notes:
+
+== PROJECTS ==
+
+[embedded] eebot Mobile Robot System (Assembly, C)
+Notes:
+Scope: full firmware stack for the robot — motor control, sensing, and board-level integration on the HCS12.
+Reliability: timer-driven scheduling sustained 50ms sensor sampling intervals while driving motor electronics from regulated voltage rails.
+
+[hardware, fpga] General-Purpose Processor / ALU (VHDL, Quartus II, FPGA)
+Notes:
+Scope: complete register-transfer-level design — registers, finite state machine, 4x16 decoder, and microcode-driven ALU core on an Altera FPGA.
+Reliability: verified through Quartus II simulation, waveform analysis, and static timing checks.
+
+[systems, gpu] Particle Fluid Simulation (C++, OpenGL)
+Notes:
+Ownership: solo project, publicly published on GitHub.
+Cost: trimmed graphics-pipeline memory allocation by 12% for smoother frames and better GPU utilization.
+Scale: real-time particle simulation with GPU-accelerated parallel computation in GLSL shaders.
+
+[fullstack] Web Messaging App (JavaScript, Node.js, SQL)
+Notes:
+Ownership: solo project — built, deployed, and operates the live instance end-to-end on self-managed hardware (ernestchoi.com).
+Reliability: secure credential handling, key generation, and error recovery, self-hosted on a Raspberry Pi running Ubuntu.
+Scale: real-time peer-to-peer messaging, file sharing, and room management over WebRTC.
+
+[backend, ai, distributed] Job-Monitoring & Resume-Generation System (Python, LLM APIs, Playwright, SQLite)
+Notes:
+Ownership: sole designer and developer of the entire system — ATS scrapers, fair scheduler, browser pool, LLM pipeline, Discord service, and test suite.
+Scale: scraped and deduplicated 206,775 job postings (120,989 unique URLs) in a single month, monitoring five ATS providers (Greenhouse, Lever, Ashby, Workday, iCIMS) directly rather than through aggregators.
+Reliability: per-source circuit breakers, fair scheduling with concurrency caps, and adaptive HTTP-to-browser escalation keep one hostile source from degrading the rest; multi-provider LLM fallback (Gemini, Groq, OpenRouter) with staged degradation, backed by a pytest suite of 500+ tests.
+Scope: LLM returns structured JSON decisions and Python deterministically renders the LaTeX — chosen over model-generated markup so the model cannot fabricate or malform content in the compiled PDF.
+Adoption: runs continuously as a Discord service, building tailored resumes and cover letters on demand for multiple users.
+
+[graphics] Algorithm Terrain Visualizer (JavaScript, Java, C++)
+Notes:
+Ownership: solo project, live at ernestchoi.com/terrain.
+Scale: procedural voxel-style terrain with adjustable generation parameters, dynamic lighting and shadows.
+
+[oop] Bookstore App (Java, JavaFX)
+Notes:
+Scope: complete app from persistent file-backed storage through the JavaFX interface.
+
+== SKILL ANCHORS ==
+Languages: JavaScript/Node.js, Java, Python, C++, C, SQL, HTML, CSS, GLSL, VHDL, Verilog, MATLAB
+Frameworks/Libraries: OpenGL, WebRTC, JavaFX, React, TypeScript, Flask, FastAPI, TensorFlow, PyTorch Lightning, scikit-learn, Pandas, NumPy, Playwright, pytest
+Tools/Platforms: Git, PostgreSQL, SQLite, Ubuntu Linux, GitHub, GitLab, Raspberry Pi, Arduino, FPGA, Docker, Kafka, Tableau, Power BI
+From ML Intern: Kafka, FastAPI, async Python, Pandas, NumPy, scikit-learn, TensorFlow, PyTorch Lightning, Tableau, Power BI
+From MCG3D: React, TypeScript, Flask, RESTful APIs, OpenAI APIs, Docker, containerized deployment
+From the job-monitoring system: Playwright, pytest, SQLite, asyncio, LLM APIs
+From MARS: Altium, KiCad, PCB, STM32, oscilloscopes, logic analyzers, power distribution

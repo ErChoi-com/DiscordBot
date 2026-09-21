@@ -1,0 +1,21 @@
+{
+  "rewrite_scope": "full",
+  "limited_rewrite_bullets": 5,
+  "min_visible_bullets": 1,
+  "max_visible_bullets": 30,
+  "max_bold_per_bullet": 3,
+  "max_skill_items_per_line": 8,
+  "skills_generosity": 60,
+  "course_item_bounds": [3, 6],
+  "max_total_bullet_chars": 2650,
+  "adjacent_tool_leeway": true,
+  "specialist_categories": {
+    "electrical": [
+      "electrical", "hardware", "embedded systems", "embedded software",
+      "embedded firmware", "embedded engineer", "embedded linux",
+      "embedded c", "firmware", "circuit", "pcb", "avionics", "fpga",
+      "vhdl", "verilog", "microcontroller", "power electronics",
+      "printed circuit board", "oscilloscope", "rocketry", "aerospace"
+    ]
+  }
+}

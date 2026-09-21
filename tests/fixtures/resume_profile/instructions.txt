@@ -1,0 +1,75 @@
+Voice: lead every bullet with a strong active verb, never "demonstrating",
+"showcasing", "supporting", or "contributing to" as the main verb. No filler
+clauses not grounded in the listing. Re-read each rewritten sentence for
+grammar (article agreement, subject-verb agreement) after inserting a keyword.
+
+Cohesion — read every bullet back as a sentence before returning it: one idea
+per bullet, each tool tied to the specific thing it did, never a bare chain of
+tool names. Two 'using'/'with' clauses stacked back-to-back ("pipeline using
+Kafka using Python"), a repeated word doing two jobs ("to serve as X, serving
+as Y"), or a metric hanging off work that couldn't have produced it all read
+machine-generated — restructure the sentence around its strongest fact
+instead. Vary shape and opening verb across neighbouring bullets.
+
+Seniority: entry-level/intern verbs are "Built", "Implemented", "Developed",
+"Designed"; mid-level (2-4y) allows "Engineered", "Architected", "Optimized",
+"Led". One hard line: never claim to have led/managed people or owned a
+project end-to-end when the background says assisted or supported — anything
+an interviewer could expose with one follow-up question is off-limits,
+everything short of that is fair game.
+
+Keyword coverage — top priority: for every skill-anchor tool the listing asks
+for, get its exact-cased name into at least one visible bullet, Experience
+especially, even if that bullet never named it before. Before finishing,
+re-scan the listing and place any anchor still missing from every bullet.
+This wins over restraint or "don't over-stuff" — add the tool. It never
+overrides the Hard limits below.
+
+Fold each addition into an existing clause about real work; never invent a
+clause whose only job is to house the keyword. If no bullet has a natural
+place for it, leave it for the Skills line instead of forcing it — a sentence
+that doesn't make sense is worse than one missing keyword.
+
+Specificity: in or near the candidate's domain, keep concrete tool names
+rather than downgrading to a generic descriptor ("a simulator", "reporting
+tools") — downgrade only for far-out-of-domain listings where the name means
+nothing to the reader. Never add implementation detail the background doesn't
+state.
+
+Ranking: nothing is pre-bucketed — rank every entry against THIS listing and
+let genuine overlap win, whatever category it comes from (a DevOps listing
+should pull the frontend internship's Docker/deployment bullets up, a
+data-tooling listing the ML pipeline work). For non-engineering listings (HR,
+trades, administration), rank the broadly-presentable entries (general
+coordination, web/ML work, teaching) above specialized hardware/graphics
+projects — never lead with FPGA or firmware on a stray word like
+"architecture" or "design".
+
+Out-of-domain listings (aerospace, biomedical, utilities, finance, etc.): fit
+as hard as truth allows by reframing function through the listing's own soft
+vocabulary (testing -> verification, documentation -> compliance reporting),
+never by claiming named domain systems, standards, or equipment. For
+Experience, this reframes HOW work is described, never WHAT it was for or
+who it served — an employer's real domain is checkable, and a transplanted
+setting reads as fabrication to anyone who looks it up. For Projects, there is
+no employer to contradict the story, so the bar is plausibility rather than
+setting-fidelity: a project's stated purpose may flex to match the listing as
+long as a reasonable person would believe it and you could explain it in an
+interview — this is where keyword coverage can run hardest.
+
+Emphasis: bold only technologies, tools, and languages, never verbs, metrics,
+or generic phrases.
+
+Adjacent tools: a tool not in the skill anchors may still be named when it is
+closely adjacent to work an entry really did — same ecosystem, same kind of
+integration — and the listing asks for it (MCG3D's OpenAI-API harness work
+supports naming LangChain or comparable AI-integration tooling). The claim
+must survive an interview follow-up question; when in doubt, leave it out.
+
+Hard limits (violations are rejected by validation):
+- Never invent employers, titles, dates, certifications, or metrics.
+- Never claim a tool, language, or framework outside the skill anchors unless
+  it clearly qualifies under Adjacent tools above — no fixed list of banned
+  names, judge each one on its own against what the candidate really has.
+- Never claim domain expertise outside software — reframe through
+  transferable skills instead.

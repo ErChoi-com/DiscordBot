@@ -526,17 +526,6 @@ _geo_admin1_name: dict = {}
 _iso_country_codes: set[str] = set()
 _ca_us_subdiv_codes: dict[str, str] = {}
 _geo_loaded = False
-# pycountry's tables come from an installed package and cannot fail the way
-# geo.db can, so they are tracked separately -- otherwise a retry of the db
-# load would walk pycountry's ~5k subdivisions again for nothing.
-_countries_loaded = False
-_geo_failures = 0
-_geo_next_retry = 0.0
-# Long enough that a genuinely missing geo.db costs one cheap failed connect
-# every couple of minutes rather than one per lookup, short enough that a
-# process which started during a momentary lock is matching on cities again
-# within a scrape cycle instead of never.
-GEO_RETRY_INTERVAL_S = 120.0
 # _ensure_geo_loaded is first reached from inside the per-slug thread pools, so
 # without this every worker on a cold process starts its own 632k-row load, and
 # because _geo_loaded only flips at the end, threads could read a half-populated
@@ -549,17 +538,12 @@ def _ensure_geo_loaded() -> None:
     with _geo_lock:
         if _geo_loaded:
             return
-        global _geo_next_retry
-        now = time.monotonic()
-        if _geo_failures and now < _geo_next_retry:
-            return
-        _geo_next_retry = now + GEO_RETRY_INTERVAL_S
         _load_geo_into_globals()
 
 
 def _load_geo_into_globals() -> None:
-    global _geo_cities, _geo_admin1_name, _geo_loaded, _countries_loaded
-    global _iso_country_codes, _ca_us_subdiv_codes, _geo_failures
+    global _geo_cities, _geo_admin1_name, _geo_loaded
+    global _iso_country_codes, _ca_us_subdiv_codes
     import pycountry
 
     try:
@@ -570,38 +554,19 @@ def _load_geo_into_globals() -> None:
         # error surfaces as "no such table: geo_cities" on first lookup and
         # would otherwise propagate out of every ATS location filter.
         # Degrade to country-only matching instead of taking the scrape down.
-        #
-        # Degrade, but do NOT latch. _geo_loaded used to be set here too, so a
-        # single failure disabled city matching for the life of the process --
-        # and the cheapest way to get one is a momentary lock at startup, which
-        # is transient and was being treated as permanent. Measured: the bot
-        # lost city matching for a whole run to a five-second contention that
-        # had cleared minutes later.
+        print(
+            f"[ats] geo.db unavailable ({exc}). City/region matching disabled; "
+            "run: python scripts/build_geo_db.py"
+        )
         _geo_cities, _geo_admin1_name = {}, {}
-        if not _geo_failures:
-            print(
-                f"[ats] geo.db unavailable ({exc}). City/region matching off for "
-                f"now; retrying every {int(GEO_RETRY_INTERVAL_S)}s. If this "
-                "persists, run: python scripts/build_geo_db.py"
-            )
-        _geo_failures += 1
-    else:
-        if _geo_failures:
-            print(
-                f"[ats] geo.db recovered after {_geo_failures} failed attempt(s); "
-                f"city/region matching is back on ({len(_geo_cities):,} cities)"
-            )
-        _geo_failures = 0
-        _geo_loaded = True
 
-    if not _countries_loaded:
-        _iso_country_codes.update(c.alpha_2 for c in pycountry.countries)
-        for _sub in pycountry.subdivisions:
-            if _sub.country_code in ("CA", "US"):
-                _short = _sub.code.split("-", 1)[1]
-                if _short not in _ca_us_subdiv_codes:
-                    _ca_us_subdiv_codes[_short] = _sub.country_code
-        _countries_loaded = True
+    _iso_country_codes.update(c.alpha_2 for c in pycountry.countries)
+    for _sub in pycountry.subdivisions:
+        if _sub.country_code in ("CA", "US"):
+            _short = _sub.code.split("-", 1)[1]
+            if _short not in _ca_us_subdiv_codes:
+                _ca_us_subdiv_codes[_short] = _sub.country_code
+    _geo_loaded = True
 
 _country_lookup_cache: dict[str, str | None] = {}
 
@@ -3019,16 +2984,7 @@ def scrape_ats_platform(
     results_wanted: int = 20,
     company_slugs: list[str] | None = None,
     levels: list[str] | tuple[str, ...] | None = None,
-    max_seconds: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Scrape one ATS platform's fleet.
-
-    *max_seconds* caps how long the fan-out will WAIT for its fetches. Without
-    it the wait is _fanout_budget(), which is derived from the size of the
-    fleet -- and the fleet grows every time the harvest runs. Measured against
-    the live lists: 2.2h for lever, 5.9h for bamboohr, 20.5h for workable,
-    against a caller that allows 600s. See the fan-out below.
-    """
     scraper = _SCRAPERS.get(platform)
     if not scraper:
         return []
@@ -3060,29 +3016,9 @@ def scrape_ats_platform(
             pool.submit(scraper, slug, keywords, location, max_per_company): slug
             for slug in company_slugs
         }
-        # _fanout_budget answers "how long would asking everyone take", which
-        # is the right question only if we are allowed that long. We are not:
-        # the caller bounds a platform at ATS_PLATFORM_TIMEOUT_S, and the two
-        # numbers had no relationship at all. Measured against the live fleet
-        # lists, the fan-out budget ran from 13x that bound (lever, 2.2h) to
-        # 123x (workable, 20.5h) -- and the observed thread lifetimes matched
-        # the budgets, not the bound: breezy ran 18,020s against a budget of
-        # 20,610s.
-        #
-        # The outer bound could not correct it, because asyncio.wait_for
-        # cancels the await and not the thread: the awaiting side returned []
-        # at 600s while the thread kept its scheduler worker for hours. That is
-        # what starved the job watchers, and it is also why "it worked earlier
-        # today" -- the budget grows with the fleet, so every harvest makes it
-        # worse.
-        #
-        # Capped after capacity.timeout, not before: that call STRETCHES a
-        # budget for slower hardware, so capping first would let the stretch
-        # walk straight back past the cap.
-        budget = capacity.timeout(_fanout_budget(len(company_slugs), workers))
-        if max_seconds is not None:
-            budget = min(budget, max(1.0, float(max_seconds)))
-        per_slug = _collect_results(futures, budget)
+        per_slug = _collect_results(
+            futures, capacity.timeout(_fanout_budget(len(company_slugs), workers))
+        )
         # How much of the fleet this cycle actually reached. _collect_results
         # only printed the cancelled count, and reasoning about coverage from
         # that alone is how "43-100% of companies reached" was once misread as
